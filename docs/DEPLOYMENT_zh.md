@@ -88,11 +88,33 @@ autoapply --help
 uv run autoapply --help
 ```
 
-## 4. 数据库准备
+## 4. 数据库与缓存准备
 
-先创建 PostgreSQL 用户和数据库。
+需要 PostgreSQL 16+（带 `pgvector` 扩展）以及 Redis 7+。下面两种方式
+任选其一。
 
-示例 SQL：
+### 4.A Docker Compose（新装机器推荐）
+
+仓库根目录的 `docker-compose.yml` 会同时拉起这两个服务：
+
+```bash
+# 先在 .env 里设置密码，compose 没读到这一项会拒绝启动
+echo "AUTOAPPLY_DB_PASSWORD=change-me" >> .env
+docker compose up -d
+docker compose ps   # 两个服务都应处于 healthy
+```
+
+Postgres 用的是 `pgvector/pgvector:pg16` 镜像，`vector` 扩展已经预装，
+首次执行迁移时的 `CREATE EXTENSION` 不需要额外操作。数据保存在
+`postgres-data` 与 `redis-data` 命名卷中；备份 Postgres 用 `pg_dump`，
+不要直接拷贝原始文件。
+
+Compose 只跑数据依赖。Python 应用（Web、worker、beat）依然在宿主机
+原生运行 —— Playwright 和 docx→PDF 工具链原生跑更稳。
+
+### 4.B 原生安装（机器上已有 PostgreSQL / Redis）
+
+手动创建数据库和用户：
 
 ```sql
 CREATE USER autoapply WITH PASSWORD 'change-me';
@@ -100,6 +122,8 @@ CREATE DATABASE autoapply OWNER autoapply;
 \c autoapply
 CREATE EXTENSION IF NOT EXISTS vector;
 ```
+
+通过发行版包管理器安装 Redis 7+，确认它监听 `localhost:6379`。
 
 ## 5. 环境变量配置
 
@@ -516,9 +540,50 @@ sudo -u autoapply /opt/autoapply/.local/bin/uv run autoapply web --host 127.0.0.
 
 先确认服务器本机上 `http://127.0.0.1:8000` 能访问，再继续配置 `systemd` 和 Nginx。
 
-## 15. systemd 服务配置
+## 15. 进程托管
 
-创建 `/etc/systemd/system/autoapply-web.service`：
+生产环境下 AutoApply 有三个常驻进程：
+
+| 进程 | 作用 | 命令 |
+|---|---|---|
+| `autoapply-web` | FastAPI + Vue 控制台 | `autoapply web --no-open --host 127.0.0.1` |
+| `autoapply-worker` | Celery worker，覆盖四个队列 | `autoapply worker` |
+| `autoapply-beat` | Celery Beat（用 redbeat，单一定时驱动） | `autoapply beat` |
+
+整个部署里只需要 **一个** Beat 实例；redbeat 会做 leader 选举，
+不慎多开也不会双触发。
+
+下面两种方案任选其一。
+
+### 15.A supervisord（推荐 —— 三个进程一起托管）
+
+仓库根目录已经提供 `supervisord.conf`，覆盖三个进程的自动重启、
+日志轮转和分组操作（`supervisorctl restart autoapply:`）。
+
+```bash
+sudo apt install -y supervisor
+sudo cp /opt/autoapply/supervisord.conf /etc/supervisor/conf.d/autoapply.conf
+sudo supervisorctl reread
+sudo supervisorctl update
+sudo supervisorctl status
+```
+
+如果 `uv` 不在 `/opt/autoapply/.local/bin/uv`，把 `supervisord.conf`
+里的 `command=` 和 `environment=PATH=` 改一下就行。
+
+常用操作：
+
+```bash
+sudo supervisorctl tail -f autoapply-web stderr
+sudo supervisorctl restart autoapply:           # 重启三个进程
+sudo supervisorctl restart autoapply-worker     # 只重启 worker
+```
+
+### 15.B systemd（只托管 Web）
+
+如果只想用 systemd 托管 Web，worker 和 beat 自己手动跑或交给 cron，
+那么一个单独的 systemd unit 是最轻的方案。创建
+`/etc/systemd/system/autoapply-web.service`：
 
 ```ini
 [Unit]

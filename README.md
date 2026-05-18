@@ -35,7 +35,14 @@ For implementation-level history, see [Phase History](docs/PHASE_HISTORY.md) and
 
 ## Quick Start
 
+Bring up Postgres (with pgvector) and Redis via the bundled Compose
+file, then launch the app on the host:
+
 ```powershell
+# 1. Set AUTOAPPLY_DB_PASSWORD in .env (any non-empty value)
+docker compose up -d
+
+# 2. Install Python deps + Chromium and run migrations
 uv sync
 uv run playwright install chromium
 uv run alembic upgrade head
@@ -44,6 +51,13 @@ uv run autoapply web
 ```
 
 Open the web console at `http://127.0.0.1:8000`.
+
+The Compose file only runs the **data dependencies** (Postgres + Redis).
+The Python app stays on the host — Playwright and the docx→PDF
+toolchain run more reliably native than in a container. For a
+single-server production install that runs the web GUI, Celery
+worker, and Beat under one supervisor, see `supervisord.conf` at the
+repo root and section 15 of [the deployment guide](docs/DEPLOYMENT.md).
 
 If you modify frontend files:
 
