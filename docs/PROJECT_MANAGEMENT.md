@@ -8,7 +8,7 @@ AutoApply is complete through **Phase 17.8: Material Strategy & Document Library
 
 The product currently supports job discovery, job-index freshness, fit scoring and explanations, materials generation, document-library curation, automation plans, review queues, gated submission, application tracking, provider management, and background task execution.
 
-The next planned hardening area is **Phase 18: Multi-Tenancy & Auth Hardening**.
+The next planned hardening area is **Phase 18: Worker Activation, Reliability, Parallelism, Cleanup** (re-ordered 2026-05-19 — see below). Multi-tenancy & auth hardening, originally Phase 18, is now Phase 19 and is deferred until the personal-version product is feature-complete.
 
 ## Verification Baseline
 

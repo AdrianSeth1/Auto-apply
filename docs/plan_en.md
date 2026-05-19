@@ -722,45 +722,20 @@ back to regenerate with a warning), LaTeX source patching (same).
 Picked up by Phase 18+ when the materials generation worker body
 actually consumes `MaterialsGeneratePayload`.
 
-### Phase 18: Multi-Tenancy & Auth Hardening (~2.5 weeks)
-Activates the commercial-readiness work seeded across 12-17. SaaS
-business layer (billing, sign-up flow, marketing site) is NOT in
-scope — this phase only makes the existing system safe to host for
-multiple isolated users.
+### Phase 18: Worker Activation, Reliability, Parallelism, Cleanup (~2.5–3 weeks)
 
-**Honest scope**: Phase 13.9 already lands the schema-level `tenant_id`
-column on every table, so the "add column + backfill" portion is genuinely
-"activate existing work." But the following sub-phases are **net-new
-construction**, not retrofit: 18.2 auth middleware (`src/web/` has no
-auth layer today), 18.4 Redis namespace refactor (keys today are
-`{version}:{namespace}:{key}` with no tenant prefix — every wrapper
-needs to change), and 18.7 credential store (`src/providers/store.py`
-is a single global JSON file today; needs per-tenant directory split +
-keyring entry renaming). 18.1 / 18.3 / 18.5 / 18.6 are the only true
-"activations."
-
-- **18.1** `tenants` + `users` tables; bind the `tenant_id='default'`
-  rows that 13.9 left behind to real tenants.
-- **18.2** **Build from scratch** the FastAPI auth middleware —
-  session/token parsing, `current_tenant_id` injected into a
-  `ContextVar`; ORM sessions auto-filter via SQLAlchemy events; Celery
-  task headers carry tenant context (14.3 reserves the hook).
-- **18.3** Postgres Row-Level Security policies — DB-level backstop
-  that catches any ORM bypass.
-- **18.4** **Refactor** Redis key naming — every namespace now prefixed
-  `tenant:{id}:`; `src/cache/base.py` key construction requires an
-  explicit tenant context (raises rather than falling back to default).
-- **18.5** Per-tenant quotas (LLM tokens, scrape rate, storage).
-  Exceeding returns 429.
-- **18.6** Audit log table — `audit_events` (submission, settings
-  change, credential operation, manual schedule trigger). Append-only.
-- **18.7** **Refactor** credential store — `src/providers/store.py`
-  moves from one global JSON file to
-  `data/tenants/{id}/credentials/`; keyring entries get tenant prefixes;
-  migrate existing `data/providers/credentials.json` into the `default`
-  tenant.
-
-### Phase 19: Worker Activation, Reliability, Parallelism, Cleanup (~2.5–3 weeks)
+> **Re-ordering (2026-05-19)**: this used to be Phase 19, after
+> Multi-Tenancy. We moved it forward because:
+> (a) the personal-version product is the active priority; multi-
+>     tenancy/commercialization is paused until the single-user
+>     product is rock-solid;
+> (b) garbage is accumulating in `data/output/` today and the cleanup
+>     debt is hurting day-to-day use right now;
+> (c) the worker activation work in 18.1 is a prerequisite for
+>     reliability / parallelism / scalability across all subsequent
+>     phases, multi-tenancy included.
+> Multi-tenancy & auth hardening is now Phase 19, deferred until the
+> personal version is feature-complete.
 
 A **fix-focused phase**, not a feature phase. Phase 14 shipped the
 Celery scaffold (queues, base task, audit table, reliability config,
@@ -796,19 +771,19 @@ the late-Phase-17 / Phase-18-prep sweep:
    no retention policy; `delete_document` is the only path that
    removes a file from disk.
 
-**Honest scope**: 19.1 is net-new code (real task bodies, async API
-contract). 19.2 is "exercise + add DLQ + manual-retry UI" on top of
-infrastructure that already exists. 19.3 is mostly `asyncio.gather`
-+ rate-limit threading. 19.4 is net-new (no cleanup logic exists
+**Honest scope**: 18.1 is net-new code (real task bodies, async API
+contract). 18.2 is "exercise + add DLQ + manual-retry UI" on top of
+infrastructure that already exists. 18.3 is mostly `asyncio.gather`
++ rate-limit threading. 18.4 is net-new (no cleanup logic exists
 today outside `delete_document` + the profile-import `_upload_*`
 tmpfile unlink). The four are bundled into one phase because they
 share a single audience (the worker + operator), but they're
-internally sequential: 19.4 (cleanup) is independent and ships
-first to stop the bleed; 19.1 (activation) unblocks 19.2 and 19.3.
+internally sequential: 18.4 (cleanup) is independent and ships
+first to stop the bleed; 18.1 (activation) unblocks 18.2 and 18.3.
 
 Sub-phases:
 
-- **19.1 Worker activation** — fill the stub task bodies with the
+- **18.1 Worker activation** — fill the stub task bodies with the
   real call chain. Concretely:
   - `materials.generate` invokes `generate_material_for_job` end-to-end
     using the `MaterialsGeneratePayload` already shaped in Phase 17.8.
@@ -832,7 +807,7 @@ Sub-phases:
     `apply_async` against an in-process Celery worker (`task_always_
     eager=True` is **not** used — we need the real broker contract).
 
-- **19.2 Resilience exercise + DLQ + manual retry** —
+- **18.2 Resilience exercise + DLQ + manual retry** —
   - Add a `tests/test_worker_resilience.py` suite that kills a
     worker mid-task (`os.kill(pid, SIGTERM)` on a subprocess Celery
     worker) and asserts the task is requeued exactly once with the
@@ -849,7 +824,7 @@ Sub-phases:
   - SPA `/tasks` view grows a "Stuck / failed" tab that lists DLQ
     entries with payload preview + retry / discard actions.
 
-- **19.3 Strategic parallelism** —
+- **18.3 Strategic parallelism** —
   - `rewrite_bullets` rewritten as `asyncio.gather` of
     `_rewrite_single_bullet`, capped at 5 concurrent LLM calls
     (provider-rate-limit dependent). Expected: ~30s → ~6s for a
@@ -870,7 +845,7 @@ Sub-phases:
     (`parallelism.bullet_rewrites.max_concurrent=5`) so an operator
     can dial it down if a provider rate-limits.
 
-- **19.4 Cleanup policy + scheduled garbage collection** —
+- **18.4 Cleanup policy + scheduled garbage collection** —
   - `docs/DECISIONS.md` gets a new entry (likely D026):
     "data/output/ is a cache, not a vault" — explicit retention
     rules per artifact category. Reviewed before writing code.
@@ -902,41 +877,94 @@ Sub-phases:
     `cache_eviction` would delete; `--apply` actually deletes. Lets
     operators audit before the scheduled task runs.
 
-Sequencing rationale: 19.4 ships first (the orphans are accumulating
-today, independent of MQ status). 19.1 next (unblocks 19.2, 19.3 and
-fixes the lost-work-on-tab-close problem). 19.2 and 19.3 then ship
+Sequencing rationale: 18.4 ships first (the orphans are accumulating
+today, independent of MQ status). 18.1 next (unblocks 18.2, 18.3 and
+fixes the lost-work-on-tab-close problem). 18.2 and 18.3 then ship
 in parallel because they touch disjoint files.
 
 Open questions deferred to Phase 20+:
 - Persistent task progress UI (real-time SSE streaming, not poll-based).
-  Phase 19 only does poll.
+  Phase 18 only does poll.
 - Cross-tenant DLQ surfacing for the future ops dashboard.
 - Anti-bot session pooling — would let LinkedIn detail-page parallelism
   become safe by routing through N independent sessions. Out of scope
   here.
 
+### Phase 19: Multi-Tenancy & Auth Hardening (~2.5 weeks, deferred)
+
+> **Re-ordering (2026-05-19)**: this used to be Phase 18, the next
+> milestone after Phase 17.8. We pushed it after the worker /
+> cleanup phase because the personal-version product is the active
+> focus and multi-tenancy/commercialization is paused until the
+> single-user version is solid. The schema-level `tenant_id` ground-
+> work from Phase 13.9 remains valid; activating it can wait.
+
+Activates the commercial-readiness work seeded across 12-17. SaaS
+business layer (billing, sign-up flow, marketing site) is NOT in
+scope — this phase only makes the existing system safe to host for
+multiple isolated users.
+
+**Honest scope**: Phase 13.9 already lands the schema-level `tenant_id`
+column on every table, so the "add column + backfill" portion is genuinely
+"activate existing work." But the following sub-phases are **net-new
+construction**, not retrofit: 19.2 auth middleware (`src/web/` has no
+auth layer today), 19.4 Redis namespace refactor (keys today are
+`{version}:{namespace}:{key}` with no tenant prefix — every wrapper
+needs to change), and 19.7 credential store (`src/providers/store.py`
+is a single global JSON file today; needs per-tenant directory split +
+keyring entry renaming). 19.1 / 19.3 / 19.5 / 19.6 are the only true
+"activations."
+
+- **19.1** `tenants` + `users` tables; bind the `tenant_id='default'`
+  rows that 13.9 left behind to real tenants.
+- **19.2** **Build from scratch** the FastAPI auth middleware —
+  session/token parsing, `current_tenant_id` injected into a
+  `ContextVar`; ORM sessions auto-filter via SQLAlchemy events; Celery
+  task headers carry tenant context (14.3 reserves the hook).
+- **19.3** Postgres Row-Level Security policies — DB-level backstop
+  that catches any ORM bypass.
+- **19.4** **Refactor** Redis key naming — every namespace now prefixed
+  `tenant:{id}:`; `src/cache/base.py` key construction requires an
+  explicit tenant context (raises rather than falling back to default).
+- **19.5** Per-tenant quotas (LLM tokens, scrape rate, storage).
+  Exceeding returns 429.
+- **19.6** Audit log table — `audit_events` (submission, settings
+  change, credential operation, manual schedule trigger). Append-only.
+- **19.7** **Refactor** credential store — `src/providers/store.py`
+  moves from one global JSON file to
+  `data/tenants/{id}/credentials/`; keyring entries get tenant prefixes;
+  migrate existing `data/providers/credentials.json` into the `default`
+  tenant.
+
 ### Timeline summary
 
-| Phase | Scope | Est. | Cumulative |
-|-------|-------|------|------------|
-| 11 | Reliability & Cleanup | 1w | 1w (done) |
-| 12 | Cache Infrastructure (Redis) | 1.5w | 2.5w (done) |
-| 13 | Job Index & Freshness Engine | 2w | 4.5w (13.1-13.8 done) |
-| 13.9 | tenant_id retrofit migration | 0.3w | 4.8w |
-| 14 | Task Queue + Scheduled Work (Celery) | 2.5w | 7.3w |
-| 15 | Resume & Cover Letter Generation v2 | 3w | 10.3w |
-| 16 | Filter Agent + Explainability | 1.5w | 11.8w |
-| 17 | Plan Run Loop + Review Queue | 2w | 13.8w |
-| 18 | Multi-Tenancy & Auth Hardening | 2.5w | 16.3w |
-| 19 | Worker Activation, Reliability, Parallelism, Cleanup | 2.5–3w | 18.8–19.3w |
+Status as of 2026-05-19: Phases 1-17.8 are shipped (`main`). Phase 18
+is the next milestone after the worker-system audit re-prioritised
+the roadmap.
 
-~3.5-4 months to v1.0 commercial-ready core (no SaaS business layer).
-Phase 14 grows 0.5w over v3 to absorb the HITL gate backend migration;
-Phase 18 grows 0.5w to honestly reflect that auth middleware / Redis
-namespace / credential store are net-new builds. Phase 19 was scoped
-in late-Phase-17/Phase-18-prep after a worker-system audit found the
-task bodies were stubs, no cleanup policy existed, and parallelism
-opportunities were unexplored.
+| Phase | Scope | Est. | Status |
+|-------|-------|------|------------|
+| 11 | Reliability & Cleanup | 1w | Done |
+| 12 | Cache Infrastructure (Redis) | 1.5w | Done |
+| 13 | Job Index & Freshness Engine | 2w | Done |
+| 13.9 | tenant_id retrofit migration | 0.3w | Done |
+| 14 | Task Queue + Scheduled Work (Celery) | 2.5w | Done (bodies stubbed — activated in 18.1) |
+| 15 | Resume & Cover Letter Generation v2 | 3w | Done |
+| 16 | Filter Agent + Explainability | 1.5w | Done |
+| 17 | Plan Run Loop + Review Queue | 2w | Done |
+| 17.8 | Material Strategy & Document Library | 1w | Done |
+| **18** | **Worker Activation, Reliability, Parallelism, Cleanup** | **2.5–3w** | **Next** |
+| 19 | Multi-Tenancy & Auth Hardening | 2.5w | Deferred (post personal-version maturity) |
+
+The personal-version product (single user, local-first, no auth) is
+feature-complete through Phase 17.8. Phase 18 hardens it (real
+workers, retention, parallelism); Phase 19 then activates the
+multi-tenancy plumbing that Phases 12-17 left dormant. Phase 18 was
+scoped after a Phase-18-prep audit found the task bodies were stubs,
+no cleanup policy existed, and parallelism opportunities were
+unexplored. Phase 19 was originally the next milestone (Multi-Tenancy
+& Auth) and grew 0.5w over v3 to honestly reflect that auth
+middleware / Redis namespace / credential store are net-new builds.
 
 ## 9. Cross-cutting Quality Bars
 

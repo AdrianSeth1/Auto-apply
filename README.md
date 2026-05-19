@@ -23,7 +23,7 @@ AutoApply is designed for users who want automation without losing control over 
 
 Core product development is complete through **Phase 17.8: Material Strategy & Document Library**.
 
-The current application includes the Job Index, task queue, plan-run automation, review queue, document library, material strategy defaults, provider management, LinkedIn session management, and the modern Vue web console. The next planned product hardening area is **Phase 18: Multi-Tenancy & Auth Hardening**.
+The current application includes the Job Index, task queue, plan-run automation, review queue, document library, material strategy defaults, provider management, LinkedIn session management, and the modern Vue web console. The next planned product hardening area is **Phase 18: Worker Activation, Reliability, Parallelism, Cleanup** (re-ordered 2026-05-19). Multi-tenancy & auth hardening, originally Phase 18, has been deferred to Phase 19 until the personal-version product is feature-complete.
 
 Latest local verification in this workspace:
 

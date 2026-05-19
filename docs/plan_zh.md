@@ -580,36 +580,15 @@ Phase 12（缓存）+ Phase 9 / 15（agent）串成 "睡一觉，醒来看 revie
 - **17.6** 早间 digest（08:00）。
 - **17.7** `autoapply pause-plan-runs` kill switch。
 
-### Phase 18: 多租户 & Auth 加固（~2.5 周）
-激活 Phase 12-17 散布的商业化就绪工作。SaaS 业务层（计费、注册流、营销页）
-**不在范围内** —— 本阶段只让现有系统能安全托管多个隔离用户。
+### Phase 18: Worker 激活 / 可靠性 / 并行 / 垃圾清理（~2.5–3 周）
 
-**诚实的范围说明**：13.9 已经把 schema 层的 `tenant_id` 列补齐了，所以
-"加列 + backfill" 的部分确实不是重写。但下面这几块**实质是新建**，不是
-"激活已有工作"：18.2 auth middleware（`src/web/` 目前完全没有 auth 层）、
-18.4 Redis namespace 重构（现在 key 是 `{version}:{namespace}:{key}`，没有
-tenant 前缀，需要全局改 wrapper）、18.7 凭据存储（`src/providers/store.py`
-目前是单文件全局 JSON，需要按租户切目录 + keyring entry 重命名）。
-真正"激活"的只有 18.1 / 18.3 / 18.5 / 18.6。
-
-- **18.1** `tenants` + `users` 表；把 13.9 留下的 `tenant_id='default'` 行接到
-  真实租户上。
-- **18.2** **从零做** FastAPI auth middleware —— session/token 解析、
-  `current_tenant_id` 注入到 `ContextVar`；ORM session 通过 SQLAlchemy event 自动
-  在 query 上拼 `tenant_id = :current_tenant`；Celery task headers 自动带租户上
-  下文（14.3 已经预留接口）。
-- **18.3** Postgres Row-Level Security policy —— DB 层兜底，防 ORM 漏过滤。
-- **18.4** **重构** Redis key 命名 —— 所有 namespace 前面加 `tenant:{id}:` 前缀；
-  `src/cache/base.py` 的 key 构造改为强制注入租户上下文（无上下文则抛错而不是
-  fall back 到 default）。
-- **18.5** 按租户的配额（LLM token、scrape 速率、存储）。超限返回 429。
-- **18.6** Audit log 表 —— `audit_events`（提交、设置变更、凭据操作、手动调度
-  触发）。append-only。
-- **18.7** **重构** 凭据存储 —— `src/providers/store.py` 从单文件全局 JSON 切到
-  `data/tenants/{id}/credentials/`，keyring entry 命名加租户前缀；migrate 现有
-  `data/providers/credentials.json` 到 `default` 租户。
-
-### Phase 19: Worker 激活 / 可靠性 / 并行 / 垃圾清理（~2.5–3 周）
+> **重新排序（2026-05-19）**：这一阶段原本是 Phase 19，排在多租户之后。我们
+> 把它提到前面了，因为：
+> (a) 个人版产品是当前主线；多租户/商业化要等到单用户版本足够稳定再说；
+> (b) `data/output/` 的孤儿文件正在累积，清理债现在就在影响日常使用；
+> (c) 18.1 的 worker 激活是后续所有 phase（包括多租户）的可靠性/并行/可扩展
+>     性前提。
+> 多租户 & Auth 加固现在是 Phase 19，等个人版功能/质量收尾后再做。
 
 一个**修复型 phase**，不是 feature phase。Phase 14 落地了 Celery 骨架（队列、
 基类、审计表、可靠性配置、Beat 调度）；Phase 17 在它上面铺了 per-plan 策略 +
@@ -635,17 +614,17 @@ review loop；项目 memory 在 2026 年 5 月中旬如实总结了一句话："
    一直累积；`TaskRecord` 没有 retention；`delete_document` 是唯一会从磁盘删
    文件的路径。
 
-**诚实的范围说明**：19.1 是**新建代码**（真正的 task body、异步 API contract）。
-19.2 是在已存在的基础设施上"演练 + 加 DLQ + 手动重试 UI"。19.3 主要是
-`asyncio.gather` + rate-limit threading。19.4 是新建（今天除了 `delete_document`
+**诚实的范围说明**：18.1 是**新建代码**（真正的 task body、异步 API contract）。
+18.2 是在已存在的基础设施上"演练 + 加 DLQ + 手动重试 UI"。18.3 主要是
+`asyncio.gather` + rate-limit threading。18.4 是新建（今天除了 `delete_document`
 和 profile 导入的 `_upload_*` tmpfile unlink，再没有任何 cleanup 逻辑）。把这
 四块绑在同一个 phase 里是因为它们面向同一个受众（worker + 操作者），但内部是
-有顺序依赖的：19.4（cleanup）独立、先发，止住当前的失血；19.1（激活）解锁
-19.2 和 19.3。
+有顺序依赖的：18.4（cleanup）独立、先发，止住当前的失血；18.1（激活）解锁
+18.2 和 18.3。
 
 子阶段：
 
-- **19.1 Worker 激活** —— 把 stub task body 填成真调用链。具体：
+- **18.1 Worker 激活** —— 把 stub task body 填成真调用链。具体：
   - `materials.generate` 端到端调 `generate_material_for_job`，用 Phase 17.8 已
     定型的 `MaterialsGeneratePayload`。生成完用 `regenerate_application_material`
     现在那条路径把 artifact 路径写回 `Application` 行，审计 `state_history` 事件
@@ -663,7 +642,7 @@ review loop；项目 memory 在 2026 年 5 月中旬如实总结了一句话："
     `materials.generate`（**不**用 `task_always_eager=True` —— 我们要的是真
     broker contract）。
 
-- **19.2 可靠性演练 + DLQ + 手动重试** ——
+- **18.2 可靠性演练 + DLQ + 手动重试** ——
   - 加 `tests/test_worker_resilience.py` 测试套：在任务半路 `os.kill(pid,
     SIGTERM)` 一个 Celery worker 子进程，断言任务以同样的 `idempotency_key`
     被恰好重入队一次。Poison-message 处理同样测一遍。
@@ -676,7 +655,7 @@ review loop；项目 memory 在 2026 年 5 月中旬如实总结了一句话："
   - SPA `/tasks` 加一个"卡住 / 失败"标签页，列 DLQ 条目，带 payload 预览 +
     重试 / 丢弃操作。
 
-- **19.3 战略性并行** ——
+- **18.3 战略性并行** ——
   - `rewrite_bullets` 改成 `asyncio.gather` 调 `_rewrite_single_bullet`，并发
     上限 5（受 provider rate-limit 约束）。预期：10 个 bullet 的简历 30s → 6s。
   - `_generate_selected_material` 对单个 job 通过 `asyncio.to_thread` 并行
@@ -690,7 +669,7 @@ review loop；项目 memory 在 2026 年 5 月中旬如实总结了一句话："
   - 每个并行热点落到配置 flag 后（`parallelism.bullet_rewrites.max_concurrent=5`），
     provider rate-limit 时操作者可以临时调小。
 
-- **19.4 清理策略 + 计划性垃圾回收** ——
+- **18.4 清理策略 + 计划性垃圾回收** ——
   - `docs/DECISIONS.md` 加一条新决策（大概是 D026）："`data/output/` 是 cache，
     不是 vault" —— 按 artifact 类别明确 retention 规则。写代码前先 review。
   - 原子写 helper：`with atomic_write(target_path) as tmp` 上下文管理器，写到
@@ -714,36 +693,76 @@ review loop；项目 memory 在 2026 年 5 月中旬如实总结了一句话："
   - 孤儿扫描 CLI：`autoapply cleanup scan` 打印 `cache_eviction` 会删什么；
     `--apply` 真删。在计划任务跑之前给操作者一次审计机会。
 
-排序逻辑：19.4 先发（孤儿现在就在堆积，跟 MQ 状态无关）。19.1 紧接（解锁
-19.2、19.3，并修掉"关 tab 丢工作"那个问题）。19.2 和 19.3 之后并行推（动的
+排序逻辑：18.4 先发（孤儿现在就在堆积，跟 MQ 状态无关）。18.1 紧接（解锁
+18.2、18.3，并修掉"关 tab 丢工作"那个问题）。18.2 和 18.3 之后并行推（动的
 是不同文件）。
 
 延后到 Phase 20+ 的未决问题：
-- 持久任务进度 UI（实时 SSE 流式，不是轮询）。Phase 19 只做 polling。
+- 持久任务进度 UI（实时 SSE 流式，不是轮询）。Phase 18 只做 polling。
 - 给未来 ops dashboard 用的跨租户 DLQ surfacing。
 - 反爬 session pool —— 路由到 N 个独立 session 就能让 LinkedIn 详情页并行
   变安全。本阶段不做。
 
+### Phase 19: 多租户 & Auth 加固（~2.5 周，已推迟）
+
+> **重新排序（2026-05-19）**：本阶段原本是 Phase 18，是 Phase 17.8 之后的下一
+> 个里程碑。我们把它推到 worker / cleanup phase 之后，因为个人版产品是当前
+> 主线，多租户/商业化要等单用户版本足够稳定再做。Phase 13.9 已经打下的
+> `tenant_id` schema 基础仍然有效，激活可以等。
+
+激活 Phase 12-17 散布的商业化就绪工作。SaaS 业务层（计费、注册流、营销页）
+**不在范围内** —— 本阶段只让现有系统能安全托管多个隔离用户。
+
+**诚实的范围说明**：13.9 已经把 schema 层的 `tenant_id` 列补齐了，所以
+"加列 + backfill" 的部分确实不是重写。但下面这几块**实质是新建**，不是
+"激活已有工作"：19.2 auth middleware（`src/web/` 目前完全没有 auth 层）、
+19.4 Redis namespace 重构（现在 key 是 `{version}:{namespace}:{key}`，没有
+tenant 前缀，需要全局改 wrapper）、19.7 凭据存储（`src/providers/store.py`
+目前是单文件全局 JSON，需要按租户切目录 + keyring entry 重命名）。
+真正"激活"的只有 19.1 / 19.3 / 19.5 / 19.6。
+
+- **19.1** `tenants` + `users` 表；把 13.9 留下的 `tenant_id='default'` 行接到
+  真实租户上。
+- **19.2** **从零做** FastAPI auth middleware —— session/token 解析、
+  `current_tenant_id` 注入到 `ContextVar`；ORM session 通过 SQLAlchemy event
+  自动在 query 上拼 `tenant_id = :current_tenant`；Celery task headers 自动带
+  租户上下文（14.3 已经预留接口）。
+- **19.3** Postgres Row-Level Security policy —— DB 层兜底，防 ORM 漏过滤。
+- **19.4** **重构** Redis key 命名 —— 所有 namespace 前面加 `tenant:{id}:` 前缀；
+  `src/cache/base.py` 的 key 构造改为强制注入租户上下文（无上下文则抛错而不是
+  fall back 到 default）。
+- **19.5** 按租户的配额（LLM token、scrape 速率、存储）。超限返回 429。
+- **19.6** Audit log 表 —— `audit_events`（提交、设置变更、凭据操作、手动调度
+  触发）。append-only。
+- **19.7** **重构** 凭据存储 —— `src/providers/store.py` 从单文件全局 JSON 切到
+  `data/tenants/{id}/credentials/`，keyring entry 命名加租户前缀；migrate 现有
+  `data/providers/credentials.json` 到 `default` 租户。
+
 ### 时间表
 
-| Phase | 范围 | 工时 | 累计 |
-|---|---|---|---|
-| 11 | 可靠性 & 收尾 | 1 周 | 1 周（已完成） |
-| 12 | 缓存基础设施（Redis） | 1.5 周 | 2.5 周（已完成） |
-| 13 | Job Index & Freshness Engine | 2 周 | 4.5 周（13.1-13.8 已完成） |
-| 13.9 | tenant_id retrofit migration | 0.3 周 | 4.8 周 |
-| 14 | 任务队列 + 定时工作（Celery） | 2.5 周 | 7.3 周 |
-| 15 | Resume & Cover Letter Generation v2 | 3 周 | 10.3 周 |
-| 16 | Filter Agent + 可解释性 | 1.5 周 | 11.8 周 |
-| 17 | Plan Run Loop + Review Queue | 2 周 | 13.8 周 |
-| 18 | 多租户 & Auth 加固 | 2.5 周 | 16.3 周 |
-| 19 | Worker 激活 / 可靠性 / 并行 / 垃圾清理 | 2.5–3 周 | 18.8–19.3 周 |
+截至 2026-05-19：Phase 1-17.8 已落地（`main`）；下一个要做的是 Phase 18
+（worker 系统审计之后重排过的优先级）。
 
-约 3.5-4 个月推到 v1.0 商业化就绪核心（不含 SaaS 业务层）。Phase 14 比 v3 多
-0.5 周用于 HITL gate 后端迁移；Phase 18 多 0.5 周承认 auth middleware / Redis
-namespace / 凭据存储是新建而非"激活"。Phase 19 是在 Phase 17 收尾 / Phase 18
-准备阶段做完一次 worker 系统审计之后才确定加入的 —— 那次审计发现 task body
-都是 stub、没有 cleanup 策略、并行机会从未被探索过。
+| Phase | 范围 | 工时 | 状态 |
+|---|---|---|---|
+| 11 | 可靠性 & 收尾 | 1 周 | 已完成 |
+| 12 | 缓存基础设施（Redis） | 1.5 周 | 已完成 |
+| 13 | Job Index & Freshness Engine | 2 周 | 已完成 |
+| 13.9 | tenant_id retrofit migration | 0.3 周 | 已完成 |
+| 14 | 任务队列 + 定时工作（Celery） | 2.5 周 | 已完成（task body 是 stub —— 在 18.1 激活） |
+| 15 | Resume & Cover Letter Generation v2 | 3 周 | 已完成 |
+| 16 | Filter Agent + 可解释性 | 1.5 周 | 已完成 |
+| 17 | Plan Run Loop + Review Queue | 2 周 | 已完成 |
+| 17.8 | Material Strategy & Document Library | 1 周 | 已完成 |
+| **18** | **Worker 激活 / 可靠性 / 并行 / 垃圾清理** | **2.5–3 周** | **下一步** |
+| 19 | 多租户 & Auth 加固 | 2.5 周 | 已推迟（等个人版成熟后再做） |
+
+个人版产品到 Phase 17.8 已 feature-complete。Phase 18 把它做硬（真 worker、
+retention、并行）；Phase 19 再激活 Phase 12-17 留下的多租户底座。Phase 18 是在
+Phase 17 收尾 / Phase 18 准备阶段做完一次 worker 系统审计之后才确定的 —— 那次
+审计发现 task body 都是 stub、没有 cleanup 策略、并行机会从未被探索过。
+Phase 19 原本是下一个里程碑（多租户 & Auth），比 v3 多 0.5 周用来承认 auth
+middleware / Redis namespace / 凭据存储是新建而非"激活"。
 
 ## 9. 横切质量基线
 
