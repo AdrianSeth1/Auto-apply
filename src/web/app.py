@@ -18,7 +18,24 @@ FRONTEND_INDEX = FRONTEND_DIST_DIR / "index.html"
 
 def _frontend_html() -> FileResponse | HTMLResponse:
     if FRONTEND_INDEX.exists():
-        return FileResponse(FRONTEND_INDEX)
+        # The Vue build emits hash-suffixed asset filenames
+        # (``index-<hash>.js``) referenced from ``index.html``. The
+        # asset bundles are safe to cache aggressively because their
+        # URLs change whenever they do, but ``index.html`` itself
+        # must never be cached -- otherwise the browser will keep
+        # asking for last build's JS file (long since deleted from
+        # disk) and the user sees a stale, broken-looking app after
+        # every redeploy. This bit us when the loading-state UI was
+        # shipped: rebuilds changed the hash but cached index.html
+        # still pointed at the previous bundle.
+        return FileResponse(
+            FRONTEND_INDEX,
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
     return HTMLResponse(
         (

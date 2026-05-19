@@ -412,9 +412,27 @@ def _ensure_profile_store() -> None:
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 
+    # One-shot migration from the legacy single-file layout
+    # (data/profile/profile.yaml) to the new per-profile layout
+    # (data/profile/profiles/<id>.yaml). Only run when the profiles
+    # directory has no YAMLs yet -- otherwise renaming or deleting the
+    # ``default`` profile would resurrect it from the legacy file on
+    # the very next _ensure_profile_store() call. After a successful
+    # migration we remove the legacy file so this branch never fires
+    # again.
     default_profile_path = get_profile_path(DEFAULT_PROFILE_ID)
-    if LEGACY_PROFILE_FILE.exists() and not default_profile_path.exists():
+    if (
+        LEGACY_PROFILE_FILE.exists()
+        and not any(PROFILES_DIR.glob("*.yaml"))
+    ):
         shutil.copy2(LEGACY_PROFILE_FILE, default_profile_path)
+        try:
+            LEGACY_PROFILE_FILE.unlink()
+        except OSError:
+            # Non-fatal: the copy succeeded, so the user's data is
+            # safe. Worst case the legacy file is read-only and the
+            # ``not any(...)`` guard above will keep it dormant.
+            pass
 
     if not get_active_profile_id():
         profiles = list(PROFILES_DIR.glob("*.yaml"))

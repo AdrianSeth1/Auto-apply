@@ -421,20 +421,48 @@ def claude_generate(
             "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
         )
 
-    cmd = [executable, "-p", prompt, "--output-format", output_format]
+    # Phase 17.x: invoking ``claude`` from inside the AutoApply project
+    # tree makes the CLI auto-discover this repo (CLAUDE.md, AGENTS.md,
+    # hooks, .git, and the per-project memory under ``~/.claude/
+    # projects/<cwd-hash>/``). The CLI then slips into its default
+    # "coding agent in this repo" persona, our resume-parser system
+    # prompt gets drowned out, and the model asks "What would you like
+    # me to work on in ``C:\\Projects\\AutoApply``?" instead of
+    # returning YAML.
+    #
+    # We tried ``--bare`` (the CLI's documented minimal-inference
+    # mode) but on 2.1.133 it changes Anthropic auth to
+    # ``ANTHROPIC_API_KEY``-only -- subscription users lose auth and
+    # the CLI either errors or returns canned greetings. The mode
+    # also appears to drop the positional ``[prompt]`` argument
+    # entirely.
+    #
+    # The fix that survives all of that: keep the CLI in its normal
+    # mode (so OAuth / keychain auth still works) and just hand the
+    # subprocess an empty scratch directory as cwd. The CLI then has
+    # no project tree to discover, the per-project memory hash points
+    # at an empty dir, and user-level config under ``$HOME`` continues
+    # to load normally for auth. No env vars touched, no impact on
+    # the API-based providers (which never spawn a subprocess).
+    cmd = [executable, "--print", "--output-format", output_format]
     if system:
         cmd.extend(["--system-prompt", system])
+    cmd.append(prompt)
 
-    logger.debug("Claude CLI call: prompt=%d chars, system=%d chars", len(prompt), len(system))
+    logger.debug(
+        "Claude CLI call: prompt=%d chars, system=%d chars", len(prompt), len(system)
+    )
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            encoding="utf-8",
-        )
+        with tempfile.TemporaryDirectory(prefix="claude-cli-cwd-") as scratch_cwd:
+            result = subprocess.run(
+                cmd,
+                cwd=scratch_cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+            )
     except subprocess.TimeoutExpired:
         raise LLMError(f"Claude CLI timed out after {timeout}s")
     except FileNotFoundError as exc:
@@ -491,14 +519,22 @@ def codex_generate(
 
     logger.debug("Codex CLI call: prompt=%d chars, system=%d chars", len(prompt), len(system))
 
+    # Phase 17.x: same cwd-isolation rationale as ``claude_generate``.
+    # Codex CLI auto-discovers AGENTS.md and project state from the
+    # cwd tree -- running from the AutoApply repo lets that project
+    # context override our prompt. A fresh empty cwd keeps the CLI
+    # in pure-inference mode. User-level Codex auth under ``$HOME``
+    # is untouched.
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            encoding="utf-8",
-        )
+        with tempfile.TemporaryDirectory(prefix="codex-cli-cwd-") as scratch_cwd:
+            result = subprocess.run(
+                cmd,
+                cwd=scratch_cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+            )
     except subprocess.TimeoutExpired:
         output_path.unlink(missing_ok=True)
         raise LLMError(f"Codex CLI timed out after {timeout}s")
