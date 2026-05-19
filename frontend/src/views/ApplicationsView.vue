@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   ClipboardCheck,
   Filter,
+  Loader2,
   Send,
   TrendingUp,
 } from "lucide-vue-next"
@@ -424,7 +425,8 @@ onMounted(load)
             :disabled="promoteDialog.submitting || !promoteDialog.displayName.trim()"
             @click="confirmPromote"
           >
-            <BookMarked class="h-4 w-4" />
+            <Loader2 v-if="promoteDialog.submitting" class="h-4 w-4 animate-spin" />
+            <BookMarked v-else class="h-4 w-4" />
             {{ promoteDialog.submitting ? "Saving…" : "Save to library" }}
           </Button>
         </DialogFooter>

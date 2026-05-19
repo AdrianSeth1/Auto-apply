@@ -15,6 +15,7 @@ import {
   Filter as FilterIcon,
   Info,
   Inbox,
+  Loader2,
   RefreshCw,
   RotateCcw,
   Save,
@@ -38,6 +39,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { EmptyState } from "@/components/ui/empty-state"
+import { ProgressBanner } from "@/components/ui/progress-banner"
 import { api } from "@/lib/api"
 import { formatPercent, truncateText } from "@/lib/format"
 import { ensureLinkedInSessionLoaded, linkedinSessionState, syncLinkedInSession } from "@/lib/linkedin-session"
@@ -1467,8 +1469,11 @@ function buildPageButtons(total, current) {
       </div>
 
       <div v-if="state.searching" class="px-6 py-12">
-        <EmptyState title="Searching..." description="Pulling fresh results from your selected sources.">
-          <template #icon><Search /></template>
+        <EmptyState
+          title="Searching jobs…"
+          description="Pulling fresh results from your selected sources. This typically takes 5–30 seconds depending on the provider."
+        >
+          <template #icon><Loader2 class="animate-spin" /></template>
         </EmptyState>
       </div>
       <div v-else-if="currentViewJobs.length" class="job-list">
@@ -1531,12 +1536,13 @@ function buildPageButtons(total, current) {
                   Generate Apply Materials
                 </button>
                 <button
-                  class="button compact"
+                  class="button compact inline-flex items-center gap-1.5"
                   type="button"
                   @click="applyToJob(job)"
                   :disabled="state.applyState[job.id]?.loading || !job.application_url"
                 >
-                  {{ state.applyState[job.id]?.loading ? "Applying..." : "AutoApply" }}
+                  <Loader2 v-if="state.applyState[job.id]?.loading" class="h-3.5 w-3.5 animate-spin" />
+                  {{ state.applyState[job.id]?.loading ? "Applying…" : "AutoApply" }}
                 </button>
               </div>
             </div>
@@ -1648,14 +1654,22 @@ function buildPageButtons(total, current) {
         </div>
 
         <div class="material-modal-actions">
-          <Button type="button" :disabled="!canGenerateMaterials" @click="generateSelectedMaterials">
-            <Sparkles class="h-4 w-4" />
-            {{ modalMaterialState.loading ? 'Generating...' : 'Generate Selected Materials' }}
+          <Button type="button" :disabled="!canGenerateMaterials || modalMaterialState.loading" @click="generateSelectedMaterials">
+            <Loader2 v-if="modalMaterialState.loading" class="h-4 w-4 animate-spin" />
+            <Sparkles v-else class="h-4 w-4" />
+            {{ modalMaterialState.loading ? 'Generating…' : 'Generate Selected Materials' }}
           </Button>
           <span v-if="modalMaterialState.message" class="inline-feedback" :class="modalMaterialState.status">
             {{ modalMaterialState.message }}
           </span>
         </div>
+
+        <ProgressBanner
+          v-if="modalMaterialState.loading"
+          title="Generating tailored materials…"
+          detail="The language model is rewriting your resume and/or cover letter for this job. 30–90 seconds is normal."
+          class="mt-2"
+        />
 
         <div v-if="materialReviewEntries.length" class="material-review-stack">
           <section v-for="entry in materialReviewEntries" :key="entry.id" class="material-review-panel">

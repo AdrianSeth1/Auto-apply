@@ -14,6 +14,7 @@ import {
   Download,
   FileText,
   Library as LibraryIcon,
+  Loader2,
   Pencil,
   Plus,
   Trash2,
@@ -278,7 +279,8 @@ onMounted(refresh)
               :disabled="!state.uploadFile || state.uploading"
               @click="uploadDocument"
             >
-              <Upload class="h-4 w-4" />
+              <Loader2 v-if="state.uploading" class="h-4 w-4 animate-spin" />
+              <Upload v-else class="h-4 w-4" />
               {{ state.uploading ? "Uploading…" : "Upload" }}
             </Button>
           </div>

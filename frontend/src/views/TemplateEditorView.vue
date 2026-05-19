@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   Code2,
   FileCheck,
+  Loader2,
   Save,
 } from "lucide-vue-next"
 
@@ -208,20 +209,22 @@ const isLatexEditor = computed(() => editor.renderer === "latex")
             variant="ghost"
             size="sm"
             type="button"
-            :disabled="editor.validating"
+            :disabled="editor.validating || editor.saving"
             @click="validateTemplate"
           >
-            <FileCheck class="h-4 w-4" />
-            {{ editor.validating ? "Validating..." : "Validate" }}
+            <Loader2 v-if="editor.validating" class="h-4 w-4 animate-spin" />
+            <FileCheck v-else class="h-4 w-4" />
+            {{ editor.validating ? "Validating…" : "Validate" }}
           </Button>
           <Button
             size="sm"
             type="button"
-            :disabled="editor.saving"
+            :disabled="editor.saving || editor.validating"
             @click="saveTemplate"
           >
-            <Save class="h-4 w-4" />
-            {{ editor.saving ? "Saving..." : "Save" }}
+            <Loader2 v-if="editor.saving" class="h-4 w-4 animate-spin" />
+            <Save v-else class="h-4 w-4" />
+            {{ editor.saving ? "Saving…" : "Save" }}
           </Button>
         </div>
       </CardHeader>

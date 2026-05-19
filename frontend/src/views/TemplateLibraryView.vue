@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   FileText,
   Library,
+  Loader2,
   Pencil,
   Plus,
   Sparkles,
@@ -262,8 +263,9 @@ const isLoading = computed(() => templatesState.loading && !templatesState.loade
                     :title="template.is_default ? 'Built-in default templates cannot be deleted.' : 'Delete template'"
                     @click="deleteTemplate(target.documentType, template)"
                   >
-                    <Trash2 class="h-4 w-4" />
-                    {{ isDeleting(target.documentType, template.template_id) ? "Deleting..." : "Delete" }}
+                    <Loader2 v-if="isDeleting(target.documentType, template.template_id)" class="h-4 w-4 animate-spin" />
+                    <Trash2 v-else class="h-4 w-4" />
+                    {{ isDeleting(target.documentType, template.template_id) ? "Deleting…" : "Delete" }}
                   </Button>
                 </div>
               </div>
@@ -328,10 +330,11 @@ const isLoading = computed(() => templatesState.loading && !templatesState.loade
                   :disabled="uploadState[target.documentType].loading"
                   @click="uploadTemplate(target.documentType)"
                 >
-                  <Upload class="h-4 w-4" />
+                  <Loader2 v-if="uploadState[target.documentType].loading" class="h-4 w-4 animate-spin" />
+                  <Upload v-else class="h-4 w-4" />
                   {{
                     uploadState[target.documentType].loading
-                      ? "Uploading..."
+                      ? "Uploading…"
                       : `Upload ${target.label} Template`
                   }}
                 </Button>
@@ -368,10 +371,11 @@ const isLoading = computed(() => templatesState.loading && !templatesState.loade
                   :disabled="latexState[target.documentType].loading"
                   @click="createLatexTemplate(target.documentType)"
                 >
-                  <Plus class="h-4 w-4" />
+                  <Loader2 v-if="latexState[target.documentType].loading" class="h-4 w-4 animate-spin" />
+                  <Plus v-else class="h-4 w-4" />
                   {{
                     latexState[target.documentType].loading
-                      ? "Creating..."
+                      ? "Creating…"
                       : `Create ${target.label} LaTeX Template`
                   }}
                 </Button>
