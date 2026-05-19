@@ -105,12 +105,31 @@ def _register_builtins(registry: ProviderRegistry) -> None:
     from src.providers.anthropic import AnthropicProvider  # noqa: PLC0415
     from src.providers.claude_cli import ClaudeCliProvider  # noqa: PLC0415
     from src.providers.codex import CodexCliProvider  # noqa: PLC0415
+    from src.providers.deepseek import DeepSeekProvider  # noqa: PLC0415
     from src.providers.gemini import GeminiProvider  # noqa: PLC0415
+    from src.providers.groq import GroqProvider  # noqa: PLC0415
+    from src.providers.mistral import MistralProvider  # noqa: PLC0415
+    from src.providers.moonshot import MoonshotProvider  # noqa: PLC0415
     from src.providers.openai import OpenAIProvider  # noqa: PLC0415
+    from src.providers.openrouter import OpenRouterProvider  # noqa: PLC0415
+    from src.providers.qwen import QwenProvider  # noqa: PLC0415
+    from src.providers.xai import XAIProvider  # noqa: PLC0415
 
+    # First-party REST providers (each owns its own client / response shape).
     registry.register(OpenAIProvider)
     registry.register(AnthropicProvider)
     registry.register(GeminiProvider)
+    # Phase 17.9: OpenAI-compatible providers. All share the chat-completions
+    # shape via OpenAICompatibleProvider; each subclass just pins defaults
+    # + a curated KNOWN_MODELS catalog. Registering them all unconditionally
+    # is cheap -- the registry instantiates lazily on first lookup.
+    registry.register(DeepSeekProvider)
+    registry.register(MoonshotProvider)
+    registry.register(QwenProvider)
+    registry.register(XAIProvider)
+    registry.register(GroqProvider)
+    registry.register(MistralProvider)
+    registry.register(OpenRouterProvider)
     # Codex and Claude are both subprocess wrappers around an
     # already-installed agent CLI; neither owns its OAuth flow. A
     # future native CodexOAuthProvider would live alongside these,
