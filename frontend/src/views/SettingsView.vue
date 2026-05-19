@@ -142,11 +142,29 @@ const connectDialog = reactive({
   providerId: "",
   providerLabel: "",
   apiKey: "",
+  // Phase 17.9.4: model picker. `models` is the catalog from
+  // /api/providers/{id}/models; `modelMode` swaps between picking
+  // from the catalog (a native <select>) and entering a custom id.
+  // `modelSelection` is the <select> value when in picker mode --
+  // it's the picked model id, or the sentinel "__custom__".
   model: "",
+  modelMode: "picker",
+  modelSelection: "",
+  models: [],
+  modelsLoading: false,
+  modelsSource: "catalog",
+  defaultModel: "",
   baseUrl: "",
+  // Whether the provider permits an empty API key (Ollama today).
+  allowEmptyKey: false,
+  // "Advanced" panel: base_url lives here so the default dialog stays
+  // a one-glance API-key + model picker.
+  showAdvanced: false,
   submitting: false,
   error: "",
 })
+
+const CUSTOM_MODEL_SENTINEL = "__custom__"
 
 
 function providerOp(providerId) {
@@ -389,25 +407,115 @@ function openConnectDialog(provider) {
   connectDialog.providerId = provider.id
   connectDialog.providerLabel = provider.display_name
   connectDialog.apiKey = ""
-  connectDialog.model = provider.credentials?.metadata?.model || ""
+  const savedModel = provider.credentials?.metadata?.model || ""
+  connectDialog.model = savedModel
   connectDialog.baseUrl = provider.credentials?.metadata?.base_url || ""
+  connectDialog.allowEmptyKey = Boolean(provider.allow_empty_key)
+  connectDialog.showAdvanced = Boolean(connectDialog.baseUrl)
   connectDialog.error = ""
   connectDialog.submitting = false
+  // Seed the picker from the provider's own KNOWN_MODELS so the dialog
+  // renders something usable even before the async catalog call lands.
+  const seed = (provider.known_models || []).map((m) => ({ ...m }))
+  connectDialog.models = seed
+  connectDialog.modelsSource = "catalog"
+  connectDialog.defaultModel = ""
+  // If the user already had a saved model that's not in the seed,
+  // append it so the picker shows the current selection rather than
+  // silently switching them to a different default.
+  if (savedModel && !seed.some((m) => m.id === savedModel)) {
+    connectDialog.models.push({ id: savedModel, display_name: savedModel })
+  }
+  connectDialog.modelMode = "picker"
+  connectDialog.modelSelection = savedModel || seed[0]?.id || ""
   connectDialog.open = true
+  // Fire off the catalog call -- runtime providers (Ollama) populate
+  // their list from /api/tags, and even cloud providers will see a
+  // canonical `default_model` flagged on the response.
+  loadProviderModels(provider.id)
+}
+
+async function loadProviderModels(providerId) {
+  connectDialog.modelsLoading = true
+  try {
+    const result = await api.providerModels(providerId)
+    if (!result?.ok) return
+    connectDialog.models = result.models || []
+    connectDialog.modelsSource = result.source || "catalog"
+    connectDialog.defaultModel = result.default_model || ""
+    // If nothing is selected yet (e.g. seed was empty), default to
+    // the provider's default_model when present; otherwise the first
+    // entry; otherwise drop straight into the "Custom..." flow.
+    if (!connectDialog.modelSelection) {
+      if (connectDialog.defaultModel) {
+        connectDialog.modelSelection = connectDialog.defaultModel
+      } else if (connectDialog.models[0]) {
+        connectDialog.modelSelection = connectDialog.models[0].id
+      } else {
+        connectDialog.modelMode = "custom"
+      }
+    } else if (
+      connectDialog.models.length > 0 &&
+      !connectDialog.models.some((m) => m.id === connectDialog.modelSelection)
+    ) {
+      // Saved model isn't in the catalog -- preserve user intent by
+      // showing it under "Custom..." rather than silently switching.
+      connectDialog.modelMode = "custom"
+      connectDialog.model = connectDialog.modelSelection
+      connectDialog.modelSelection = CUSTOM_MODEL_SENTINEL
+    }
+  } catch (_err) {
+    // Catalog is non-essential -- the dialog still works with the seed.
+  } finally {
+    connectDialog.modelsLoading = false
+  }
+}
+
+function onModelSelectionChange() {
+  if (connectDialog.modelSelection === CUSTOM_MODEL_SENTINEL) {
+    connectDialog.modelMode = "custom"
+    // Keep whatever's in connectDialog.model so the input isn't blank.
+  } else {
+    connectDialog.modelMode = "picker"
+    connectDialog.model = connectDialog.modelSelection
+  }
+}
+
+function backToPicker() {
+  connectDialog.modelMode = "picker"
+  // Restore the picker to the default (or first catalog row).
+  connectDialog.modelSelection =
+    connectDialog.defaultModel ||
+    connectDialog.models[0]?.id ||
+    ""
+  connectDialog.model = connectDialog.modelSelection
+}
+
+function canSubmitConnect() {
+  if (connectDialog.submitting) return false
+  if (!connectDialog.allowEmptyKey && !connectDialog.apiKey.trim()) return false
+  return true
 }
 
 async function submitConnect() {
-  if (!connectDialog.apiKey.trim()) {
+  if (!connectDialog.allowEmptyKey && !connectDialog.apiKey.trim()) {
     connectDialog.error = "API key is required."
     return
   }
   connectDialog.submitting = true
   connectDialog.error = ""
   state.error = ""
+  // Resolve which model id to persist: in picker mode, the <select>'s
+  // current value; in custom mode, the free-text input. Empty string
+  // is sent as null so the backend falls back to `default_model`.
+  const resolvedModel =
+    connectDialog.modelMode === "custom"
+      ? connectDialog.model.trim()
+      : connectDialog.modelSelection
   try {
     const payload = await api.connectApiKeyProvider(connectDialog.providerId, {
       api_key: connectDialog.apiKey,
-      model: connectDialog.model || null,
+      model: resolvedModel || null,
       base_url: connectDialog.baseUrl || null,
     })
     await loadProviders()
@@ -1084,25 +1192,73 @@ function isPrimary(provider) {
 
         <div class="space-y-3 py-2">
           <div class="space-y-1.5">
-            <Label for="api-key">API key</Label>
+            <Label for="api-key">
+              API key
+              <span v-if="connectDialog.allowEmptyKey" class="ml-1 text-xs text-muted-foreground">(optional)</span>
+            </Label>
             <Input
               id="api-key"
               v-model="connectDialog.apiKey"
               type="password"
               autocomplete="off"
               spellcheck="false"
-              placeholder="sk-..."
+              :placeholder="connectDialog.allowEmptyKey ? 'Leave blank if your server has no auth' : 'sk-...'"
             />
           </div>
-          <div class="grid gap-3 sm:grid-cols-2">
-            <div class="space-y-1.5">
-              <Label for="api-model">Model (optional)</Label>
-              <Input id="api-model" v-model="connectDialog.model" placeholder="e.g. gpt-4o-mini" />
+
+          <div class="space-y-1.5">
+            <Label for="api-model">
+              Model
+              <span v-if="connectDialog.modelsLoading" class="ml-1 text-xs text-muted-foreground">loading…</span>
+              <span
+                v-else-if="connectDialog.modelsSource === 'runtime' || connectDialog.modelsSource === 'merged'"
+                class="ml-1 text-xs text-muted-foreground"
+              >({{ connectDialog.modelsSource === 'runtime' ? 'local server catalog' : 'curated + local' }})</span>
+            </Label>
+            <select
+              v-if="connectDialog.modelMode === 'picker'"
+              id="api-model"
+              v-model="connectDialog.modelSelection"
+              class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+              @change="onModelSelectionChange"
+            >
+              <option v-if="connectDialog.models.length === 0" value="" disabled>
+                No catalog available — choose Custom...
+              </option>
+              <option
+                v-for="m in connectDialog.models"
+                :key="m.id"
+                :value="m.id"
+              >
+                {{ m.display_name || m.id }}<template v-if="m.id === connectDialog.defaultModel"> (default)</template>
+              </option>
+              <option :value="CUSTOM_MODEL_SENTINEL">Custom…</option>
+            </select>
+            <div v-else class="flex gap-2">
+              <Input
+                id="api-model"
+                v-model="connectDialog.model"
+                placeholder="Enter model id (e.g. gpt-4o-mini)"
+                class="flex-1"
+              />
+              <Button type="button" variant="ghost" size="sm" @click="backToPicker">Back</Button>
             </div>
-            <div class="space-y-1.5">
-              <Label for="api-base-url">Base URL (optional)</Label>
-              <Input id="api-base-url" v-model="connectDialog.baseUrl" placeholder="https://api.openai.com/v1" />
-            </div>
+          </div>
+
+          <button
+            type="button"
+            class="text-xs text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
+            @click="connectDialog.showAdvanced = !connectDialog.showAdvanced"
+          >
+            {{ connectDialog.showAdvanced ? "Hide" : "Show" }} advanced (base URL)
+          </button>
+          <div v-if="connectDialog.showAdvanced" class="space-y-1.5">
+            <Label for="api-base-url">Base URL</Label>
+            <Input
+              id="api-base-url"
+              v-model="connectDialog.baseUrl"
+              placeholder="Override only if you proxy this provider"
+            />
           </div>
 
           <Alert v-if="connectDialog.error" variant="destructive">
@@ -1113,7 +1269,7 @@ function isPrimary(provider) {
 
         <DialogFooter>
           <Button variant="ghost" @click="connectDialog.open = false">Cancel</Button>
-          <Button :disabled="connectDialog.submitting || !connectDialog.apiKey.trim()" @click="submitConnect">
+          <Button :disabled="!canSubmitConnect()" @click="submitConnect">
             <Loader2 v-if="connectDialog.submitting" class="h-4 w-4 animate-spin" />
             {{ connectDialog.submitting ? "Saving and testing..." : "Save and test" }}
           </Button>

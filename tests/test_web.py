@@ -55,6 +55,8 @@ class TestAppFactory:
         assert "/api/providers/{provider_id}/set-key" in paths
         assert "/api/providers/{provider_id}" in paths
         assert "/api/providers/{provider_id}/use" in paths
+        # Phase 17.9.4: model catalog endpoint
+        assert "/api/providers/{provider_id}/models" in paths
 
 
 class TestSpaShell:
@@ -1098,6 +1100,47 @@ class TestProvidersApi:
             )
         assert response.status_code == 200
         assert mocked.call_args.kwargs["fallback_provider"] == "claude-cli"
+
+    def test_provider_models_unknown_404s(self, client):
+        with patch(
+            "src.web.routes.api.list_provider_models",
+            return_value={
+                "ok": False,
+                "error": "Unknown provider 'nope'.",
+                "error_code": "unknown_provider",
+                "provider_id": "nope",
+            },
+        ):
+            response = client.get("/api/providers/nope/models")
+        assert response.status_code == 404
+
+    def test_provider_models_returns_catalog(self, client):
+        with patch(
+            "src.web.routes.api.list_provider_models",
+            return_value={
+                "ok": True,
+                "provider_id": "openai",
+                "default_model": "gpt-4o-mini",
+                "models": [
+                    {
+                        "id": "gpt-4o-mini",
+                        "display_name": "GPT-4o mini",
+                        "context_window": 128000,
+                        "max_output_tokens": 16384,
+                        "supports_json": True,
+                        "tags": ["fast", "cheap"],
+                    }
+                ],
+                "source": "catalog",
+            },
+        ):
+            response = client.get("/api/providers/openai/models")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert body["default_model"] == "gpt-4o-mini"
+        assert body["models"][0]["id"] == "gpt-4o-mini"
+        assert body["source"] == "catalog"
 
 
 class TestWebCLI:

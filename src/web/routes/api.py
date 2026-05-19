@@ -79,6 +79,7 @@ from src.application.profile import (
 from src.application.providers import (
     connect_api_key_provider,
     disconnect_provider,
+    list_provider_models,
     list_providers,
     test_provider_connection,
     use_provider_as_primary,
@@ -1025,6 +1026,20 @@ async def clear_search_cache() -> dict:
 async def providers_list() -> dict:
     """Return the public view of every registered provider."""
     return list_providers()
+
+
+@router.get("/providers/{provider_id}/models")
+async def providers_models(provider_id: str) -> dict:
+    """Phase 17.9.4 model catalog for the Connect dialog picker.
+
+    Returns the curated KNOWN_MODELS for ``provider_id``, plus the
+    live runtime catalog for providers that have one (Ollama today).
+    Unknown ids 404.
+    """
+    result = list_provider_models(provider_id)
+    if not result["ok"] and result.get("error_code") == "unknown_provider":
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
 
 
 @router.post("/providers/{provider_id}/test")

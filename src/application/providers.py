@@ -398,6 +398,104 @@ def use_provider_as_primary(
 
 
 # ---------------------------------------------------------------------------
+# Model catalog (Phase 17.9.4)
+# ---------------------------------------------------------------------------
+
+
+def list_provider_models(provider_id: str) -> dict:
+    """Return the model picker payload for ``provider_id``.
+
+    Starts from the provider class's ``KNOWN_MODELS`` (curated, ships
+    with the codebase) and -- for providers with a runtime catalog
+    (Ollama today; more in 17.9.6) -- merges the live list so the
+    picker reflects what the user can actually call. Live lookups are
+    best-effort: a network failure falls through to the curated list
+    rather than blocking the dialog.
+
+    Response shape:
+
+        {
+            "ok": True,
+            "provider_id": "ollama",
+            "default_model": "llama3.2",
+            "models": [{"id": ..., "display_name": ..., ...}, ...],
+            "source": "catalog" | "runtime" | "merged",
+        }
+
+    ``source`` lets the UI show "Showing local models" vs. "Curated
+    catalog" without re-checking provider type client-side.
+    """
+    registry = get_registry()
+    provider = registry.maybe_get(provider_id)
+    if provider is None:
+        return {
+            "ok": False,
+            "error": f"Unknown provider {provider_id!r}.",
+            "error_code": "unknown_provider",
+            "provider_id": provider_id,
+        }
+
+    catalog = [m.to_dict() for m in provider.KNOWN_MODELS]
+    default_model = getattr(provider, "default_model", None) or None
+
+    # Runtime catalog: today only Ollama. We intentionally do NOT hit
+    # /v1/models on the cloud providers per dialog open -- that's an
+    # extra request per render with little payoff (the curated list is
+    # accurate enough and the "Custom..." input handles new ids).
+    runtime_ids: list[str] = []
+    if hasattr(provider, "list_local_models"):
+        # Ollama-style runtime listing. Defaults to a short timeout so
+        # an unreachable server can't block the page; the helper
+        # itself swallows errors and returns [].
+        try:
+            runtime_ids = list(provider.list_local_models())  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 -- never break the picker
+            runtime_ids = []
+
+    if runtime_ids:
+        existing = {m["id"] for m in catalog}
+        for mid in runtime_ids:
+            if mid in existing:
+                continue
+            catalog.append(
+                {
+                    "id": mid,
+                    "display_name": mid,
+                    "context_window": None,
+                    "max_output_tokens": None,
+                    "supports_json": True,
+                    "tags": [],
+                }
+            )
+        source = "merged" if any(m["id"] not in runtime_ids for m in catalog) else "runtime"
+    else:
+        source = "catalog"
+
+    # When the curated list is empty (e.g. Ollama before the user pulls
+    # anything), expose the default_model as a single seed so the picker
+    # has at least one row to render.
+    if not catalog and default_model:
+        catalog.append(
+            {
+                "id": default_model,
+                "display_name": default_model,
+                "context_window": None,
+                "max_output_tokens": None,
+                "supports_json": True,
+                "tags": [],
+            }
+        )
+
+    return {
+        "ok": True,
+        "provider_id": provider_id,
+        "default_model": default_model,
+        "models": catalog,
+        "source": source,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

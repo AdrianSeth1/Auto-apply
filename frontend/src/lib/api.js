@@ -393,6 +393,11 @@ export const api = {
   providers() {
     return request("/api/providers")
   },
+  providerModels(providerId) {
+    return request(
+      `/api/providers/${encodeURIComponent(providerId)}/models`,
+    )
+  },
   providersHealth() {
     return request("/api/providers/health")
   },

@@ -16,6 +16,7 @@ from src.providers.api_base import ApiKeyProvider
 from src.providers.base import (
     AuthType,
     LLMProvider,
+    ModelInfo,
     ProviderCredentials,
     ProviderTestResult,
 )
@@ -33,6 +34,10 @@ class _StubApiKey(ApiKeyProvider):
     description = "test stub"
     api_key_env_var = "STUB_API_KEY"
     default_model = "stub-model"
+    KNOWN_MODELS = (
+        ModelInfo(id="stub-model", display_name="Stub Model"),
+        ModelInfo(id="stub-pro", display_name="Stub Pro"),
+    )
 
     probe_ok: bool = True
     probe_detail: str = "OK"
@@ -74,6 +79,36 @@ class _StubSubprocess(LLMProvider):
         return "sub"
 
 
+class _StubRuntimeCatalog(ApiKeyProvider):
+    """Ollama-shaped stub: exposes list_local_models for the catalog merge."""
+
+    id = "stub-runtime"
+    display_name = "Stub Runtime"
+    description = "runtime catalog stub"
+    api_key_env_var = "STUB_RUNTIME_API_KEY"
+    default_model = "runtime-default"
+    allow_empty_key = True
+    KNOWN_MODELS = ()
+
+    runtime_ids: list[str] = []
+
+    def _probe_connection(self, api_key: str, *, timeout: int) -> ProviderTestResult:
+        return ProviderTestResult(ok=True)
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        system: str = "",
+        timeout: int = 120,
+        output_format: str = "text",
+    ) -> str:
+        return "runtime"
+
+    def list_local_models(self, *, timeout: int = 10) -> list[str]:  # noqa: ARG002
+        return list(self.runtime_ids)
+
+
 @pytest.fixture
 def isolated_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     reset_default_registry()
@@ -81,6 +116,7 @@ def isolated_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     registry = ProviderRegistry(store=store)
     registry.register(_StubApiKey)
     registry.register(_StubSubprocess)
+    registry.register(_StubRuntimeCatalog)
 
     import src.providers.registry as registry_module
 
@@ -922,3 +958,77 @@ class TestDisconnectRoutingCleanup:
         # stub-api removed; stub-third remains and is now the scalar.
         assert data["llm"]["fallback_providers"] == ["stub-third"]
         assert data["llm"]["fallback_provider"] == "stub-third"
+
+
+# ---------------------------------------------------------------------------
+# list_provider_models (Phase 17.9.4)
+# ---------------------------------------------------------------------------
+
+
+class TestListProviderModels:
+    def test_unknown_provider_returns_error(self, isolated_setup) -> None:
+        from src.application.providers import list_provider_models
+
+        result = list_provider_models("nope")
+        assert result["ok"] is False
+        assert result["error_code"] == "unknown_provider"
+
+    def test_returns_known_models_for_catalog_only_provider(
+        self, isolated_setup
+    ) -> None:
+        from src.application.providers import list_provider_models
+
+        result = list_provider_models("stub-api")
+        assert result["ok"] is True
+        assert result["provider_id"] == "stub-api"
+        assert result["default_model"] == "stub-model"
+        ids = [m["id"] for m in result["models"]]
+        assert ids == ["stub-model", "stub-pro"]
+        assert result["source"] == "catalog"
+
+    def test_runtime_only_provider_returns_local_list(self, isolated_setup) -> None:
+        from src.application.providers import list_provider_models
+
+        registry, _ = isolated_setup
+        instance = registry.get("stub-runtime")
+        instance.runtime_ids = ["llama3.2:latest", "qwen2.5:7b"]
+        result = list_provider_models("stub-runtime")
+        assert result["ok"] is True
+        ids = [m["id"] for m in result["models"]]
+        assert ids == ["llama3.2:latest", "qwen2.5:7b"]
+        # `source` reports `runtime` because the catalog had nothing
+        # that wasn't already in the runtime list.
+        assert result["source"] == "runtime"
+
+    def test_runtime_failure_falls_back_to_empty_catalog_with_default(
+        self, isolated_setup
+    ) -> None:
+        from src.application.providers import list_provider_models
+
+        registry, _ = isolated_setup
+        instance = registry.get("stub-runtime")
+        instance.runtime_ids = []  # empty live list
+        result = list_provider_models("stub-runtime")
+        assert result["ok"] is True
+        # Even with an empty catalog, the default_model is seeded so
+        # the picker has at least one row to render.
+        ids = [m["id"] for m in result["models"]]
+        assert ids == ["runtime-default"]
+        assert result["default_model"] == "runtime-default"
+        assert result["source"] == "catalog"
+
+    def test_runtime_exception_is_swallowed(self, isolated_setup) -> None:
+        """A throwing list_local_models() must not break the picker."""
+        from src.application.providers import list_provider_models
+
+        registry, _ = isolated_setup
+        instance = registry.get("stub-runtime")
+
+        def _boom(*, timeout: int = 10) -> list[str]:
+            raise RuntimeError("server down")
+
+        instance.list_local_models = _boom  # type: ignore[method-assign]
+        result = list_provider_models("stub-runtime")
+        assert result["ok"] is True
+        # No live list -> default seed only.
+        assert [m["id"] for m in result["models"]] == ["runtime-default"]

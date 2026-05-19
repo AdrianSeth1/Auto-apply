@@ -300,6 +300,10 @@ class LLMProvider(ABC):
             "configured": self.is_configured(),
             "credentials": creds.public_view() if creds else None,
             "known_models": [m.to_dict() for m in self.KNOWN_MODELS],
+            # Phase 17.9: surface the keyless opt-in (Ollama / future
+            # self-hosted) so the Web UI can render "API key (optional)"
+            # and skip its own "key is required" guard.
+            "allow_empty_key": bool(getattr(self, "allow_empty_key", False)),
         }
 
 
