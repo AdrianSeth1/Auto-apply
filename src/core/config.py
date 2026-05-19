@@ -6,6 +6,7 @@ Loads settings from config/settings.yaml and .env, with environment variable ove
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,33 @@ from dotenv import load_dotenv
 
 # Project root is two levels up from this file (src/core/config.py -> AutoApply/)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# User-editable config files that are not tracked in git (each developer keeps
+# their own local edits). The repository ships a `<name>.example` for each;
+# bootstrap_user_configs() copies example -> live on first load so a fresh
+# clone Just Works.
+_BOOTSTRAPPED_CONFIGS = (
+    "settings.yaml",
+    "companies.yaml",
+    "filters.yaml",
+    "search_profiles.yaml",
+)
+
+
+def bootstrap_user_configs() -> None:
+    """Copy `<name>.example` -> `<name>` for any missing user-editable config.
+
+    Idempotent. Safe to call on every startup. Files that already exist are
+    left untouched so the user's local edits are never clobbered.
+    """
+    config_dir = PROJECT_ROOT / "config"
+    for live_name in _BOOTSTRAPPED_CONFIGS:
+        live = config_dir / live_name
+        example = config_dir / f"{live_name}.example"
+        if live.exists() or not example.exists():
+            continue
+        config_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(example, live)
 
 
 def load_config(config_path: Path | None = None) -> dict[str, Any]:
@@ -24,6 +52,8 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
     2. .env file
     3. config/settings.yaml defaults
     """
+    bootstrap_user_configs()
+
     # Load .env if it exists
     env_path = PROJECT_ROOT / ".env"
     if env_path.exists():
@@ -47,6 +77,8 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
 
 def load_raw_config(config_path: Path | None = None) -> dict[str, Any]:
     """Load config YAML without env overrides or path resolution."""
+    bootstrap_user_configs()
+
     if config_path is None:
         config_path = PROJECT_ROOT / "config" / "settings.yaml"
 
