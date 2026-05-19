@@ -13,6 +13,30 @@ llm:
   max_retries: 2
   fallback_providers:
   - claude-cli
+  # Phase 17.9.5: optional cheap-model tier. Pure-extraction LLM calls
+  # (job-description parsing, resume import) route here when set;
+  # creative paths stay on the primary chain. Leave commented out to
+  # keep all calls on the primary chain.
+  # small_provider: groq
+  # small_model: llama-3.3-70b-versatile
+  #
+  # Phase 17.9.6: user-defined OpenAI-compatible providers. Each entry
+  # spawns a registered provider at startup. base_url and default_model
+  # are required; everything else is optional. Use this for third-party
+  # proxies, private vLLM/LM Studio endpoints, or any not-yet-bundled
+  # OpenAI-compatible upstream.
+  # custom_providers:
+  #   - id: my-vllm
+  #     display_name: Internal vLLM cluster
+  #     base_url: https://vllm.internal.example/v1
+  #     default_model: Qwen/Qwen2.5-32B-Instruct
+  #     api_key_env: VLLM_API_KEY      # omit for keyless endpoints
+  #     allow_empty_key: true          # set when the endpoint has no auth
+  #     models:
+  #       - id: Qwen/Qwen2.5-32B-Instruct
+  #         display_name: Qwen 2.5 32B
+  #         context_window: 32768
+  #       - meta-llama/Llama-3.3-70B-Instruct
 documents:
   output_dir: data/output
   template_dir: data/templates

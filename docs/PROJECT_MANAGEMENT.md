@@ -4,9 +4,9 @@ This document is the live operating context for AutoApply. It should stay short,
 
 ## Current State
 
-AutoApply is complete through **Phase 17.8: Material Strategy & Document Library**.
+AutoApply is complete through **Phase 17.9: LLM Provider Expansion** (2026-05-19), itself layered on top of Phase 17.8.
 
-The product currently supports job discovery, job-index freshness, fit scoring and explanations, materials generation, document-library curation, automation plans, review queues, gated submission, application tracking, provider management, and background task execution.
+The product currently supports job discovery, job-index freshness, fit scoring and explanations, materials generation, document-library curation, automation plans, review queues, gated submission, application tracking, multi-vendor LLM routing (OpenAI / Anthropic / Gemini / DeepSeek / Moonshot / Qwen / xAI / Groq / Mistral / OpenRouter / Ollama / Claude+Codex CLI / user-defined custom providers), per-provider model catalogs surfaced in the Settings UI, an optional cheap-model tier for extraction-style work, and background task execution.
 
 The next planned hardening area is **Phase 18: Worker Activation, Reliability, Parallelism, Cleanup** (re-ordered 2026-05-19 — see below). Multi-tenancy & auth hardening, originally Phase 18, is now Phase 19 and is deferred until the personal-version product is feature-complete.
 
@@ -28,9 +28,20 @@ When schema changes are present, run `uv run alembic upgrade head` before launch
 | Phase | Scope | Status |
 |---|---|---|
 | 17.8 | Material strategy defaults, user document library, plan-level material overrides, replace-materials review actions | Complete |
-| 18 | Multi-tenancy and auth hardening | Planned |
+| 17.9 | LLM provider expansion (more vendors, per-provider model catalog + UI picker, small-model tier, user-defined custom providers) | Complete |
+| 18 | Worker activation, reliability, parallelism, cleanup | Planned |
+| 19 | Multi-tenancy and auth hardening (deferred from Phase 18) | Future |
 
 ### Phase 18 Working Scope
+
+| Area | Intended Outcome |
+|---|---|
+| Worker activation | Move from "Celery code present" to "workers actually run the queues end-to-end under supervisord, with health checks and shutdown semantics" |
+| Reliability | Per-task retry policy, dead-letter routing, idempotency keys for resubmission-prone tasks, structured failure surfacing in the review UI |
+| Parallelism | Concurrency tuning per queue (`search` / `materials` / `application` / `maintenance`), rate-limit coordination, lock hygiene |
+| Cleanup | Retention policies for traces, plan-run reports, browser artifacts; bounded log rotation under supervisord |
+
+### Phase 19 Working Scope (deferred — kept here as a planning placeholder)
 
 | Area | Intended Outcome |
 |---|---|
@@ -55,7 +66,7 @@ When schema changes are present, run `uv run alembic upgrade head` before launch
 | Materials | `src/generation/`, `src/documents/` | Template rendering, source patching, document library, material defaults |
 | Automation | `src/orchestration/`, `src/application/review.py` | Plan runs, review queue, digest, gated submission |
 | Agents | `src/agent/` | Bounded tool registry, trace store, eval suites, HITL contracts |
-| Providers | `src/providers/`, `src/utils/llm.py` | OpenAI, Anthropic, Gemini, Claude CLI, Codex CLI through one registry |
+| Providers | `src/providers/`, `src/utils/llm.py` | Registry-driven multi-vendor LLM routing: OpenAI, Anthropic, Gemini, DeepSeek, Moonshot/Kimi, Qwen, xAI Grok, Groq, Mistral, OpenRouter, Ollama (local), Claude CLI, Codex CLI, plus user-defined custom providers via `llm.custom_providers`. Optional cheap-model tier through `llm.small_provider` / `llm.small_model`. |
 
 ## Operator Commands
 
