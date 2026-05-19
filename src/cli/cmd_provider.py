@@ -202,12 +202,16 @@ def set_key_cmd(
             exit_code=2,
         )
 
+    allow_empty = getattr(provider, "allow_empty_key", False)
     if api_key is None:
         if sys.stdin.isatty():
-            api_key = getpass.getpass(f"Enter API key for {provider_id}: ")
+            prompt_label = f"Enter API key for {provider_id}"
+            if allow_empty:
+                prompt_label += " (optional, press Enter to skip)"
+            api_key = getpass.getpass(prompt_label + ": ")
         else:
             api_key = sys.stdin.read().strip()
-    if not api_key:
+    if not api_key and not allow_empty:
         _emit_error(
             "provider.set-key",
             "Empty API key.",

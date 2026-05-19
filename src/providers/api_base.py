@@ -58,6 +58,15 @@ class ApiKeyProvider(LLMProvider):
     # Subclasses set these.
     api_key_env_var: str = ""
     default_model: str = ""
+    # Phase 17.9.3: some "API-key" providers don't actually require one.
+    # Ollama, a self-hosted vLLM, or an LM Studio endpoint typically
+    # serves without auth -- a credential record still needs to exist
+    # so we can persist a base_url override and a verified_at
+    # breadcrumb, but the secret may be empty. Setting this flag opts
+    # the provider into the keyless connect / generate paths in
+    # ``connect()`` / ``get_api_key()`` and the application + CLI
+    # layers so the user isn't forced to type a fake key.
+    allow_empty_key: bool = False
 
     def __init__(
         self,
@@ -76,9 +85,11 @@ class ApiKeyProvider(LLMProvider):
     def get_api_key(self) -> str:
         """Return the configured API key, falling back to env vars.
 
-        Raises :class:`ProviderError` if neither is set; callers (the
-        agent loop, the CLI test command) catch this and surface a
-        targeted error message rather than crashing.
+        Raises :class:`ProviderError` if neither is set, **unless**
+        :attr:`allow_empty_key` is True (Ollama / self-hosted servers
+        that typically run without auth) -- in that case we return the
+        empty string and the subclass's ``_headers`` is responsible
+        for omitting the Authorization header.
         """
         creds = self.credentials()
         if creds and creds.secret.get("api_key"):
@@ -87,6 +98,8 @@ class ApiKeyProvider(LLMProvider):
             env_value = os.environ.get(self.api_key_env_var)
             if env_value:
                 return env_value
+        if self.allow_empty_key:
+            return ""
         raise ProviderError(
             f"{self.display_name or self.id} is not connected. "
             f"Run `autoapply provider connect {self.id}` or set "
@@ -114,10 +127,17 @@ class ApiKeyProvider(LLMProvider):
         Mirrors the OAuth pattern -- never store an unverified
         credential. The probe uses :meth:`_probe_connection` directly
         so we don't have to first ``set`` then ``delete`` on failure.
+
+        When :attr:`allow_empty_key` is True (Ollama / self-hosted
+        servers without auth), an empty key is accepted -- the
+        credential row still gets persisted so we can record a custom
+        base_url and a verified_at breadcrumb.
         """
-        if not isinstance(api_key, str) or not api_key.strip():
-            raise ProviderError("API key must be a non-empty string.")
+        if not isinstance(api_key, str):
+            raise ProviderError("API key must be a string.")
         api_key = api_key.strip()
+        if not api_key and not self.allow_empty_key:
+            raise ProviderError("API key must be a non-empty string.")
         try:
             result = self._probe_connection(api_key, timeout=timeout)
         except Exception as exc:  # noqa: BLE001 -- network/HTTP boundary

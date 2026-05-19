@@ -110,6 +110,7 @@ def _register_builtins(registry: ProviderRegistry) -> None:
     from src.providers.groq import GroqProvider  # noqa: PLC0415
     from src.providers.mistral import MistralProvider  # noqa: PLC0415
     from src.providers.moonshot import MoonshotProvider  # noqa: PLC0415
+    from src.providers.ollama import OllamaProvider  # noqa: PLC0415
     from src.providers.openai import OpenAIProvider  # noqa: PLC0415
     from src.providers.openrouter import OpenRouterProvider  # noqa: PLC0415
     from src.providers.qwen import QwenProvider  # noqa: PLC0415
@@ -130,6 +131,8 @@ def _register_builtins(registry: ProviderRegistry) -> None:
     registry.register(GroqProvider)
     registry.register(MistralProvider)
     registry.register(OpenRouterProvider)
+    # Local self-hosted: keyless by default (see allow_empty_key).
+    registry.register(OllamaProvider)
     # Codex and Claude are both subprocess wrappers around an
     # already-installed agent CLI; neither owns its OAuth flow. A
     # future native CodexOAuthProvider would live alongside these,

@@ -133,7 +133,8 @@ def connect_api_key_provider(
             "error_code": "wrong_auth_type",
         }
     key = (api_key or "").strip()
-    if not key:
+    allow_empty = getattr(provider, "allow_empty_key", False)
+    if not key and not allow_empty:
         return {
             "ok": False,
             "error": "API key is empty.",

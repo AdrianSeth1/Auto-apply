@@ -484,4 +484,5 @@ class TestRegistryRegistersBuiltins:
             "groq",
             "mistral",
             "openrouter",
+            "ollama",
         }
