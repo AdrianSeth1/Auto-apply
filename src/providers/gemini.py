@@ -18,6 +18,7 @@ import httpx
 
 from src.providers.api_base import ApiKeyProvider
 from src.providers.base import (
+    ModelInfo,
     ProviderError,
     ProviderErrorKind,
     ProviderTestResult,
@@ -35,6 +36,30 @@ class GeminiProvider(ApiKeyProvider):
     install_hint = "Get an API key from https://aistudio.google.com/apikey"
     api_key_env_var = "GEMINI_API_KEY"
     default_model = DEFAULT_MODEL
+
+    KNOWN_MODELS = (
+        ModelInfo(
+            id="gemini-2.5-flash-lite",
+            display_name="Gemini 2.5 Flash-Lite",
+            context_window=1_000_000,
+            max_output_tokens=8_192,
+            tags=("fast", "cheap"),
+        ),
+        ModelInfo(
+            id="gemini-2.5-flash",
+            display_name="Gemini 2.5 Flash",
+            context_window=1_000_000,
+            max_output_tokens=8_192,
+            tags=("balanced", "long-context"),
+        ),
+        ModelInfo(
+            id="gemini-2.5-pro",
+            display_name="Gemini 2.5 Pro",
+            context_window=2_000_000,
+            max_output_tokens=8_192,
+            tags=("smart", "long-context"),
+        ),
+    )
 
     def _base_url(self) -> str:
         creds = self.credentials()

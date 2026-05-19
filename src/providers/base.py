@@ -191,6 +191,36 @@ class ProviderTestResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class ModelInfo:
+    """Catalog entry for a single model exposed by a provider.
+
+    Curated lists live on the provider class as ``KNOWN_MODELS``. The
+    Web UI consumes these to render a model picker; users can still
+    type a model id by hand when the upstream catalog ships something
+    newer than the bundled list. The catalog is intentionally a hint
+    -- it is NOT consulted by ``generate`` (the configured model id is
+    forwarded verbatim) so a stale entry can't block a valid model.
+    """
+
+    id: str
+    display_name: str = ""
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    supports_json: bool = True
+    tags: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "display_name": self.display_name or self.id,
+            "context_window": self.context_window,
+            "max_output_tokens": self.max_output_tokens,
+            "supports_json": self.supports_json,
+            "tags": list(self.tags),
+        }
+
+
 class LLMProvider(ABC):
     """Subclass to add a new LLM provider.
 
@@ -203,6 +233,10 @@ class LLMProvider(ABC):
     auth_type: AuthType = AuthType.API_KEY
     description: str = ""
     install_hint: str = ""
+    # Phase 17.9: curated model catalog surfaced to the Web UI / CLI.
+    # Empty for providers without a stable list (e.g. Ollama, where
+    # the catalog is whatever the local server has pulled).
+    KNOWN_MODELS: tuple[ModelInfo, ...] = ()
 
     def __init__(self, store: Any | None = None) -> None:
         # ``store`` is duck-typed so this module doesn't have a hard
@@ -265,6 +299,7 @@ class LLMProvider(ABC):
             "install_hint": self.install_hint,
             "configured": self.is_configured(),
             "credentials": creds.public_view() if creds else None,
+            "known_models": [m.to_dict() for m in self.KNOWN_MODELS],
         }
 
 

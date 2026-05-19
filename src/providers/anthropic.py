@@ -16,6 +16,7 @@ import httpx
 
 from src.providers.api_base import ApiKeyProvider
 from src.providers.base import (
+    ModelInfo,
     ProviderError,
     ProviderErrorKind,
     ProviderTestResult,
@@ -35,6 +36,40 @@ class AnthropicProvider(ApiKeyProvider):
     install_hint = "Get an API key from https://console.anthropic.com/settings/keys"
     api_key_env_var = "ANTHROPIC_API_KEY"
     default_model = DEFAULT_MODEL
+
+    # Curated as of 2026-05. Anthropic's API accepts unfamiliar model
+    # ids and surfaces a clear 404 if rejected; the user can always
+    # type a custom id via the "Custom..." option in the picker.
+    KNOWN_MODELS = (
+        ModelInfo(
+            id="claude-haiku-4-5",
+            display_name="Claude Haiku 4.5",
+            context_window=200_000,
+            max_output_tokens=8_192,
+            tags=("fast", "cheap"),
+        ),
+        ModelInfo(
+            id="claude-sonnet-4-6",
+            display_name="Claude Sonnet 4.6",
+            context_window=200_000,
+            max_output_tokens=8_192,
+            tags=("balanced",),
+        ),
+        ModelInfo(
+            id="claude-sonnet-4-5",
+            display_name="Claude Sonnet 4.5",
+            context_window=200_000,
+            max_output_tokens=8_192,
+            tags=("balanced",),
+        ),
+        ModelInfo(
+            id="claude-opus-4-7",
+            display_name="Claude Opus 4.7",
+            context_window=200_000,
+            max_output_tokens=8_192,
+            tags=("smart",),
+        ),
+    )
 
     def _base_url(self) -> str:
         creds = self.credentials()
