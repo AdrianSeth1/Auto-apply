@@ -510,13 +510,13 @@ def _raw_job_from_index_posting(posting, snapshot):
     )
 
 
-async def get_linkedin_session_status() -> dict:
+async def get_linkedin_session_status(force_refresh: bool = False) -> dict:
     try:
         from src.intake.linkedin import (
             get_linkedin_session_status as get_linkedin_session_status_intake,
         )
 
-        return await get_linkedin_session_status_intake()
+        return await get_linkedin_session_status_intake(force_refresh=force_refresh)
     except Exception as exc:
         logger.exception("Failed to inspect LinkedIn session")
         return {

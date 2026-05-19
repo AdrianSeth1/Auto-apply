@@ -352,8 +352,15 @@ async def search_jobs(payload: JobSearchPayload) -> dict:
 
 
 @router.get("/jobs/linkedin/session")
-async def linkedin_session_status() -> dict:
-    return await get_linkedin_session_status_usecase()
+async def linkedin_session_status(refresh: bool = False) -> dict:
+    """Return the LinkedIn session status.
+
+    By default served from a short-lived cache so opening the web UI doesn't
+    spin up a headless Chromium every time. Pass ``?refresh=true`` to force a
+    real probe (e.g. when the user explicitly clicks "Check status" or right
+    before an authenticated search kicks off).
+    """
+    return await get_linkedin_session_status_usecase(force_refresh=refresh)
 
 
 @router.post("/jobs/linkedin/session/connect")

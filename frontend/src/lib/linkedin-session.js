@@ -12,16 +12,24 @@ export const linkedinSessionState = reactive({
   ok: true,
   message: "",
   error: "",
+  cached: false,
+  checked_at: "",
 })
 
 export async function ensureLinkedInSessionLoaded() {
   if (linkedinSessionState.checked || linkedinSessionState.loading) {
     return
   }
-  await refreshLinkedInSession()
+  // Initial mount: let the backend serve from cache if it has one.
+  await refreshLinkedInSession({ forceRefresh: false })
 }
 
-export async function refreshLinkedInSession() {
+export async function refreshLinkedInSession({ forceRefresh = true } = {}) {
+  // Default forceRefresh=true: user-initiated refresh (e.g. clicking
+  // "Check status") should bypass the backend's probe cache and run a real
+  // headless probe. Callers that only want to populate state if it isn't
+  // already loaded should use ensureLinkedInSessionLoaded() instead, which
+  // calls this with forceRefresh=false.
   if (linkedinSessionState.loading) {
     return
   }
@@ -30,7 +38,7 @@ export async function refreshLinkedInSession() {
   linkedinSessionState.error = ""
 
   try {
-    syncLinkedInSession(await api.linkedinSession())
+    syncLinkedInSession(await api.linkedinSession({ forceRefresh }))
   } catch (error) {
     linkedinSessionState.checked = true
     linkedinSessionState.authenticated = false
@@ -76,4 +84,6 @@ export function syncLinkedInSession(payload) {
   linkedinSessionState.ok = payload.ok !== false
   linkedinSessionState.message = payload.message || ""
   linkedinSessionState.error = payload.ok === false ? payload.message || payload.error || "" : ""
+  linkedinSessionState.cached = Boolean(payload.cached)
+  linkedinSessionState.checked_at = payload.checked_at || ""
 }

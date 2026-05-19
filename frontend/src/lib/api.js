@@ -101,8 +101,12 @@ export const api = {
       method: "DELETE",
     })
   },
-  linkedinSession() {
-    return request("/api/jobs/linkedin/session")
+  linkedinSession({ forceRefresh = false } = {}) {
+    // Default path is cache-served on the backend (5-min TTL) so opening the
+    // UI doesn't spin up a headless Chromium every time. Pass forceRefresh to
+    // run a real probe — e.g. from an explicit "Check status" click.
+    const suffix = forceRefresh ? "?refresh=true" : ""
+    return request(`/api/jobs/linkedin/session${suffix}`)
   },
   connectLinkedIn() {
     return request("/api/jobs/linkedin/session/connect", {
