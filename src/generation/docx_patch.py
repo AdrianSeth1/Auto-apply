@@ -82,12 +82,32 @@ def patch_resume_docx(
     document: ResumeDocument,
     *,
     output_path: Path,
+    allow_reorder_sections: bool = True,
+    allow_add_remove_bullets: bool = True,
 ) -> PatchReport:
     """Open ``source_path``, apply IR-driven patches, save to
     ``output_path``. Returns a :class:`PatchReport` describing what
     changed. Raises :class:`PatchFallback` only when the document is
     so far from the IR's shape that no useful edit can be made --
-    callers catch it as the "give up and template" signal."""
+    callers catch it as the "give up and template" signal.
+
+    Phase 18.x: two policy knobs from the user's saved patch settings:
+
+    * ``allow_reorder_sections`` — when ``False``, the IR's
+      ``section_order`` is ignored for visibility decisions. The
+      patcher only edits the sections that are already present in
+      the source document and never re-orders or hides them. This
+      is the conservative "keep my layout exactly" mode.
+    * ``allow_add_remove_bullets`` — when ``False``, the patcher
+      will not append surplus bullets to a section and will not
+      blank deficit bullets; the existing count is preserved by
+      truncating the IR's bullet list to the source's slot count.
+      Surplus IR bullets get folded back as a strategy note for
+      auditability.
+
+    Defaults preserve the previous (Phase 15.2) behavior so existing
+    callers don't change shape.
+    """
     try:
         from docx import Document  # local import: heavy
     except ImportError as exc:  # pragma: no cover -- python-docx is a hard dep
@@ -104,8 +124,14 @@ def patch_resume_docx(
         # stripped from any source DOCX (see _strip_summary_section).
         _strip_summary_section(doc, report)
         _patch_skills(doc, document, report)
-        _patch_bullets(doc, document, report)
-        _patch_section_visibility(doc, document, report)
+        _patch_bullets(
+            doc,
+            document,
+            report,
+            allow_add_remove_bullets=allow_add_remove_bullets,
+        )
+        if allow_reorder_sections:
+            _patch_section_visibility(doc, document, report)
     except PatchFallback:
         # Bubble up to caller (materials router) -- do NOT swallow.
         raise
@@ -293,9 +319,22 @@ def _patch_skills(doc: Any, document: ResumeDocument, report: PatchReport) -> No
     )
 
 
-def _patch_bullets(doc: Any, document: ResumeDocument, report: PatchReport) -> None:
+def _patch_bullets(
+    doc: Any,
+    document: ResumeDocument,
+    report: PatchReport,
+    *,
+    allow_add_remove_bullets: bool = True,
+) -> None:
     """Replace bullet runs section by section. Matches sections by
-    name (Experience / Projects); other sections are left untouched."""
+    name (Experience / Projects); other sections are left untouched.
+
+    When ``allow_add_remove_bullets`` is False the source DOCX's bullet
+    count is treated as authoritative: surplus IR bullets are dropped
+    (and noted in the report) and deficit slots are left with their
+    original text instead of being blanked. This is the user's
+    "preserve my structure exactly" mode.
+    """
     section_map = {
         "experience": list(document.experiences or []),
         "experiences": list(document.experiences or []),
@@ -329,19 +368,42 @@ def _patch_bullets(doc: Any, document: ResumeDocument, report: PatchReport) -> N
         for i, source_bullet_idx in enumerate(bullet_indices):
             if i < len(new_bullets):
                 _replace_paragraph_text(paragraphs[source_bullet_idx], new_bullets[i])
-            else:
+            elif allow_add_remove_bullets:
+                # Default behaviour: blank the deficit slot. Keeps
+                # the bullet style/numbering anchor in place so the
+                # rendered DOCX doesn't reflow weirdly, but the line
+                # reads empty to the reader.
                 _replace_paragraph_text(paragraphs[source_bullet_idx], "")
-        # Append any leftover bullets after the last existing bullet
-        # in this section so we do not lose IR content.
+            # else: preserve original bullet text -- the user asked us
+            # not to add or remove bullets, so leaving the source text
+            # is the honest choice.
+
         if len(new_bullets) > len(bullet_indices) and bullet_indices:
-            anchor = paragraphs[bullet_indices[-1]]
-            for extra in new_bullets[len(bullet_indices):]:
-                anchor = _clone_paragraph_after(anchor, extra)
+            if allow_add_remove_bullets:
+                # Append any leftover bullets after the last existing
+                # bullet so we do not lose IR content.
+                anchor = paragraphs[bullet_indices[-1]]
+                for extra in new_bullets[len(bullet_indices):]:
+                    anchor = _clone_paragraph_after(anchor, extra)
+            else:
+                # User opted out of growing the section. Surface the
+                # dropped bullets as a report warning so the operator
+                # can decide whether to widen the policy.
+                dropped = new_bullets[len(bullet_indices):]
+                report.warnings.append(
+                    f"section={name} dropped {len(dropped)} IR bullet(s) "
+                    f"(allow_add_remove_bullets=False): "
+                    + " | ".join(dropped[:3])
+                    + (" …" if len(dropped) > 3 else "")
+                )
 
         report.operations.append(
             PatchOperation(
                 kind="bullet",
-                detail=f"section={name} bullets {len(bullet_indices)} -> {len(new_bullets)}",
+                detail=(
+                    f"section={name} bullets {len(bullet_indices)} -> "
+                    f"{min(len(new_bullets), len(bullet_indices)) if not allow_add_remove_bullets else len(new_bullets)}"
+                ),
             )
         )
 
@@ -444,9 +506,213 @@ def _find_all_sections(
     return found
 
 
+# --- Cover letter patcher --------------------------------------------
+#
+# Cover letters are structurally simpler than resumes -- no bullet
+# lists, no sub-sections -- but they care a lot about the surrounding
+# template (sender address block, date, recipient block, salutation,
+# signature). When the user picks ``patch_existing`` for a cover
+# letter, they want us to preserve those layout elements and only
+# rewrite the body paragraphs in between.
+#
+# The heuristic anchors:
+#
+#   * Body STARTS after a ``"Dear ..."`` paragraph (the salutation).
+#     If there isn't one we bail to PatchFallback rather than guess --
+#     replacing a whole letter when we can't find the salutation
+#     usually means we'd overwrite the address block.
+#
+#   * Body ENDS at a closing line. We accept the common English
+#     closings ("Sincerely", "Best regards", "Best,", "Yours
+#     sincerely", "Thank you", "Regards", "Kind regards"). If none
+#     is found we fall back to the last non-empty paragraph in the
+#     document (which is typically the signature).
+
+_COVER_CLOSING_PATTERNS = (
+    "sincerely",
+    "yours sincerely",
+    "yours truly",
+    "best regards",
+    "kind regards",
+    "warm regards",
+    "regards",
+    "best wishes",
+    "best,",
+    "thank you",
+    "thanks,",
+    "respectfully",
+    "cordially",
+)
+
+
+def _find_cover_salutation_index(doc: Any) -> int | None:
+    """Return the index of the salutation paragraph (``Dear ...``)
+    in the source DOCX, or ``None`` if we can't find one."""
+    for idx, para in enumerate(doc.paragraphs):
+        text = (para.text or "").strip().lower()
+        if text.startswith("dear ") or text.startswith("to whom"):
+            return idx
+    return None
+
+
+def _find_cover_closing_index(
+    doc: Any, after_idx: int
+) -> int | None:
+    """Return the index of the first closing line at or after
+    ``after_idx``, or ``None`` if no recognized closing is present."""
+    for idx in range(after_idx + 1, len(doc.paragraphs)):
+        text = (doc.paragraphs[idx].text or "").strip().lower().rstrip(",")
+        if not text:
+            continue
+        for marker in _COVER_CLOSING_PATTERNS:
+            if text == marker or text.startswith(marker + ","):
+                return idx
+            # Some closings appear inline like "Sincerely yours"
+            if text.startswith(marker + " ") and len(text) - len(marker) < 16:
+                return idx
+    return None
+
+
+def patch_cover_letter_docx(
+    source_path: Path,
+    document,
+    *,
+    output_path: Path,
+) -> PatchReport:
+    """Replace the body paragraphs of a cover letter DOCX in place.
+
+    ``document`` is a :class:`~src.generation.ir.CoverLetterDocument`
+    -- the same IR the regenerate path produces -- so this patcher
+    can be a drop-in for ``patch_existing`` callers that previously
+    fell back to template rendering.
+
+    The patcher preserves everything outside the body block: the
+    sender / date / recipient header above the salutation, the
+    salutation itself, the closing line + signature below the
+    closing, and any contact line at the very bottom. The body
+    between salutation and closing is rewritten run-by-run with the
+    IR's ``paragraphs`` -- surplus IR paragraphs are appended after
+    the last body paragraph, deficit slots are blanked.
+
+    Raises :class:`PatchFallback` when we can't anchor a salutation,
+    so the caller can route to the template path with a clean note.
+    """
+    try:
+        from docx import Document  # local import: heavy
+    except ImportError as exc:  # pragma: no cover -- python-docx is a hard dep
+        raise PatchFallback(f"python-docx not available: {exc}") from exc
+
+    if not source_path.exists():
+        raise PatchFallback(f"source DOCX missing: {source_path}")
+
+    doc = Document(str(source_path))
+    report = PatchReport(success=True, output_path=output_path)
+
+    salutation_idx = _find_cover_salutation_index(doc)
+    if salutation_idx is None:
+        raise PatchFallback(
+            "could not locate a 'Dear ...' salutation in the source DOCX -- "
+            "refusing to overwrite the whole document"
+        )
+
+    closing_idx = _find_cover_closing_index(doc, salutation_idx)
+    # If we can't find a closing, treat everything after the salutation
+    # up to the last non-empty paragraph as the body. The last
+    # non-empty paragraph is left alone so the operator's signature /
+    # name line survives.
+    if closing_idx is None:
+        last_non_empty = salutation_idx
+        for idx in range(len(doc.paragraphs) - 1, salutation_idx, -1):
+            if (doc.paragraphs[idx].text or "").strip():
+                last_non_empty = idx
+                break
+        closing_idx = last_non_empty
+        report.warnings.append(
+            "no recognised closing line ('Sincerely', 'Best regards', etc.) "
+            "found in source; replaced body up to the last non-empty "
+            "paragraph"
+        )
+
+    body_indices = [
+        idx
+        for idx in range(salutation_idx + 1, closing_idx)
+        if (doc.paragraphs[idx].text or "").strip()
+    ]
+
+    # Extract the new body paragraphs from the IR. ``paragraphs`` is a
+    # list of CoverLetterParagraph; we drop salutation/closing-typed
+    # entries because the source DOCX already provides those and we
+    # explicitly want to keep them.
+    new_paragraphs: list[str] = []
+    for para in getattr(document, "paragraphs", []) or []:
+        text = (getattr(para, "text", "") or "").strip()
+        if not text:
+            continue
+        ptype = getattr(para, "type", "other")
+        if ptype in {"opening", "closing"}:
+            # ``opening`` from the IR is the salutation, ``closing``
+            # is "Sincerely,\nLiam" — both already in the source
+            # template, don't duplicate them.
+            continue
+        new_paragraphs.append(text)
+
+    if not new_paragraphs:
+        # If the IR offered no body content, nothing to patch -- treat
+        # as a "no-op" patch rather than blanking the source.
+        report.warnings.append(
+            "cover letter IR had no body paragraphs; source body retained"
+        )
+    else:
+        try:
+            # Replace existing body slots run-by-run.
+            for i, source_idx in enumerate(body_indices):
+                if i < len(new_paragraphs):
+                    _replace_paragraph_text(
+                        doc.paragraphs[source_idx], new_paragraphs[i]
+                    )
+                else:
+                    _replace_paragraph_text(doc.paragraphs[source_idx], "")
+
+            # Append surplus IR paragraphs after the last existing
+            # body paragraph so we don't lose tailored content.
+            if len(new_paragraphs) > len(body_indices) and body_indices:
+                anchor = doc.paragraphs[body_indices[-1]]
+                for extra in new_paragraphs[len(body_indices):]:
+                    anchor = _clone_paragraph_after(anchor, extra)
+            elif len(new_paragraphs) > 0 and not body_indices:
+                # The source had a salutation immediately followed by
+                # the closing -- no body slots to replace. Inject the
+                # body after the salutation by cloning.
+                anchor = doc.paragraphs[salutation_idx]
+                for extra in new_paragraphs:
+                    anchor = _clone_paragraph_after(anchor, extra)
+
+            report.operations.append(
+                PatchOperation(
+                    kind="cover_body",
+                    detail=(
+                        f"body slots {len(body_indices)} -> "
+                        f"{len(new_paragraphs)}"
+                    ),
+                )
+            )
+        except PatchFallback:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("cover letter patch failed; falling back to template")
+            raise PatchFallback(
+                f"cover letter patch raised: {exc!r}"
+            ) from exc
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(output_path))
+    return report
+
+
 __all__ = [
     "PatchFallback",
     "PatchOperation",
     "PatchReport",
     "patch_resume_docx",
+    "patch_cover_letter_docx",
 ]

@@ -240,7 +240,20 @@ export const api = {
       method: "DELETE",
     })
   },
-  generateJobMaterial(job, materialType, templateId = "", profileId = "") {
+  generateJobMaterial(
+    job,
+    materialType,
+    templateId = "",
+    profileId = "",
+    options = {},
+  ) {
+    const {
+      strategy = null,
+      sourceDocumentId = null,
+      patchAggressiveness = null,
+      patchAllowReorderSections = null,
+      patchAllowAddRemoveBullets = null,
+    } = options
     return request("/api/jobs/generate-material", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -249,6 +262,11 @@ export const api = {
         material_type: materialType,
         template_id: templateId || null,
         profile_id: profileId || null,
+        strategy,
+        source_document_id: sourceDocumentId,
+        patch_aggressiveness: patchAggressiveness,
+        patch_allow_reorder_sections: patchAllowReorderSections,
+        patch_allow_add_remove_bullets: patchAllowAddRemoveBullets,
       }),
     })
   },
@@ -279,7 +297,18 @@ export const api = {
       body: JSON.stringify({ reason: reason || null }),
     })
   },
-  regenerateApplicationMaterial(applicationId, { materialType, strategy = null, templateId = null, sourceDocumentId = null } = {}) {
+  regenerateApplicationMaterial(
+    applicationId,
+    {
+      materialType,
+      strategy = null,
+      templateId = null,
+      sourceDocumentId = null,
+      patchAggressiveness = null,
+      patchAllowReorderSections = null,
+      patchAllowAddRemoveBullets = null,
+    } = {},
+  ) {
     return request(`/api/applications/${applicationId}/regenerate-material`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -288,6 +317,9 @@ export const api = {
         strategy,
         template_id: templateId,
         source_document_id: sourceDocumentId,
+        patch_aggressiveness: patchAggressiveness,
+        patch_allow_reorder_sections: patchAllowReorderSections,
+        patch_allow_add_remove_bullets: patchAllowAddRemoveBullets,
       }),
     })
   },

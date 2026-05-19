@@ -1,0 +1,8 @@
+cover_letter:
+  default_document_id: ''
+  default_template_id: ''
+  strategy: regenerate
+resume:
+  default_document_id: 8930f336-fe20-4748-baf4-e9ef3c629769
+  default_template_id: ''
+  strategy: patch_existing

@@ -7,6 +7,7 @@ import {
   CircleX,
   ExternalLink,
   Inbox,
+  Loader2,
   PauseCircle,
   RefreshCw,
   Send,
@@ -30,6 +31,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { EmptyState } from "@/components/ui/empty-state"
+import { ProgressBanner } from "@/components/ui/progress-banner"
 import { api } from "@/lib/api"
 import { formatDate, formatPercent } from "@/lib/format"
 
@@ -56,6 +58,13 @@ const REPLACE_MATERIAL_TYPE_OPTIONS = [
 const REPLACE_STRATEGY_OPTIONS = [
   { value: "regenerate", label: "Regenerate from a template" },
   { value: "patch_existing", label: "Patch a document from my library" },
+  { value: "use_library", label: "Use library document as-is (no edits)" },
+]
+
+const PATCH_AGGRESSIVENESS_OPTIONS = [
+  { value: "conservative", label: "Conservative · barely touch the wording" },
+  { value: "balanced", label: "Balanced · sensible rewriting (recommended)" },
+  { value: "aggressive", label: "Aggressive · rewrite freely to match the JD" },
 ]
 
 const state = reactive({
@@ -89,6 +98,13 @@ const replaceDialog = reactive({
   strategy: "regenerate",
   templateId: "",
   sourceDocumentId: "",
+  // Phase 18.x: per-call overrides for the three patch knobs. ``null``
+  // means "use the Settings default for this document_type", which is
+  // what the backend's ``resolve_material_choice`` does when these
+  // arrive as ``null`` over the wire.
+  patchAggressiveness: null,
+  patchAllowReorderSections: null,
+  patchAllowAddRemoveBullets: null,
   submitting: false,
 })
 
@@ -200,6 +216,9 @@ function openReplaceDialog(application) {
   replaceDialog.strategy = "regenerate"
   replaceDialog.templateId = ""
   replaceDialog.sourceDocumentId = ""
+  replaceDialog.patchAggressiveness = null
+  replaceDialog.patchAllowReorderSections = null
+  replaceDialog.patchAllowAddRemoveBullets = null
   replaceDialog.submitting = false
   replaceDialog.open = true
   // If the user clearly only has a cover letter to fix, switch the
@@ -225,10 +244,23 @@ async function confirmReplace() {
       strategy: replaceDialog.strategy || null,
       templateId: replaceDialog.templateId || null,
       sourceDocumentId: replaceDialog.sourceDocumentId || null,
+      patchAggressiveness:
+        replaceDialog.strategy === "patch_existing"
+          ? replaceDialog.patchAggressiveness
+          : null,
+      patchAllowReorderSections:
+        replaceDialog.strategy === "patch_existing"
+          ? replaceDialog.patchAllowReorderSections
+          : null,
+      patchAllowAddRemoveBullets:
+        replaceDialog.strategy === "patch_existing"
+          ? replaceDialog.patchAllowAddRemoveBullets
+          : null,
     })
     const notes = Array.isArray(result?.strategy_notes) ? result.strategy_notes : []
+    const verb = replaceDialog.strategy === "use_library" ? "replaced" : "regenerated"
     state.message =
-      "Materials regenerated." + (notes.length ? ` (${notes.join("; ")})` : "")
+      `Materials ${verb}.` + (notes.length ? ` (${notes.join("; ")})` : "")
     state.messageVariant = "success"
     closeReplaceDialog()
     await refresh()
@@ -501,6 +533,12 @@ onMounted(refresh)
         Reload
       </Button>
     </div>
+
+    <ProgressBanner
+      v-if="state.pendingAction"
+      title="Working on it…"
+      detail="Processing your action against the review queue."
+    />
 
     <Alert v-if="state.error" variant="destructive">
       <AlertDescription>{{ state.error }}</AlertDescription>
@@ -803,10 +841,67 @@ onMounted(refresh)
               :options="replaceDocumentOptions()"
               aria-label="Library document"
             />
-            <span class="text-xs text-muted-foreground">
+            <span
+              v-if="replaceDialog.strategy === 'use_library'"
+              class="text-xs text-muted-foreground"
+            >
+              The selected document is attached to this application as-is. No LLM, no template, no edits.
+            </span>
+            <span
+              v-else
+              class="text-xs text-muted-foreground"
+            >
               Patching works for DOCX resumes today. LaTeX or PDF sources will fall back to regenerate with a warning.
             </span>
           </label>
+
+          <!-- Phase 18.x patch knobs: per-call overrides only shown when
+               strategy is patch_existing. Leaving a knob at its
+               'inherit' value posts ``null`` and the backend falls
+               back to the Settings → Material defaults entry. -->
+          <div
+            v-if="replaceDialog.strategy === 'patch_existing'"
+            class="space-y-3 rounded-md border border-dashed bg-muted/30 p-3"
+          >
+            <div class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Patch behaviour (override defaults for this run)
+            </div>
+            <label class="space-y-1.5 block">
+              <span class="text-xs font-medium text-muted-foreground">Rewrite intensity</span>
+              <AppSelect
+                v-model="replaceDialog.patchAggressiveness"
+                :options="[
+                  { value: null, label: 'Inherit from Settings' },
+                  ...PATCH_AGGRESSIVENESS_OPTIONS,
+                ]"
+                aria-label="Bullet rewrite intensity for this regeneration"
+              />
+            </label>
+            <label class="space-y-1.5 block">
+              <span class="text-xs font-medium text-muted-foreground">Allow re-ordering sections</span>
+              <AppSelect
+                v-model="replaceDialog.patchAllowReorderSections"
+                :options="[
+                  { value: null, label: 'Inherit from Settings' },
+                  { value: true, label: 'Yes — let sections re-order' },
+                  { value: false, label: 'No — keep source section order' },
+                ]"
+                aria-label="Allow re-ordering sections for this regeneration"
+              />
+            </label>
+            <label class="space-y-1.5 block">
+              <span class="text-xs font-medium text-muted-foreground">Allow adding/removing bullets</span>
+              <AppSelect
+                v-model="replaceDialog.patchAllowAddRemoveBullets"
+                :options="[
+                  { value: null, label: 'Inherit from Settings' },
+                  { value: true, label: 'Yes — add or blank bullets as needed' },
+                  { value: false, label: 'No — preserve source bullet count' },
+                ]"
+                aria-label="Allow adding or removing bullets for this regeneration"
+              />
+            </label>
+          </div>
         </div>
 
         <DialogFooter>
@@ -816,12 +911,17 @@ onMounted(refresh)
           <Button
             :disabled="
               replaceDialog.submitting ||
-              (replaceDialog.strategy === 'patch_existing' && !replaceDialog.sourceDocumentId)
+              (replaceDialog.strategy !== 'regenerate' && !replaceDialog.sourceDocumentId)
             "
             @click="confirmReplace"
           >
-            <Sparkles class="h-4 w-4" />
-            {{ replaceDialog.submitting ? "Regenerating…" : "Regenerate" }}
+            <Loader2 v-if="replaceDialog.submitting" class="h-4 w-4 animate-spin" />
+            <Sparkles v-else class="h-4 w-4" />
+            {{
+              replaceDialog.submitting
+                ? (replaceDialog.strategy === 'use_library' ? 'Replacing…' : 'Regenerating…')
+                : (replaceDialog.strategy === 'use_library' ? 'Replace' : 'Regenerate')
+            }}
           </Button>
         </DialogFooter>
       </DialogContent>

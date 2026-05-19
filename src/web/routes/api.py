@@ -140,8 +140,13 @@ class JobMaterialPayload(BaseModel):
     template_id: str | None = None
     profile_id: str | None = None
     # Phase 17.8: caller may override the user's saved defaults.
-    strategy: str | None = None  # "regenerate" | "patch_existing"
+    strategy: str | None = None  # "regenerate" | "patch_existing" | "use_library"
     source_document_id: str | None = None  # UserDocument id
+    # Phase 18.x: per-call overrides for the three patch knobs (only
+    # consulted when strategy is ``patch_existing``).
+    patch_aggressiveness: str | None = None
+    patch_allow_reorder_sections: bool | None = None
+    patch_allow_add_remove_bullets: bool | None = None
 
 
 class TemplateCreatePayload(BaseModel):
@@ -219,6 +224,11 @@ class RegenerateMaterialPayload(BaseModel):
     strategy: str | None = None
     template_id: str | None = None
     source_document_id: str | None = None
+    # Phase 18.x: per-call overrides for the three patch knobs. When
+    # ``None`` the saved material default for this document_type wins.
+    patch_aggressiveness: str | None = None
+    patch_allow_reorder_sections: bool | None = None
+    patch_allow_add_remove_bullets: bool | None = None
 
 
 class LLMSettingsPayload(BaseModel):
@@ -374,6 +384,9 @@ async def generate_job_material(payload: JobMaterialPayload) -> dict:
         profile_id=payload.profile_id,
         strategy=payload.strategy,
         source_document_id=payload.source_document_id,
+        patch_aggressiveness=payload.patch_aggressiveness,
+        patch_allow_reorder_sections=payload.patch_allow_reorder_sections,
+        patch_allow_add_remove_bullets=payload.patch_allow_add_remove_bullets,
     )
     if result["ok"]:
         return result
@@ -755,13 +768,36 @@ async def regenerate_application_material_route(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid application ID") from exc
 
-    result = await regenerate_application_material(
-        application_id=application_uuid,
-        material_type=payload.material_type,
-        strategy=payload.strategy,
-        template_id=payload.template_id,
-        source_document_id=payload.source_document_id,
-    )
+    try:
+        result = await regenerate_application_material(
+            application_id=application_uuid,
+            material_type=payload.material_type,
+            strategy=payload.strategy,
+            template_id=payload.template_id,
+            source_document_id=payload.source_document_id,
+            patch_aggressiveness=payload.patch_aggressiveness,
+            patch_allow_reorder_sections=payload.patch_allow_reorder_sections,
+            patch_allow_add_remove_bullets=payload.patch_allow_add_remove_bullets,
+        )
+    except Exception as exc:
+        # The inner functions are supposed to catch their own failures
+        # and return a structured error dict, but a few code paths
+        # (model serialization, downstream DB writes) can still raise
+        # bare exceptions. Without this catch FastAPI just renders
+        # ``Internal Server Error`` with no traceback in our log,
+        # leaving the operator with nothing to debug.
+        import logging
+        logging.getLogger("autoapply.web.routes.api").exception(
+            "regenerate-material crashed: material_type=%s strategy=%s "
+            "source_document_id=%s",
+            payload.material_type,
+            payload.strategy,
+            payload.source_document_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Regeneration crashed: {type(exc).__name__}: {exc}",
+        ) from exc
     if result["ok"]:
         return result
     status_code_map = {
@@ -771,12 +807,23 @@ async def regenerate_application_material_route(
         "database_unavailable": 503,
         "missing_artifact": 500,
         "generation_failed": 500,
+        "material_generation_failed": 500,
+        "serialization_failed": 500,
         "load_failed": 500,
         "application_update_failed": 500,
     }
+    # Surface ``strategy_notes`` (e.g. "Library document is a PDF
+    # file -- generated fresh instead") to the user. Without this
+    # the front-end only sees the generic ``error`` field and the
+    # operator can't tell whether the patch fell back, why the
+    # artifact is missing, or which step actually failed.
+    notes = result.get("strategy_notes") or []
+    detail = result["error"]
+    if notes:
+        detail = f"{detail} Notes: {'; '.join(notes)}"
     raise HTTPException(
         status_code=status_code_map.get(result["error_code"], 400),
-        detail=result["error"],
+        detail=detail,
     )
 
 

@@ -57,6 +57,7 @@ def generate_resume(
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     rewrite: bool = False,
     use_llm: bool = False,
+    rewrite_mode: str = "balanced",
 ) -> dict[str, Any]:
     """Generate a tailored resume for a specific job.
 
@@ -261,7 +262,7 @@ def build_resume_document(
     grouped = evidence_by_entity(evidence)
 
     if rewrite and use_llm:
-        grouped = _rewrite_grouped_evidence(grouped, jd_tags)
+        grouped = _rewrite_grouped_evidence(grouped, jd_tags, mode=rewrite_mode)
 
     document = ResumeDocument(
         template_id=template_id,
@@ -367,11 +368,15 @@ def _max_bullets_per_entity(manifest: TemplateManifest) -> int:
 
 
 def _rewrite_grouped_evidence(
-    grouped: dict[str, list[EvidenceBullet]], jd_tags: list[str]
+    grouped: dict[str, list[EvidenceBullet]],
+    jd_tags: list[str],
+    *,
+    mode: str = "balanced",
 ) -> dict[str, list[EvidenceBullet]]:
     rewritten_text = rewrite_bullets(
         {entity: [item.text for item in items] for entity, items in grouped.items()},
         jd_tags,
+        mode=mode,
     )
     rewritten: dict[str, list[EvidenceBullet]] = {}
     for entity, items in grouped.items():
@@ -628,13 +633,20 @@ def _rank_and_select(
 def rewrite_bullets(
     selected_bullets: dict[str, list[str]],
     jd_tags: list[str],
+    *,
+    mode: str = "balanced",
 ) -> dict[str, list[str]]:
     """Light lexical rewrite of bullets to inject JD keywords.
 
-    Rules:
-    - Only adjust phrasing, never change facts or add claims
-    - Inject relevant keywords where natural
-    - Preserve quantified results exactly
+    ``mode`` selects which rules block the LLM gets:
+      - ``conservative``: change at most a word or two; mostly pass-through
+      - ``balanced``: default; sensible rewriting while preserving claims
+      - ``aggressive``: rewrite freely while keeping all facts grounded
+
+    Mode is plumbed in from ``material_defaults.patch_aggressiveness``
+    for the patch_existing strategy. For regenerate the caller may
+    leave ``mode`` at the default; aggressiveness is meaningful mainly
+    when there's an original document the user wants to "preserve".
     """
     from src.utils.llm import LLMError
 
@@ -645,7 +657,7 @@ def rewrite_bullets(
         new_bullets = []
         for bullet in bullets:
             try:
-                rewrite = _rewrite_single_bullet(bullet, keywords_str)
+                rewrite = _rewrite_single_bullet(bullet, keywords_str, mode=mode)
                 new_text = rewrite.rewritten_bullet
                 # Fact-drift check: rewritten bullet should be similar length
                 if (
@@ -665,8 +677,8 @@ def rewrite_bullets(
     return rewritten
 
 
-_REWRITE_SYSTEM = """You are a resume bullet point editor. Your job is to lightly adjust
-a resume bullet to better match target job keywords while preserving ALL facts.
+_REWRITE_SYSTEM_BASE = """You are a resume bullet point editor. Your job is to adjust
+a resume bullet to better match target job keywords while preserving facts.
 
 Return ONLY a JSON object with exactly this shape:
 {
@@ -676,18 +688,64 @@ Return ONLY a JSON object with exactly this shape:
   "confidence": "high" | "medium" | "low",
   "changed_claims": []
 }
+"""
 
-Rules:
-- Keep the same meaning, structure, and claims
-- Preserve all numbers, metrics, and quantified results EXACTLY
-- Only adjust word choice to incorporate relevant keywords where natural
-- Do NOT add new skills, technologies, or achievements that weren't in the original
-- Do NOT change the tone from professional to casual or vice versa
-- changed_claims must list any claim that might not be grounded in the original bullet"""
+_REWRITE_RULES_BY_MODE: dict[str, str] = {
+    "conservative": (
+        "Rules (CONSERVATIVE — make the smallest possible change):\n"
+        "- Preserve sentence structure, length, and verbs as much as humanly possible\n"
+        "- Swap at most 1-2 words to incorporate ONE highly-relevant keyword if it "
+        "lands naturally; otherwise return the bullet unchanged\n"
+        "- Preserve all numbers, metrics, and quantified results EXACTLY\n"
+        "- Do NOT add new skills, technologies, or achievements that weren't in the original\n"
+        "- Do NOT change the tone or claims\n"
+        "- changed_claims must list any claim that might not be grounded in the original bullet"
+    ),
+    "balanced": (
+        "Rules (BALANCED — sensible rewriting):\n"
+        "- Keep the same meaning, structure, and claims\n"
+        "- Preserve all numbers, metrics, and quantified results EXACTLY\n"
+        "- Adjust word choice to incorporate relevant keywords where natural\n"
+        "- Do NOT add new skills, technologies, or achievements that weren't in the original\n"
+        "- Do NOT change the tone from professional to casual or vice versa\n"
+        "- changed_claims must list any claim that might not be grounded in the original bullet"
+    ),
+    "aggressive": (
+        "Rules (AGGRESSIVE — rewrite freely while keeping facts):\n"
+        "- You may rewrite the sentence structure and verbs as needed to surface "
+        "relevant keywords for the target role\n"
+        "- Preserve all numbers, metrics, and quantified results EXACTLY\n"
+        "- You may emphasise transferable skills implied by the original bullet, "
+        "but do NOT invent skills, technologies, or achievements that aren't grounded\n"
+        "- Keep the tone professional\n"
+        "- changed_claims must list any claim whose grounding in the original bullet "
+        "is even slightly uncertain"
+    ),
+}
 
 
-def _rewrite_single_bullet(bullet: str, keywords: str) -> BulletRewriteResult:
-    """Rewrite a single bullet using structured LLM output."""
+def _rewrite_system_for(mode: str) -> str:
+    rules = _REWRITE_RULES_BY_MODE.get(
+        mode, _REWRITE_RULES_BY_MODE["balanced"]
+    )
+    return _REWRITE_SYSTEM_BASE + "\n" + rules
+
+
+# Kept for back-compat with any external imports of the legacy name.
+_REWRITE_SYSTEM = _rewrite_system_for("balanced")
+
+
+def _rewrite_single_bullet(
+    bullet: str,
+    keywords: str,
+    *,
+    mode: str = "balanced",
+) -> BulletRewriteResult:
+    """Rewrite a single bullet using structured LLM output.
+
+    ``mode`` is one of ``conservative`` / ``balanced`` / ``aggressive``
+    and chooses the rewriting rules section in the system prompt.
+    """
     from src.utils.llm import generate_json
 
     prompt = (
@@ -695,7 +753,7 @@ def _rewrite_single_bullet(bullet: str, keywords: str) -> BulletRewriteResult:
         f"Original bullet: {bullet}\n\n"
         f"Rewrite the bullet to naturally incorporate relevant keywords."
     )
-    result = generate_json(prompt, system=_REWRITE_SYSTEM, timeout=60)
+    result = generate_json(prompt, system=_rewrite_system_for(mode), timeout=60)
     if isinstance(result, str):
         return BulletRewriteResult(rewritten_bullet=result.strip().strip("•-– ").strip())
     return BulletRewriteResult.model_validate(result)

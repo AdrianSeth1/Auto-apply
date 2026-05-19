@@ -48,15 +48,21 @@ class MaterialsGeneratePayload(BaseModel):
     profile_id: str | None = None
     template_id: str | None = None
     document_types: list[str] = Field(default_factory=lambda: ["resume", "cover_letter"])
-    # Phase 17.8: per-call overrides for the materials router. Empty /
-    # None means "let resolve_material_choice fall back to the user's
-    # Settings → Default material strategy".
+    # Phase 17.8 / 18.x: per-call overrides for the materials router.
+    # Empty / None means "let resolve_material_choice fall back to the
+    # user's Settings → Default material strategy".
     resume_strategy: str | None = None
     resume_template_id: str | None = None
     resume_source_document_id: str | None = None
+    resume_patch_aggressiveness: str | None = None
+    resume_patch_allow_reorder_sections: bool | None = None
+    resume_patch_allow_add_remove_bullets: bool | None = None
     cover_letter_strategy: str | None = None
     cover_letter_template_id: str | None = None
     cover_letter_source_document_id: str | None = None
+    cover_letter_patch_aggressiveness: str | None = None
+    cover_letter_patch_allow_reorder_sections: bool | None = None
+    cover_letter_patch_allow_add_remove_bullets: bool | None = None
 
 
 class ApplicationPreparePayload(BaseModel):
@@ -90,9 +96,15 @@ class OrchestrationPlanRunPayload(BaseModel):
     resume_strategy: str | None = None
     resume_template_id: str | None = None
     resume_source_document_id: str | None = None
+    resume_patch_aggressiveness: str | None = None
+    resume_patch_allow_reorder_sections: bool | None = None
+    resume_patch_allow_add_remove_bullets: bool | None = None
     cover_letter_strategy: str | None = None
     cover_letter_template_id: str | None = None
     cover_letter_source_document_id: str | None = None
+    cover_letter_patch_aggressiveness: str | None = None
+    cover_letter_patch_allow_reorder_sections: bool | None = None
+    cover_letter_patch_allow_add_remove_bullets: bool | None = None
 
 
 class StatusSyncPayload(BaseModel):
@@ -220,9 +232,15 @@ def orchestration_plan_run(
             resume_strategy=args.resume_strategy,
             resume_template_id=args.resume_template_id,
             resume_source_document_id=args.resume_source_document_id,
+            resume_patch_aggressiveness=args.resume_patch_aggressiveness,
+            resume_patch_allow_reorder_sections=args.resume_patch_allow_reorder_sections,
+            resume_patch_allow_add_remove_bullets=args.resume_patch_allow_add_remove_bullets,
             cover_letter_strategy=args.cover_letter_strategy,
             cover_letter_template_id=args.cover_letter_template_id,
             cover_letter_source_document_id=args.cover_letter_source_document_id,
+            cover_letter_patch_aggressiveness=args.cover_letter_patch_aggressiveness,
+            cover_letter_patch_allow_reorder_sections=args.cover_letter_patch_allow_reorder_sections,
+            cover_letter_patch_allow_add_remove_bullets=args.cover_letter_patch_allow_add_remove_bullets,
         )
     )
     # Phase 17.6: persist the report under data/plan_runs/ so the

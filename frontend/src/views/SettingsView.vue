@@ -117,8 +117,22 @@ const state = reactive({
     templates: { resume: [], cover_letter: [] },
     documents: { resume: [], cover_letter: [] },
     form: {
-      resume: { strategy: "regenerate", default_template_id: "", default_document_id: "" },
-      cover_letter: { strategy: "regenerate", default_template_id: "", default_document_id: "" },
+      resume: {
+        strategy: "regenerate",
+        default_template_id: "",
+        default_document_id: "",
+        patch_aggressiveness: "balanced",
+        patch_allow_reorder_sections: true,
+        patch_allow_add_remove_bullets: true,
+      },
+      cover_letter: {
+        strategy: "regenerate",
+        default_template_id: "",
+        default_document_id: "",
+        patch_aggressiveness: "balanced",
+        patch_allow_reorder_sections: true,
+        patch_allow_add_remove_bullets: true,
+      },
     },
   },
 })
@@ -239,6 +253,22 @@ async function refreshAll() {
 const MATERIAL_STRATEGY_OPTIONS = [
   { value: "regenerate", label: "Regenerate from a template" },
   { value: "patch_existing", label: "Patch a document from my library" },
+  { value: "use_library", label: "Use library document as-is (no edits)" },
+]
+
+const PATCH_AGGRESSIVENESS_OPTIONS = [
+  {
+    value: "conservative",
+    label: "Conservative · barely touch the wording",
+  },
+  {
+    value: "balanced",
+    label: "Balanced · sensible rewriting (recommended)",
+  },
+  {
+    value: "aggressive",
+    label: "Aggressive · rewrite freely to match the JD",
+  },
 ]
 
 function materialTemplateOptions(docType) {
@@ -296,6 +326,13 @@ async function loadMaterialDefaults() {
         strategy: entry.strategy || "regenerate",
         default_template_id: entry.default_template_id || "",
         default_document_id: entry.default_document_id || "",
+        patch_aggressiveness: entry.patch_aggressiveness || "balanced",
+        // Server returns explicit booleans; fall back to documented
+        // defaults if the field is missing (older config files).
+        patch_allow_reorder_sections:
+          entry.patch_allow_reorder_sections ?? true,
+        patch_allow_add_remove_bullets:
+          entry.patch_allow_add_remove_bullets ?? true,
       }
     }
   } catch (err) {
@@ -778,14 +815,76 @@ function isPrimary(provider) {
               v-else
               class="space-y-1.5"
             >
-              <span class="text-xs font-medium text-muted-foreground">Document to patch</span>
+              <span class="text-xs font-medium text-muted-foreground">
+                {{
+                  state.materialDefaults.form[docType].strategy === 'use_library'
+                    ? 'Document to use'
+                    : 'Document to patch'
+                }}
+              </span>
               <AppSelect
                 v-model="state.materialDefaults.form[docType].default_document_id"
                 :options="materialDocumentOptions(docType)"
                 :aria-label="`${materialDocTypeLabel(docType)} library document`"
               />
-              <span class="text-xs text-muted-foreground">
+              <span
+                v-if="state.materialDefaults.form[docType].strategy === 'use_library'"
+                class="text-xs text-muted-foreground"
+              >
+                The chosen document will be attached to each application as-is — no LLM, no template, no edits.
+              </span>
+              <span
+                v-else
+                class="text-xs text-muted-foreground"
+              >
                 Patching is supported for DOCX resumes today; LaTeX and PDF documents fall back to regenerate with a warning.
+              </span>
+            </label>
+          </div>
+
+          <!-- Phase 18.x patch knobs: only show when strategy is patch_existing. -->
+          <div
+            v-if="state.materialDefaults.form[docType].strategy === 'patch_existing'"
+            class="space-y-3 rounded-md border border-dashed border-border bg-background/60 p-3"
+          >
+            <div class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Patch behaviour
+            </div>
+            <label class="space-y-1.5 block">
+              <span class="text-xs font-medium text-muted-foreground">Rewrite intensity</span>
+              <AppSelect
+                v-model="state.materialDefaults.form[docType].patch_aggressiveness"
+                :options="PATCH_AGGRESSIVENESS_OPTIONS"
+                :aria-label="`${materialDocTypeLabel(docType)} bullet rewrite intensity`"
+              />
+              <span class="text-xs text-muted-foreground">
+                Controls how aggressively the language model rewrites individual bullet text. The two toggles below control structural changes independently.
+              </span>
+            </label>
+            <label class="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                class="mt-0.5"
+                v-model="state.materialDefaults.form[docType].patch_allow_reorder_sections"
+              />
+              <span>
+                <span class="font-medium">Allow re-ordering sections</span>
+                <span class="block text-xs text-muted-foreground">
+                  When off, the patched document keeps the same section order as your source DOCX. When on, sections can be re-ordered to match the planned layout.
+                </span>
+              </span>
+            </label>
+            <label class="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                class="mt-0.5"
+                v-model="state.materialDefaults.form[docType].patch_allow_add_remove_bullets"
+              />
+              <span>
+                <span class="font-medium">Allow adding/removing bullets</span>
+                <span class="block text-xs text-muted-foreground">
+                  When off, each section keeps the exact bullet count of your source DOCX. When on, surplus tailored bullets are appended and unused slots are blanked.
+                </span>
               </span>
             </label>
           </div>

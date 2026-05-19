@@ -1,15 +1,34 @@
-"""Phase 17.8: per-document-type material generation defaults.
+"""Phase 17.8 / 18.x: per-document-type material generation defaults.
 
 The user sets one default per document type ('resume', 'cover_letter')
 in Settings → Default material strategy. Each default says:
 
-* ``strategy``: ``"regenerate"`` to render from a template, or
-  ``"patch_existing"`` to edit a UserDocument from the library in
-  place.
+* ``strategy``:
+    - ``"regenerate"`` — render fresh from a template using the LLM.
+    - ``"patch_existing"`` — start from a library DOCX, replace its
+      bullets in place. Honors three knobs (see below) so the user
+      can tune how aggressively the LLM rewrites their original.
+    - ``"use_library"`` — drop in a library document as-is. No LLM
+      involvement, no rendering — the file is copied to the output
+      directory and returned. This is the "I already wrote the
+      perfect resume, just apply with it" path.
 * ``default_template_id``: TemplatePackage id (used when strategy is
   ``regenerate`` and the caller didn't override).
 * ``default_document_id``: UserDocument id (used when strategy is
-  ``patch_existing`` and the caller didn't override).
+  ``patch_existing`` or ``use_library`` and the caller didn't
+  override).
+* ``patch_aggressiveness``: ``"conservative"`` / ``"balanced"`` /
+  ``"aggressive"``. Controls *bullet-text rewrite intensity* only.
+  Section reordering and add/remove-bullet are independent toggles
+  (see below) per the user's design: a user can be aggressive on
+  wording while keeping the original structure intact.
+* ``patch_allow_reorder_sections``: when ``False``, the patch step
+  keeps the source DOCX's section order even if the IR suggests a
+  different one.
+* ``patch_allow_add_remove_bullets``: when ``False``, the patch
+  step preserves the exact bullet count of the source DOCX —
+  surplus bullets from the IR are dropped, deficit slots are left
+  blank rather than removed.
 
 The Jobs page "Generate" button and plan-run automation both ask
 :func:`resolve_material_choice` for the effective triple before
@@ -33,7 +52,12 @@ logger = logging.getLogger("autoapply.application.material_defaults")
 MATERIAL_DEFAULTS_PATH = PROJECT_ROOT / "config" / "material_defaults.yaml"
 
 SUPPORTED_DOCUMENT_TYPES = ("resume", "cover_letter")
-SUPPORTED_STRATEGIES = ("regenerate", "patch_existing")
+SUPPORTED_STRATEGIES = ("regenerate", "patch_existing", "use_library")
+SUPPORTED_PATCH_AGGRESSIVENESS = ("conservative", "balanced", "aggressive")
+
+DEFAULT_PATCH_AGGRESSIVENESS = "balanced"
+DEFAULT_PATCH_ALLOW_REORDER_SECTIONS = True
+DEFAULT_PATCH_ALLOW_ADD_REMOVE_BULLETS = True
 
 
 def _empty_default() -> dict[str, Any]:
@@ -41,15 +65,18 @@ def _empty_default() -> dict[str, Any]:
         "strategy": "regenerate",
         "default_template_id": "",
         "default_document_id": "",
+        "patch_aggressiveness": DEFAULT_PATCH_AGGRESSIVENESS,
+        "patch_allow_reorder_sections": DEFAULT_PATCH_ALLOW_REORDER_SECTIONS,
+        "patch_allow_add_remove_bullets": DEFAULT_PATCH_ALLOW_ADD_REMOVE_BULLETS,
     }
 
 
 def load_material_defaults() -> dict[str, dict[str, Any]]:
-    """Return ``{document_type: {strategy, default_template_id, default_document_id}}``.
+    """Return ``{document_type: {strategy, default_template_id, default_document_id,
+    patch_aggressiveness, patch_allow_reorder_sections,
+    patch_allow_add_remove_bullets}}``.
 
-    Missing file = empty defaults for both types (regenerate, no
-    template pinned — caller falls back to the system default
-    template).
+    Missing file = empty defaults for both types.
     """
     if not MATERIAL_DEFAULTS_PATH.exists():
         return {t: _empty_default() for t in SUPPORTED_DOCUMENT_TYPES}
@@ -116,18 +143,23 @@ def resolve_material_choice(
     override_strategy: str | None = None,
     override_template_id: str | None = None,
     override_document_id: str | None = None,
+    override_patch_aggressiveness: str | None = None,
+    override_patch_allow_reorder_sections: bool | None = None,
+    override_patch_allow_add_remove_bullets: bool | None = None,
 ) -> dict[str, Any]:
     """Compute the effective generation choice for one document.
 
-    Resolution order, per field:
-      strategy    : override → saved default → 'regenerate'
-      template_id : override → saved default → '' (caller falls back)
-      document_id : override → saved default → '' (only used if
-                    strategy == 'patch_existing')
+    Resolution order, per field: override → saved default → built-in
+    fallback. Returns a dict with keys ``strategy``, ``template_id``,
+    ``document_id``, ``patch_aggressiveness``,
+    ``patch_allow_reorder_sections``,
+    ``patch_allow_add_remove_bullets``, and ``source`` (audit string).
 
-    The returned dict has keys ``strategy``, ``template_id``,
-    ``document_id``, ``source`` (an audit string explaining which
-    layer won).
+    Behavior notes:
+      * ``patch_existing`` with no resolved ``document_id`` is downgraded
+        to ``regenerate`` so we always produce *something*.
+      * ``use_library`` with no resolved ``document_id`` is also
+        downgraded to ``regenerate`` — there is nothing to drop in.
     """
     if document_type not in SUPPORTED_DOCUMENT_TYPES:
         raise ValueError(f"unsupported document_type {document_type!r}")
@@ -140,11 +172,30 @@ def resolve_material_choice(
     template_id = (override_template_id or saved.get("default_template_id") or "").strip()
     document_id = (override_document_id or saved.get("default_document_id") or "").strip()
 
-    # If user said patch_existing but no document, downgrade to
-    # regenerate so we always produce *something*. Audit the downgrade
-    # so callers can surface it.
+    if override_patch_aggressiveness is not None:
+        aggressiveness = str(override_patch_aggressiveness).strip()
+    else:
+        aggressiveness = str(saved.get("patch_aggressiveness") or DEFAULT_PATCH_AGGRESSIVENESS).strip()
+    if aggressiveness not in SUPPORTED_PATCH_AGGRESSIVENESS:
+        aggressiveness = DEFAULT_PATCH_AGGRESSIVENESS
+
+    if override_patch_allow_reorder_sections is not None:
+        allow_reorder = bool(override_patch_allow_reorder_sections)
+    else:
+        allow_reorder = bool(
+            saved.get("patch_allow_reorder_sections", DEFAULT_PATCH_ALLOW_REORDER_SECTIONS)
+        )
+
+    if override_patch_allow_add_remove_bullets is not None:
+        allow_add_remove = bool(override_patch_allow_add_remove_bullets)
+    else:
+        allow_add_remove = bool(
+            saved.get("patch_allow_add_remove_bullets", DEFAULT_PATCH_ALLOW_ADD_REMOVE_BULLETS)
+        )
+
+    # Downgrade strategies that need a document_id when none is set.
     downgraded = False
-    if strategy == "patch_existing" and not document_id:
+    if strategy in ("patch_existing", "use_library") and not document_id:
         strategy = "regenerate"
         downgraded = True
 
@@ -162,6 +213,9 @@ def resolve_material_choice(
         "strategy": strategy,
         "template_id": template_id or None,
         "document_id": document_id or None,
+        "patch_aggressiveness": aggressiveness,
+        "patch_allow_reorder_sections": allow_reorder,
+        "patch_allow_add_remove_bullets": allow_add_remove,
         "source": ",".join(source_parts),
     }
 
@@ -180,10 +234,31 @@ def _normalize_default(entry: dict[str, Any]) -> dict[str, Any]:
             UUID(document_id)
         except (TypeError, ValueError):
             document_id = ""
+
+    aggressiveness = str(
+        entry.get("patch_aggressiveness") or DEFAULT_PATCH_AGGRESSIVENESS
+    ).strip()
+    if aggressiveness not in SUPPORTED_PATCH_AGGRESSIVENESS:
+        aggressiveness = DEFAULT_PATCH_AGGRESSIVENESS
+
+    # ``bool(<missing>)`` is False; fall back to the defaults so a
+    # blank entry still represents the documented system behaviour.
+    if "patch_allow_reorder_sections" in entry:
+        allow_reorder = bool(entry["patch_allow_reorder_sections"])
+    else:
+        allow_reorder = DEFAULT_PATCH_ALLOW_REORDER_SECTIONS
+    if "patch_allow_add_remove_bullets" in entry:
+        allow_add_remove = bool(entry["patch_allow_add_remove_bullets"])
+    else:
+        allow_add_remove = DEFAULT_PATCH_ALLOW_ADD_REMOVE_BULLETS
+
     return {
         "strategy": strategy,
         "default_template_id": template_id,
         "default_document_id": document_id,
+        "patch_aggressiveness": aggressiveness,
+        "patch_allow_reorder_sections": allow_reorder,
+        "patch_allow_add_remove_bullets": allow_add_remove,
     }
 
 
@@ -191,6 +266,10 @@ __all__ = [
     "MATERIAL_DEFAULTS_PATH",
     "SUPPORTED_DOCUMENT_TYPES",
     "SUPPORTED_STRATEGIES",
+    "SUPPORTED_PATCH_AGGRESSIVENESS",
+    "DEFAULT_PATCH_AGGRESSIVENESS",
+    "DEFAULT_PATCH_ALLOW_REORDER_SECTIONS",
+    "DEFAULT_PATCH_ALLOW_ADD_REMOVE_BULLETS",
     "load_material_defaults",
     "load_material_defaults_data",
     "resolve_material_choice",

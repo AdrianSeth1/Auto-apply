@@ -824,6 +824,9 @@ async def generate_material_for_job(
     profile_id: str | None = None,
     strategy: str | None = None,
     source_document_id: str | None = None,
+    patch_aggressiveness: str | None = None,
+    patch_allow_reorder_sections: bool | None = None,
+    patch_allow_add_remove_bullets: bool | None = None,
 ) -> dict:
     """Generate one selected application artifact for a web search result.
 
@@ -855,6 +858,9 @@ async def generate_material_for_job(
             override_strategy=strategy,
             override_template_id=template_id,
             override_document_id=source_document_id,
+            override_patch_aggressiveness=patch_aggressiveness,
+            override_patch_allow_reorder_sections=patch_allow_reorder_sections,
+            override_patch_allow_add_remove_bullets=patch_allow_add_remove_bullets,
         )
     except ValueError as exc:
         return {
@@ -870,6 +876,9 @@ async def generate_material_for_job(
     template_id = choice["template_id"] or template_id
     resolved_strategy = choice["strategy"]
     resolved_document_id = choice["document_id"]
+    resolved_patch_aggressiveness = choice["patch_aggressiveness"]
+    resolved_patch_allow_reorder = choice["patch_allow_reorder_sections"]
+    resolved_patch_allow_add_remove = choice["patch_allow_add_remove_bullets"]
 
     try:
         job = _raw_job_from_web_payload(job_payload, use_llm=use_llm)
@@ -906,6 +915,9 @@ async def generate_material_for_job(
             template_id=template_id,
             strategy=resolved_strategy,
             source_document_id=resolved_document_id,
+            patch_aggressiveness=resolved_patch_aggressiveness,
+            patch_allow_reorder_sections=resolved_patch_allow_reorder,
+            patch_allow_add_remove_bullets=resolved_patch_allow_add_remove,
         )
     except ValueError as exc:
         return {
@@ -947,6 +959,17 @@ async def generate_material_for_job(
     template = material_result.get("template")
     path = artifacts.get(material_type)
     if not path:
+        logger.error(
+            "artifact lookup failed: material_type=%s artifacts=%s "
+            "strategy=%s resolved_strategy=%s source_document_id=%s "
+            "strategy_notes=%s",
+            material_type,
+            {k: str(v) if v else None for k, v in artifacts.items()},
+            strategy,
+            resolved_strategy,
+            resolved_document_id,
+            material_result.get("strategy_notes"),
+        )
         return {
             "ok": False,
             "job": serialize_job(job),
@@ -959,23 +982,55 @@ async def generate_material_for_job(
             "requirements": job.requirements.model_dump(),
             "error": "The selected artifact could not be generated.",
             "error_code": "material_generation_failed",
+            "strategy_notes": material_result.get("strategy_notes") or [],
         }
 
-    serialized_document = _serialize_generation_model(document)
-    serialized_validation = _serialize_generation_model(validation)
-    artifact = _serialize_material_artifact(material_type, path)
-    serialized_artifacts = _stringify_material_artifacts(artifacts)
-    serialized_job = serialize_job(job)
-    requirements = job.requirements.model_dump()
-    version = _save_generation_version(
-        job=serialized_job,
-        material_type=material_type,
-        artifact=artifact,
-        artifacts=serialized_artifacts,
-        document=serialized_document,
-        validation=serialized_validation,
-        requirements=requirements,
-    )
+    # Anything that pydantic-serializes here can in principle blow up
+    # on a value the IR / validation pipeline didn't expect (e.g. a
+    # Path leaking out of model_dump or a custom type the JSON mode
+    # doesn't recognize). The original code let those bubble up
+    # uncaught -- FastAPI then rendered an opaque ``Internal Server
+    # Error`` with no traceback in our log. Wrap the post-generation
+    # serialization in its own try/except so we get a structured
+    # error + a real log line if a future regression bites.
+    try:
+        serialized_document = _serialize_generation_model(document)
+        serialized_validation = _serialize_generation_model(validation)
+        artifact = _serialize_material_artifact(material_type, path)
+        serialized_artifacts = _stringify_material_artifacts(artifacts)
+        serialized_job = serialize_job(job)
+        requirements = job.requirements.model_dump()
+        version = _save_generation_version(
+            job=serialized_job,
+            material_type=material_type,
+            artifact=artifact,
+            artifacts=serialized_artifacts,
+            document=serialized_document,
+            validation=serialized_validation,
+            requirements=requirements,
+        )
+    except Exception as exc:
+        logger.exception(
+            "post-generation serialization failed for material_type=%s",
+            material_type,
+        )
+        return {
+            "ok": False,
+            "job": serialize_job(job) if job else None,
+            "material_type": material_type,
+            "artifact": None,
+            "artifacts": _stringify_material_artifacts(artifacts),
+            "document": None,
+            "validation": None,
+            "template": template,
+            "requirements": job.requirements.model_dump() if job else None,
+            "error": (
+                f"Generation succeeded but the response could not be "
+                f"serialized: {type(exc).__name__}: {exc}"
+            ),
+            "error_code": "serialization_failed",
+            "strategy_notes": material_result.get("strategy_notes") or [],
+        }
 
     return {
         "ok": True,
@@ -992,6 +1047,9 @@ async def generate_material_for_job(
         "strategy_source": choice["source"],
         "strategy_notes": material_result.get("strategy_notes") or [],
         "source_document_id": resolved_document_id,
+        "patch_aggressiveness": resolved_patch_aggressiveness,
+        "patch_allow_reorder_sections": resolved_patch_allow_reorder,
+        "patch_allow_add_remove_bullets": resolved_patch_allow_add_remove,
         "error": None,
         "error_code": None,
     }
@@ -1860,11 +1918,16 @@ def _stringify_material_artifacts(artifacts: dict) -> dict:
     return {key: str(value) if value else None for key, value in combined.items()}
 
 
-def _serialize_material_artifact(material_type: str, path: Path) -> dict:
+def _serialize_material_artifact(material_type: str, path: Path | str) -> dict:
+    # ``path`` can arrive as either a Path (the regenerate flow) or a
+    # plain string (the patch_existing flow stringifies before stashing
+    # into ``artifacts``). Coerce to Path so ``.name`` lookups don't
+    # crash with ``AttributeError: 'str' object has no attribute 'name'``.
+    path_obj = path if isinstance(path, Path) else Path(path)
     return {
         "type": material_type,
-        "path": str(path),
-        "filename": path.name,
+        "path": str(path_obj),
+        "filename": path_obj.name,
     }
 
 
@@ -1975,6 +2038,9 @@ def _generate_selected_material(
     template_id: str | None = None,
     strategy: str = "regenerate",
     source_document_id: str | None = None,
+    patch_aggressiveness: str = "balanced",
+    patch_allow_reorder_sections: bool = True,
+    patch_allow_add_remove_bullets: bool = True,
 ) -> dict:
     from src.documents.templates import ensure_template_package, serialize_template_package
     from src.generation.cover_letter import generate_cover_letter, generate_cover_letter_latex
@@ -1985,6 +2051,33 @@ def _generate_selected_material(
 
     artifacts = _empty_material_artifacts()
     strategy_notes: list[str] = []
+
+    # --- Strategy 3: use_library --------------------------------------
+    # Drop in the user's chosen library document as-is. No LLM, no
+    # rendering, no template. We just copy the file into the output
+    # directory and pin the right artifact slot. This is the "I
+    # already wrote the perfect resume, just apply with it" path.
+    if strategy == "use_library":
+        if not source_document_id:
+            raise ValueError(
+                "use_library strategy requires a source document id."
+            )
+        copied_path, used_doc = _copy_library_document_to_output(
+            document_id=source_document_id,
+            output_dir=output_dir,
+            material_type=material_type,
+        )
+        artifacts[material_type] = str(copied_path)
+        strategy_notes.append(
+            f"Used your library document {used_doc.original_filename!r} as-is."
+        )
+        return {
+            "artifacts": artifacts,
+            "document": None,
+            "validation": None,
+            "template": None,
+            "strategy_notes": strategy_notes,
+        }
 
     if material_type in {"resume_pdf", "resume_docx", "resume_tex"}:
         template_package = ensure_template_package("resume", template_id)
@@ -2016,6 +2109,14 @@ def _generate_selected_material(
             profile_data=profile_data,
             output_dir=output_dir,
             template_id=template_package.template_id,
+            # ``patch_aggressiveness`` is a property of the
+            # ``patch_existing`` strategy. For ``regenerate`` it has
+            # no source document to be conservative about, but the
+            # rewrite mode also feeds the bullet-keyword editor's
+            # tone, so it's reasonable to honor the user's preference
+            # in both branches. The default ``"balanced"`` matches
+            # the historical behaviour.
+            rewrite_mode=patch_aggressiveness,
         )
         artifacts["resume_pdf"] = resume_files.get("pdf")
         artifacts["resume_docx"] = resume_files.get("docx")
@@ -2025,21 +2126,48 @@ def _generate_selected_material(
                 document_id=source_document_id,
                 ir=resume_files.get("ir"),
                 output_dir=output_dir,
+                allow_reorder_sections=patch_allow_reorder_sections,
+                allow_add_remove_bullets=patch_allow_add_remove_bullets,
+            )
+            logger.info(
+                "patch_existing for %s: patched_path=%s note=%s "
+                "pre-patch artifacts[resume_docx]=%s",
+                source_document_id,
+                patched_path,
+                patch_note,
+                artifacts.get("resume_docx"),
             )
             if patched_path is not None:
                 artifacts["resume_docx"] = str(patched_path)
-                # The PDF rendered from the template is now stale --
-                # drop it so the caller doesn't surface a download
-                # that disagrees with the patched DOCX. We could re-
-                # render the PDF from the patched DOCX, but that adds
-                # a LibreOffice / Word dependency; leaving it None is
-                # the honest answer for now.
-                artifacts["resume_pdf"] = None
-                strategy_notes.append(
-                    "Patched your library document with the tailored bullets."
-                )
+                # The PDF rendered from the template is now stale
+                # relative to the patched DOCX, but we can only drop
+                # it if the caller asked for DOCX -- when the caller
+                # asked for ``resume_pdf`` the PDF artifact is the
+                # thing they're downloading and nuking it would
+                # silently turn the request into a "could not be
+                # generated" error downstream. In that case we keep
+                # the fresh-template PDF and surface a note that the
+                # patched DOCX is a side artifact only.
+                if material_type == "resume_pdf":
+                    strategy_notes.append(
+                        "Patched the DOCX from your library, but the PDF "
+                        "you downloaded is rendered from the template "
+                        "(re-rendering the patched DOCX to PDF would need "
+                        "LibreOffice/Word). Pick the DOCX format if you "
+                        "want the patched output."
+                    )
+                else:
+                    artifacts["resume_pdf"] = None
+                    strategy_notes.append(
+                        "Patched your library document with the tailored bullets."
+                    )
             if patch_note:
                 strategy_notes.append(patch_note)
+            logger.info(
+                "patch_existing post: artifacts[resume_docx]=%s strategy_notes=%s",
+                artifacts.get("resume_docx"),
+                strategy_notes,
+            )
 
         return {
             "artifacts": artifacts,
@@ -2051,12 +2179,12 @@ def _generate_selected_material(
 
     template_package = ensure_template_package("cover_letter", template_id)
     _ensure_template_supports_material(template_package, material_type)
-    if strategy == "patch_existing":
-        strategy_notes.append(
-            "patch_existing isn't supported for cover letters yet; "
-            "regenerated from your selected template."
-        )
     if template_package.manifest.renderer == "latex":
+        if strategy == "patch_existing":
+            strategy_notes.append(
+                "patch_existing isn't supported for LaTeX cover letter "
+                "templates yet; rendered fresh instead."
+            )
         cover_files = generate_cover_letter_latex(
             job=job,
             profile_data=profile_data,
@@ -2070,6 +2198,7 @@ def _generate_selected_material(
             "document": cover_files.get("ir"),
             "validation": cover_files.get("validation"),
             "template": serialize_template_package(template_package),
+            "strategy_notes": strategy_notes,
         }
 
     cover_files = generate_cover_letter(
@@ -2081,6 +2210,39 @@ def _generate_selected_material(
     artifacts["cover_letter_pdf"] = cover_files.get("pdf")
     artifacts["cover_letter_docx"] = cover_files.get("docx")
     artifacts["cover_letter_txt"] = cover_files.get("txt")
+
+    if strategy == "patch_existing" and source_document_id:
+        patched_path, patch_note = _try_patch_cover_letter_from_library(
+            document_id=source_document_id,
+            ir=cover_files.get("ir"),
+            output_dir=output_dir,
+        )
+        if patched_path is not None:
+            artifacts["cover_letter_docx"] = str(patched_path)
+            # See the resume patch branch for the rationale: the
+            # rendered PDF is now stale relative to the patched DOCX.
+            # If the user asked for the DOCX, drop the PDF artifact so
+            # the UI doesn't surface a disagreeing download. If they
+            # asked for the PDF, keep the template-rendered PDF and
+            # surface a note explaining the patched DOCX is a side
+            # artifact only.
+            if material_type == "cover_letter_pdf":
+                strategy_notes.append(
+                    "Patched the DOCX from your library, but the PDF "
+                    "you downloaded is rendered from the template "
+                    "(re-rendering the patched DOCX to PDF would need "
+                    "LibreOffice/Word). Pick the DOCX format if you "
+                    "want the patched output."
+                )
+            else:
+                artifacts["cover_letter_pdf"] = None
+                strategy_notes.append(
+                    "Patched your library cover letter with the "
+                    "tailored body paragraphs."
+                )
+        if patch_note:
+            strategy_notes.append(patch_note)
+
     return {
         "artifacts": artifacts,
         "document": cover_files.get("ir"),
@@ -2095,8 +2257,15 @@ def _try_patch_docx_from_library(
     document_id: str,
     ir,
     output_dir,
+    allow_reorder_sections: bool = True,
+    allow_add_remove_bullets: bool = True,
 ):
     """Apply :func:`patch_resume_docx` to a UserDocument from the library.
+
+    The two ``allow_*`` flags come from the user's saved patch settings
+    (see ``material_defaults``). When False they constrain the patcher
+    to leave structural decisions to the source DOCX rather than the
+    IR, which matches the conservative / "preserve my layout" use case.
 
     Returns ``(output_path, note)`` where ``output_path`` is the path
     on disk of the patched docx (``None`` on failure) and ``note`` is
@@ -2131,13 +2300,165 @@ def _try_patch_docx_from_library(
 
         output_path = output_dir / f"patched_resume_{uuid.uuid4().hex}.docx"
         try:
-            patch_resume_docx(source_path, ir, output_path=output_path)
+            patch_resume_docx(
+                source_path,
+                ir,
+                output_path=output_path,
+                allow_reorder_sections=allow_reorder_sections,
+                allow_add_remove_bullets=allow_add_remove_bullets,
+            )
         except PatchFallback as exc:
             return None, f"Couldn't patch your library document ({exc}); generated fresh instead."
         return output_path, None
     except Exception as exc:  # noqa: BLE001
         logger.exception("patch_existing fell over for document %s", document_id)
         return None, f"Patch failed ({exc}); generated fresh instead."
+
+
+def _try_patch_cover_letter_from_library(
+    *,
+    document_id: str,
+    ir,
+    output_dir,
+):
+    """Apply :func:`patch_cover_letter_docx` to a UserDocument from the
+    library. Mirrors ``_try_patch_docx_from_library`` for resumes but
+    targets the cover-letter patcher and the cover-letter document
+    type.
+
+    Returns ``(output_path, note)`` where ``output_path`` is the path
+    on disk of the patched docx (``None`` on failure) and ``note`` is
+    a human-readable warning to surface back to the UI.
+    """
+    if ir is None:
+        return None, (
+            "Could not patch your library cover letter: no tailored "
+            "content was produced."
+        )
+    try:
+        from uuid import UUID
+
+        from src.core.database import get_session_factory
+        from src.documents.user_documents import get_document, resolve_storage_path
+        from src.generation.docx_patch import PatchFallback, patch_cover_letter_docx
+
+        doc_uuid = UUID(document_id)
+        session_factory = get_session_factory(load_config())
+        with session_factory() as session:
+            row = get_document(session, doc_uuid)
+            if row is None:
+                return None, (
+                    "Your selected library cover letter is missing — "
+                    "generated fresh instead."
+                )
+            if row.document_type != "cover_letter":
+                return None, (
+                    "Selected library document isn't a cover letter — "
+                    "generated fresh instead."
+                )
+            if row.source_type != "docx":
+                return None, (
+                    f"Library document is a {row.source_type.upper()} file "
+                    "and can't be patched in place — generated fresh instead."
+                )
+            source_path = resolve_storage_path(row)
+
+        output_path = (
+            output_dir / f"patched_cover_letter_{uuid.uuid4().hex}.docx"
+        )
+        try:
+            patch_cover_letter_docx(source_path, ir, output_path=output_path)
+        except PatchFallback as exc:
+            return None, (
+                f"Couldn't patch your library cover letter ({exc}); "
+                "generated fresh instead."
+            )
+        return output_path, None
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "patch_existing for cover letter fell over for document %s",
+            document_id,
+        )
+        return None, f"Cover letter patch failed ({exc}); generated fresh instead."
+
+
+def _copy_library_document_to_output(
+    *,
+    document_id: str,
+    output_dir,
+    material_type: str,
+):
+    """Resolve a UserDocument by id and copy it into ``output_dir``.
+
+    This is the implementation behind the ``use_library`` strategy:
+    the user opted out of any LLM rewriting and just wants their
+    library document used as the application artifact. We copy the
+    file (rather than symlinking or returning the library path
+    directly) so the application's audit trail mirrors the
+    regenerate / patch flows -- every artifact a job ever applied
+    with is a snapshot in ``data/output/``.
+
+    Returns ``(copied_path, row)``. Raises ``ValueError`` with a
+    user-readable message for missing / wrong-type documents so the
+    caller can surface a clean error.
+    """
+    import shutil
+    from uuid import UUID
+
+    from src.core.database import get_session_factory
+    from src.documents.user_documents import get_document, resolve_storage_path
+
+    expected_doc_type = (
+        "resume" if material_type.startswith("resume") else "cover_letter"
+    )
+    expected_source = material_type.rsplit("_", 1)[-1]  # docx / pdf / tex / txt
+
+    try:
+        doc_uuid = UUID(document_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Library document id is not a UUID: {document_id!r}") from exc
+
+    session_factory = get_session_factory(load_config())
+    with session_factory() as session:
+        row = get_document(session, doc_uuid)
+        if row is None:
+            raise ValueError("Selected library document is no longer in your library.")
+        if row.document_type != expected_doc_type:
+            raise ValueError(
+                f"Library document is a {row.document_type.replace('_', ' ')}, "
+                f"but a {expected_doc_type.replace('_', ' ')} was requested."
+            )
+        if row.source_type != expected_source:
+            raise ValueError(
+                f"Library document is a {row.source_type.upper()} file, "
+                f"but the requested output format is {expected_source.upper()}. "
+                "Pick a library document whose extension matches the output "
+                "format, or switch strategy to Regenerate / Patch."
+            )
+        source_path = resolve_storage_path(row)
+        original_filename = row.original_filename
+
+    if not source_path.exists():
+        raise ValueError(
+            f"Library file is missing on disk: {source_path}"
+        )
+
+    target_name = (
+        f"{expected_doc_type}_uselib_{uuid.uuid4().hex}{source_path.suffix.lower()}"
+    )
+    target_path = output_dir / target_name
+    shutil.copy2(source_path, target_path)
+
+    # Re-fetch a fresh ``row``-like object so the caller can still
+    # read original_filename / source_type without re-opening the
+    # session. SimpleNamespace keeps this lightweight.
+    from types import SimpleNamespace
+
+    return target_path, SimpleNamespace(
+        original_filename=original_filename,
+        source_type=row.source_type,
+        document_type=row.document_type,
+    )
 
 
 def _ensure_template_supports_material(template_package, material_type: str) -> None:

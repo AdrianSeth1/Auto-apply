@@ -142,16 +142,34 @@ def _normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
         "skip_previously_applied": bool(plan.get("skip_previously_applied", True)),
         "top_n": _bounded_int(plan.get("top_n"), 1, 100, 10),
         "dry_run": bool(plan.get("dry_run", False)),
-        # Phase 17.8: per-plan material strategy overrides. Both
+        # Phase 17.8 / 18.x: per-plan material strategy overrides. Both
         # documents share the same shape; empty values mean "inherit
         # from Settings → Default material strategy".
         "resume_strategy": _normalize_strategy(plan.get("resume_strategy")),
         "resume_template_id": _clean_optional_id(plan.get("resume_template_id")),
         "resume_source_document_id": _clean_optional_uuid(plan.get("resume_source_document_id")),
+        "resume_patch_aggressiveness": _normalize_aggressiveness(
+            plan.get("resume_patch_aggressiveness")
+        ),
+        "resume_patch_allow_reorder_sections": _normalize_optional_bool(
+            plan.get("resume_patch_allow_reorder_sections")
+        ),
+        "resume_patch_allow_add_remove_bullets": _normalize_optional_bool(
+            plan.get("resume_patch_allow_add_remove_bullets")
+        ),
         "cover_letter_strategy": _normalize_strategy(plan.get("cover_letter_strategy")),
         "cover_letter_template_id": _clean_optional_id(plan.get("cover_letter_template_id")),
         "cover_letter_source_document_id": _clean_optional_uuid(
             plan.get("cover_letter_source_document_id")
+        ),
+        "cover_letter_patch_aggressiveness": _normalize_aggressiveness(
+            plan.get("cover_letter_patch_aggressiveness")
+        ),
+        "cover_letter_patch_allow_reorder_sections": _normalize_optional_bool(
+            plan.get("cover_letter_patch_allow_reorder_sections")
+        ),
+        "cover_letter_patch_allow_add_remove_bullets": _normalize_optional_bool(
+            plan.get("cover_letter_patch_allow_add_remove_bullets")
         ),
         "created_at": plan.get("created_at"),
         "updated_at": plan.get("updated_at"),
@@ -163,9 +181,34 @@ def _normalize_strategy(value: Any) -> str:
     if value in (None, ""):
         return ""
     text = str(value).strip()
-    if text in {"regenerate", "patch_existing"}:
+    if text in {"regenerate", "patch_existing", "use_library"}:
         return text
     return ""
+
+
+def _normalize_aggressiveness(value: Any) -> str:
+    """Empty / unknown values mean "inherit Settings default"."""
+    if value in (None, ""):
+        return ""
+    text = str(value).strip()
+    if text in {"conservative", "balanced", "aggressive"}:
+        return text
+    return ""
+
+
+def _normalize_optional_bool(value: Any) -> bool | None:
+    """``None`` = "inherit Settings default"; explicit True/False persists."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "1", "yes", "on"}:
+            return True
+        if text in {"false", "0", "no", "off"}:
+            return False
+    return None
 
 
 def _clean_optional_id(value: Any) -> str:
@@ -219,9 +262,21 @@ def _task_kwargs(plan: dict[str, Any]) -> dict[str, Any]:
         "resume_strategy": plan.get("resume_strategy") or None,
         "resume_template_id": plan.get("resume_template_id") or None,
         "resume_source_document_id": plan.get("resume_source_document_id") or None,
+        "resume_patch_aggressiveness": plan.get("resume_patch_aggressiveness") or None,
+        "resume_patch_allow_reorder_sections": plan.get("resume_patch_allow_reorder_sections"),
+        "resume_patch_allow_add_remove_bullets": plan.get("resume_patch_allow_add_remove_bullets"),
         "cover_letter_strategy": plan.get("cover_letter_strategy") or None,
         "cover_letter_template_id": plan.get("cover_letter_template_id") or None,
         "cover_letter_source_document_id": plan.get("cover_letter_source_document_id") or None,
+        "cover_letter_patch_aggressiveness": (
+            plan.get("cover_letter_patch_aggressiveness") or None
+        ),
+        "cover_letter_patch_allow_reorder_sections": plan.get(
+            "cover_letter_patch_allow_reorder_sections"
+        ),
+        "cover_letter_patch_allow_add_remove_bullets": plan.get(
+            "cover_letter_patch_allow_add_remove_bullets"
+        ),
     }
 
 
