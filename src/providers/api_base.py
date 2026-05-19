@@ -195,6 +195,8 @@ class ApiKeyProvider(LLMProvider):
         *,
         system: str = "",
         timeout: int = 120,
+        output_format: str = "text",  # noqa: ARG002 -- subclass hook
+        model: str | None = None,  # noqa: ARG002 -- subclass hook
     ) -> str:
         """Default impl: subclasses override.
 
@@ -318,6 +320,7 @@ class OpenAICompatibleProvider(ApiKeyProvider):
         system: str = "",
         timeout: int = 120,
         output_format: str = "text",  # noqa: ARG002 -- JSON is prompt-driven
+        model: str | None = None,
     ) -> str:
         # Late import: avoid pulling ProviderError / ProviderErrorKind at module
         # load time and keep this module symmetrical with anthropic.py / gemini.py
@@ -331,7 +334,9 @@ class OpenAICompatibleProvider(ApiKeyProvider):
         )
 
         api_key = self.get_api_key()
-        model = self.get_model()
+        # Phase 17.9.5: caller may override the model for tiered dispatch
+        # (e.g. "small" tier). Fall back to the configured model otherwise.
+        model = (model or "").strip() or self.get_model()
         url = f"{self._base_url()}/chat/completions"
         messages: list[dict[str, str]] = []
         if system:

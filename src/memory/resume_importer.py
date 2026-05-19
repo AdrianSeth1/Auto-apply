@@ -315,9 +315,15 @@ def import_resume(resume_path: Path, output_path: Path | None = None) -> dict:
 
     logger.info("Extracted %d chars from %s", len(raw_text), resume_path.name)
 
-    # Use Claude CLI to parse into structured YAML
+    # Resume import is pure extraction (raw resume text -> structured
+    # YAML) so route it via the Phase 17.9.5 small tier when configured.
+    # A user setting llm.small_provider / llm.small_model can shave
+    # tokens here without affecting creative paths like cover-letter
+    # generation. No small config? The dispatcher uses the primary chain.
     prompt = f"Parse this resume into structured YAML:\n\n{raw_text}"
-    response = generate_text(prompt, system=EXTRACTION_SYSTEM_PROMPT, timeout=180)
+    response = generate_text(
+        prompt, system=EXTRACTION_SYSTEM_PROMPT, timeout=180, tier="small"
+    )
 
     profile_data = _parse_llm_yaml_response(response)
 

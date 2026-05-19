@@ -276,6 +276,7 @@ class LLMProvider(ABC):
         system: str = "",
         timeout: int = 120,
         output_format: str = "text",
+        model: str | None = None,
     ) -> str:
         """Run a single text generation.
 
@@ -285,6 +286,12 @@ class LLMProvider(ABC):
         the resulting string is valid JSON. API providers always
         return text and may ignore the hint -- the caller's
         ``_parse_json_response`` strips fences if necessary.
+
+        ``model`` is the Phase 17.9.5 per-call override. When ``None``
+        (the default), providers fall back to their configured model
+        (``credentials.metadata.model`` or :attr:`default_model`).
+        Subprocess providers (Claude / Codex CLI) don't expose a
+        model knob and may ignore this argument.
         """
 
     # ----- public metadata -----

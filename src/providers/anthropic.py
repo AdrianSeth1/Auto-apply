@@ -135,9 +135,11 @@ class AnthropicProvider(ApiKeyProvider):
         system: str = "",
         timeout: int = 120,
         output_format: str = "text",  # noqa: ARG002 -- JSON is prompt-driven for REST providers
+        model: str | None = None,
     ) -> str:
         api_key = self.get_api_key()
-        model = self.get_model()
+        # Phase 17.9.5: per-call override for tiered dispatch.
+        model = (model or "").strip() or self.get_model()
         url = f"{self._base_url()}/messages"
         max_tokens = DEFAULT_MAX_TOKENS
         creds = self.credentials()
