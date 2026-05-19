@@ -760,6 +760,161 @@ keyring entry renaming). 18.1 / 18.3 / 18.5 / 18.6 are the only true
   migrate existing `data/providers/credentials.json` into the `default`
   tenant.
 
+### Phase 19: Worker Activation, Reliability, Parallelism, Cleanup (~2.5–3 weeks)
+
+A **fix-focused phase**, not a feature phase. Phase 14 shipped the
+Celery scaffold (queues, base task, audit table, reliability config,
+Beat schedule); Phase 17 shipped the per-plan strategy + review loop
+on top of it; the project memory accurately summarised the state in
+mid-May 2026 as "the bones of MQ are there, the body isn't." This
+phase fills the body in, and pays down the cleanup debt that has
+been accumulating since Phase 15.
+
+Four pillars, mapped one-to-one to the failure modes surfaced during
+the late-Phase-17 / Phase-18-prep sweep:
+
+1. **The work isn't on the queue.** `materials.generate`,
+   `application.prepare/fill/submit`, `maintenance.cache_eviction`,
+   `maintenance.gate_expire_sweep` — every task body is a stub that
+   logs "queued" and returns `"scheduled"`. The actual generation
+   runs synchronously inside the FastAPI request handler, so closing
+   a browser tab mid-LLM-call loses the work and worker horizontal
+   scaling is impossible.
+2. **MQ reliability is configured but unexercised.** `task_acks_late=
+   True`, `task_reject_on_worker_lost=True`, `worker_prefetch_
+   multiplier=1`, idempotency-key short-circuit, `TaskRecord` audit
+   row state machine — all of it sits unverified because (1).
+3. **Parallelism is left on the table.** Bullet rewrites run serially
+   inside `rewrite_bullets` (one LLM call per bullet); resume +
+   cover-letter generation are sequential inside one request; JD
+   parsing for N search results runs one-LLM-at-a-time. LinkedIn
+   detail-page enrichment is **correctly** serial (anti-bot) and
+   stays that way.
+4. **No garbage collection.** `data/output/` only grows; failed
+   patches leave half-written `patched_resume_<uuid>.docx`; screenshot
+   directories accumulate every form-fill attempt; `TaskRecord` has
+   no retention policy; `delete_document` is the only path that
+   removes a file from disk.
+
+**Honest scope**: 19.1 is net-new code (real task bodies, async API
+contract). 19.2 is "exercise + add DLQ + manual-retry UI" on top of
+infrastructure that already exists. 19.3 is mostly `asyncio.gather`
++ rate-limit threading. 19.4 is net-new (no cleanup logic exists
+today outside `delete_document` + the profile-import `_upload_*`
+tmpfile unlink). The four are bundled into one phase because they
+share a single audience (the worker + operator), but they're
+internally sequential: 19.4 (cleanup) is independent and ships
+first to stop the bleed; 19.1 (activation) unblocks 19.2 and 19.3.
+
+Sub-phases:
+
+- **19.1 Worker activation** — fill the stub task bodies with the
+  real call chain. Concretely:
+  - `materials.generate` invokes `generate_material_for_job` end-to-end
+    using the `MaterialsGeneratePayload` already shaped in Phase 17.8.
+    Writes the resulting artifact paths back onto the `Application`
+    row via the same code path `regenerate_application_material`
+    uses today, so the audit `state_history` event is unchanged.
+  - `application.prepare` / `application.fill` / `application.submit`
+    bodies — `application.submit` keeps the pre-submit gate (Phase
+    17) wiring; HITL transitions still use the `waiting_human` audit
+    state (no `time.sleep` in workers).
+  - Async REST surface: `POST /api/jobs/generate-material` and
+    `POST /api/applications/{id}/regenerate-material` switch to
+    "enqueue + return `task_id`", with `GET /api/tasks/{task_id}`
+    polling endpoint backed by `TaskRecord`. SPA gets a generic
+    "long-running operation" hook so existing views can swap in
+    progress polling without per-view boilerplate.
+  - The existing synchronous endpoints are retained behind a feature
+    flag (`AUTOAPPLY_SYNC_MATERIALS=1`) for a one-week soak; default
+    is async.
+  - **Tests**: end-to-end test that fires `materials.generate` via
+    `apply_async` against an in-process Celery worker (`task_always_
+    eager=True` is **not** used — we need the real broker contract).
+
+- **19.2 Resilience exercise + DLQ + manual retry** —
+  - Add a `tests/test_worker_resilience.py` suite that kills a
+    worker mid-task (`os.kill(pid, SIGTERM)` on a subprocess Celery
+    worker) and asserts the task is requeued exactly once with the
+    same `idempotency_key`. Same for poison-message handling.
+  - Dead-letter queue: tasks that exhaust `max_retries=3` move to
+    a per-kind DLQ (`materials.generate.dlq`, etc.) instead of being
+    silently absorbed by the audit row's `failed` state. DLQ entries
+    surface in the Tasks UI with a "Retry from DLQ" button that
+    creates a fresh task with the same payload + a new idempotency
+    key (so the original failure stays auditable).
+  - `TaskRecord` lifecycle hooks already exist; this phase verifies
+    them end-to-end and adds the missing `last_attempted_at` /
+    `dlq_reason` fields if the audit rows don't already capture them.
+  - SPA `/tasks` view grows a "Stuck / failed" tab that lists DLQ
+    entries with payload preview + retry / discard actions.
+
+- **19.3 Strategic parallelism** —
+  - `rewrite_bullets` rewritten as `asyncio.gather` of
+    `_rewrite_single_bullet`, capped at 5 concurrent LLM calls
+    (provider-rate-limit dependent). Expected: ~30s → ~6s for a
+    10-bullet resume.
+  - `_generate_selected_material` runs `generate_resume` and
+    `generate_cover_letter` for one job in parallel via
+    `asyncio.to_thread` (both are sync today; this preserves their
+    bodies). Expected: ~75s → ~45s for the dual-doc case.
+  - `intake.jd_parser.parse_requirements_batch()`: new helper that
+    accepts N descriptions and runs them concurrently with the same
+    rate-limit ceiling. Called from search post-processing when
+    `use_llm=True`. Expected: 25 jobs × 3s/parse = 75s → ~15s.
+  - **Out of scope (intentionally)**: parallelising LinkedIn detail-
+    page fetches. The current serial + random-delay loop in
+    `enrich_with_details` is the anti-bot contract and must not
+    change inside this phase.
+  - Each parallel hot-spot lands behind a config flag
+    (`parallelism.bullet_rewrites.max_concurrent=5`) so an operator
+    can dial it down if a provider rate-limits.
+
+- **19.4 Cleanup policy + scheduled garbage collection** —
+  - `docs/DECISIONS.md` gets a new entry (likely D026):
+    "data/output/ is a cache, not a vault" — explicit retention
+    rules per artifact category. Reviewed before writing code.
+  - Atomic-write helper: a `with atomic_write(target_path) as tmp`
+    context manager that writes to `target_path.with_suffix(
+    target_path.suffix + ".tmp")` and renames on success, unlinks
+    on exception. Applied to every `generate_*` / `patch_*` /
+    `_copy_library_document_to_output` call site so crashes can't
+    leave half-written DOCX/PDF on disk.
+  - `maintenance.cache_eviction` task body — actually walks
+    `data/output/` once a day, deletes files older than
+    `cleanup.output_retention_days=30` that are NOT referenced by
+    any `Application.resume_version` / `cover_letter_version` /
+    `user_documents.storage_path`. Dry-run mode flag lands a
+    `cleanup_report` audit row before deletion is enabled.
+  - Screenshot rotation: per-application directory keeps only the
+    latest 5 screenshots; older ones go in a `data/output/screenshots/
+    archive/` tarball nightly.
+  - `TaskRecord` retention: succeeded rows older than 30 days collapse
+    into a `tasks_archive` summary table (per-tenant, per-kind,
+    per-day counts + last error sample). Failed rows kept for 90.
+    HITL `waiting_human` rows never expire.
+  - `Application` delete API + UI — `DELETE /api/applications/{id}`
+    with a `cascade=true` option to unlink the on-disk artifacts.
+    Soft-delete (sets `Application.deleted_at`) by default;
+    cascade removal cleans the files only after the row's audit
+    history is summarised into the archive table.
+  - Orphan scanner CLI: `autoapply cleanup scan` prints what
+    `cache_eviction` would delete; `--apply` actually deletes. Lets
+    operators audit before the scheduled task runs.
+
+Sequencing rationale: 19.4 ships first (the orphans are accumulating
+today, independent of MQ status). 19.1 next (unblocks 19.2, 19.3 and
+fixes the lost-work-on-tab-close problem). 19.2 and 19.3 then ship
+in parallel because they touch disjoint files.
+
+Open questions deferred to Phase 20+:
+- Persistent task progress UI (real-time SSE streaming, not poll-based).
+  Phase 19 only does poll.
+- Cross-tenant DLQ surfacing for the future ops dashboard.
+- Anti-bot session pooling — would let LinkedIn detail-page parallelism
+  become safe by routing through N independent sessions. Out of scope
+  here.
+
 ### Timeline summary
 
 | Phase | Scope | Est. | Cumulative |
@@ -773,11 +928,15 @@ keyring entry renaming). 18.1 / 18.3 / 18.5 / 18.6 are the only true
 | 16 | Filter Agent + Explainability | 1.5w | 11.8w |
 | 17 | Plan Run Loop + Review Queue | 2w | 13.8w |
 | 18 | Multi-Tenancy & Auth Hardening | 2.5w | 16.3w |
+| 19 | Worker Activation, Reliability, Parallelism, Cleanup | 2.5–3w | 18.8–19.3w |
 
 ~3.5-4 months to v1.0 commercial-ready core (no SaaS business layer).
 Phase 14 grows 0.5w over v3 to absorb the HITL gate backend migration;
 Phase 18 grows 0.5w to honestly reflect that auth middleware / Redis
-namespace / credential store are net-new builds.
+namespace / credential store are net-new builds. Phase 19 was scoped
+in late-Phase-17/Phase-18-prep after a worker-system audit found the
+task bodies were stubs, no cleanup policy existed, and parallelism
+opportunities were unexplored.
 
 ## 9. Cross-cutting Quality Bars
 

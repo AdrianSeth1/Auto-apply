@@ -609,6 +609,121 @@ tenant 前缀，需要全局改 wrapper）、18.7 凭据存储（`src/providers/
   `data/tenants/{id}/credentials/`，keyring entry 命名加租户前缀；migrate 现有
   `data/providers/credentials.json` 到 `default` 租户。
 
+### Phase 19: Worker 激活 / 可靠性 / 并行 / 垃圾清理（~2.5–3 周）
+
+一个**修复型 phase**，不是 feature phase。Phase 14 落地了 Celery 骨架（队列、
+基类、审计表、可靠性配置、Beat 调度）；Phase 17 在它上面铺了 per-plan 策略 +
+review loop；项目 memory 在 2026 年 5 月中旬如实总结了一句话："MQ 骨架在，
+肉体不在。"本阶段把肉体填进去，并把 Phase 15 以来累积的清理债一次性还清。
+
+四个支柱，一一对应 Phase 17 收尾 / Phase 18 准备阶段那次 worker 系统审计里
+浮出的失败模式：
+
+1. **任务没在队列里跑。** `materials.generate`、`application.prepare/fill/submit`、
+   `maintenance.cache_eviction`、`maintenance.gate_expire_sweep` —— 每个 task
+   body 都是 stub，log 一句 "queued" 然后 return `"scheduled"`。真正的生成跑在
+   FastAPI 同步请求处理器里，所以用户在 LLM 调用中途关 tab 就丢工作，worker
+   横向扩展也无从谈起。
+2. **MQ 可靠性配齐了但没演练。** `task_acks_late=True`、
+   `task_reject_on_worker_lost=True`、`worker_prefetch_multiplier=1`、
+   idempotency-key 短路、`TaskRecord` 审计行状态机 —— 全部因为 (1) 而未被验证。
+3. **并行机会留在桌上。** `rewrite_bullets` 内部串行调 LLM（每个 bullet 一次）；
+   resume + cover letter 在一次请求里顺序生成；search 返回 N 条之后的 JD parsing
+   也是一条一条 LLM。LinkedIn 详情页抓取**故意**串行（反爬契约），不动。
+4. **没有垃圾清理。** `data/output/` 只增不减；patch 失败时半写的
+   `patched_resume_<uuid>.docx` 留下做永久孤儿；每次 form-fill 产生的 screenshots
+   一直累积；`TaskRecord` 没有 retention；`delete_document` 是唯一会从磁盘删
+   文件的路径。
+
+**诚实的范围说明**：19.1 是**新建代码**（真正的 task body、异步 API contract）。
+19.2 是在已存在的基础设施上"演练 + 加 DLQ + 手动重试 UI"。19.3 主要是
+`asyncio.gather` + rate-limit threading。19.4 是新建（今天除了 `delete_document`
+和 profile 导入的 `_upload_*` tmpfile unlink，再没有任何 cleanup 逻辑）。把这
+四块绑在同一个 phase 里是因为它们面向同一个受众（worker + 操作者），但内部是
+有顺序依赖的：19.4（cleanup）独立、先发，止住当前的失血；19.1（激活）解锁
+19.2 和 19.3。
+
+子阶段：
+
+- **19.1 Worker 激活** —— 把 stub task body 填成真调用链。具体：
+  - `materials.generate` 端到端调 `generate_material_for_job`，用 Phase 17.8 已
+    定型的 `MaterialsGeneratePayload`。生成完用 `regenerate_application_material`
+    现在那条路径把 artifact 路径写回 `Application` 行，审计 `state_history` 事件
+    形状不变。
+  - `application.prepare` / `application.fill` / `application.submit` 的 body ——
+    `application.submit` 继续走 Phase 17 的 pre-submit gate；HITL 跳转仍走
+    `waiting_human` 审计状态（worker 里没有 `time.sleep`）。
+  - 异步 REST 表面：`POST /api/jobs/generate-material` 和
+    `POST /api/applications/{id}/regenerate-material` 切到"enqueue 后返回
+    `task_id`"，配合 `GET /api/tasks/{task_id}` 轮询端点（`TaskRecord` 背书）。
+    SPA 加一个通用"长任务" hook，现有 view 不用每个都写一遍 polling 样板。
+  - 现有同步端点保留在 feature flag `AUTOAPPLY_SYNC_MATERIALS=1` 后面做为期
+    一周的 soak 期；默认走异步。
+  - **测试**：端到端测试用 `apply_async` 对着 in-process Celery worker 触发
+    `materials.generate`（**不**用 `task_always_eager=True` —— 我们要的是真
+    broker contract）。
+
+- **19.2 可靠性演练 + DLQ + 手动重试** ——
+  - 加 `tests/test_worker_resilience.py` 测试套：在任务半路 `os.kill(pid,
+    SIGTERM)` 一个 Celery worker 子进程，断言任务以同样的 `idempotency_key`
+    被恰好重入队一次。Poison-message 处理同样测一遍。
+  - 死信队列（DLQ）：耗尽 `max_retries=3` 的任务进 per-kind DLQ
+    （`materials.generate.dlq` 等），不再被审计行的 `failed` 状态默默吸收。
+    DLQ 条目在 Tasks UI 露出，带"从 DLQ 重试"按钮 —— 拿原 payload 创建新任务、
+    新 idempotency_key（原失败仍保留审计）。
+  - `TaskRecord` 生命周期 hook 已存在；本阶段端到端验证 + 补审计行里漏的
+    `last_attempted_at` / `dlq_reason` 字段（如果没有的话）。
+  - SPA `/tasks` 加一个"卡住 / 失败"标签页，列 DLQ 条目，带 payload 预览 +
+    重试 / 丢弃操作。
+
+- **19.3 战略性并行** ——
+  - `rewrite_bullets` 改成 `asyncio.gather` 调 `_rewrite_single_bullet`，并发
+    上限 5（受 provider rate-limit 约束）。预期：10 个 bullet 的简历 30s → 6s。
+  - `_generate_selected_material` 对单个 job 通过 `asyncio.to_thread` 并行
+    跑 `generate_resume` 和 `generate_cover_letter`（两者目前都是 sync；用
+    `to_thread` 保留 body 不动）。预期：双文档场景 75s → 45s。
+  - `intake.jd_parser.parse_requirements_batch()` 新 helper，接受 N 条
+    description 并发跑，受同样的速率上限管。从 search 后处理调用（`use_llm=True`
+    时）。预期：25 条 × 3s/parse = 75s → 15s。
+  - **故意不做**：并行化 LinkedIn 详情页抓取。`enrich_with_details` 现在的
+    串行 + 随机延迟循环是反爬契约，本阶段内不动。
+  - 每个并行热点落到配置 flag 后（`parallelism.bullet_rewrites.max_concurrent=5`），
+    provider rate-limit 时操作者可以临时调小。
+
+- **19.4 清理策略 + 计划性垃圾回收** ——
+  - `docs/DECISIONS.md` 加一条新决策（大概是 D026）："`data/output/` 是 cache，
+    不是 vault" —— 按 artifact 类别明确 retention 规则。写代码前先 review。
+  - 原子写 helper：`with atomic_write(target_path) as tmp` 上下文管理器，写到
+    `target_path.with_suffix(target_path.suffix + ".tmp")`，成功 rename、异常
+    unlink。在每个 `generate_*` / `patch_*` / `_copy_library_document_to_output`
+    调用点套上，保证崩溃不会在硬盘上留半写的 DOCX/PDF。
+  - `maintenance.cache_eviction` task body 真实落地 —— 每天扫一次
+    `data/output/`，删超过 `cleanup.output_retention_days=30` 且没被任何
+    `Application.resume_version` / `cover_letter_version` /
+    `user_documents.storage_path` 引用的文件。Dry-run 模式先跑，在启用删除前
+    落一行 `cleanup_report` 审计。
+  - Screenshot 轮转：每个 application 目录只保留最近 5 张；旧的每晚归到
+    `data/output/screenshots/archive/` 的 tarball 里。
+  - `TaskRecord` retention：成功行超过 30 天合并到 `tasks_archive` 汇总表
+    （per-tenant、per-kind、per-day 计数 + 最后一次错误样本）。失败行留 90 天。
+    HITL `waiting_human` 行永不过期。
+  - `Application` 删除 API + UI —— `DELETE /api/applications/{id}`，可选
+    `cascade=true` 同时 unlink 磁盘 artifact。默认软删（置
+    `Application.deleted_at`）；级联删除要等审计 history 归档到 archive 表
+    之后才动文件。
+  - 孤儿扫描 CLI：`autoapply cleanup scan` 打印 `cache_eviction` 会删什么；
+    `--apply` 真删。在计划任务跑之前给操作者一次审计机会。
+
+排序逻辑：19.4 先发（孤儿现在就在堆积，跟 MQ 状态无关）。19.1 紧接（解锁
+19.2、19.3，并修掉"关 tab 丢工作"那个问题）。19.2 和 19.3 之后并行推（动的
+是不同文件）。
+
+延后到 Phase 20+ 的未决问题：
+- 持久任务进度 UI（实时 SSE 流式，不是轮询）。Phase 19 只做 polling。
+- 给未来 ops dashboard 用的跨租户 DLQ surfacing。
+- 反爬 session pool —— 路由到 N 个独立 session 就能让 LinkedIn 详情页并行
+  变安全。本阶段不做。
+
 ### 时间表
 
 | Phase | 范围 | 工时 | 累计 |
@@ -622,10 +737,13 @@ tenant 前缀，需要全局改 wrapper）、18.7 凭据存储（`src/providers/
 | 16 | Filter Agent + 可解释性 | 1.5 周 | 11.8 周 |
 | 17 | Plan Run Loop + Review Queue | 2 周 | 13.8 周 |
 | 18 | 多租户 & Auth 加固 | 2.5 周 | 16.3 周 |
+| 19 | Worker 激活 / 可靠性 / 并行 / 垃圾清理 | 2.5–3 周 | 18.8–19.3 周 |
 
 约 3.5-4 个月推到 v1.0 商业化就绪核心（不含 SaaS 业务层）。Phase 14 比 v3 多
 0.5 周用于 HITL gate 后端迁移；Phase 18 多 0.5 周承认 auth middleware / Redis
-namespace / 凭据存储是新建而非"激活"。
+namespace / 凭据存储是新建而非"激活"。Phase 19 是在 Phase 17 收尾 / Phase 18
+准备阶段做完一次 worker 系统审计之后才确定加入的 —— 那次审计发现 task body
+都是 stub、没有 cleanup 策略、并行机会从未被探索过。
 
 ## 9. 横切质量基线
 
