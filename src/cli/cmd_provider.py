@@ -89,6 +89,20 @@ def list_cmd(as_json: bool) -> None:
             f"  {marker} {row['id']:<{width}}  "
             f"[{row['auth_type']:<10}] {row['display_name']}"
         )
+        # Phase 17.9.10: surface the currently-configured model + any
+        # base_url override so `provider list` shows what gets called,
+        # not just whether the slot is filled.
+        creds = row.get("credentials") or {}
+        metadata = creds.get("metadata") or {}
+        model = metadata.get("model")
+        base_url = metadata.get("base_url")
+        if model or base_url:
+            bits = []
+            if model:
+                bits.append(f"model={model}")
+            if base_url:
+                bits.append(f"base_url={base_url}")
+            click.echo(f"      {' '.join(bits)}")
         if row.get("install_hint") and not row["configured"]:
             click.echo(f"      hint: {row['install_hint']}")
 
@@ -341,13 +355,42 @@ def disconnect_cmd(provider_id: str, as_json: bool) -> None:
     default=None,
     help="Optional fallback provider id (or 'none' to clear).",
 )
+@click.option(
+    "--model",
+    default=None,
+    help="Optionally update this provider's configured model in the same call.",
+)
 @click.option("--json", "as_json", is_flag=True)
-def use_cmd(provider_id: str, fallback: str | None, as_json: bool) -> None:
+def use_cmd(
+    provider_id: str,
+    fallback: str | None,
+    model: str | None,
+    as_json: bool,
+) -> None:
     """Set the primary LLM provider in ``config/settings.yaml``."""
     _get_or_die(provider_id, as_json=as_json, command="provider.use")
 
     if fallback is not None and fallback not in ("", "none"):
         _get_or_die(fallback, as_json=as_json, command="provider.use")
+
+    # Phase 17.9.10: optional --model lets a user say
+    #   `autoapply provider use openai --model gpt-4.1`
+    # without having to re-enter the API key via set-key.
+    model_updated = False
+    if model is not None:
+        new_model = model.strip()
+        creds = get_registry().store.get(provider_id)
+        if creds is None:
+            _emit_error(
+                "provider.use",
+                f"Cannot set model: {provider_id!r} is not connected. "
+                f"Run `autoapply provider set-key {provider_id} --model {new_model}` first.",
+                as_json=as_json,
+                exit_code=2,
+            )
+        creds.metadata["model"] = new_model or None
+        get_registry().store.set(creds)
+        model_updated = True
 
     settings = _load_settings()
     llm = settings.setdefault("llm", {})
@@ -375,13 +418,178 @@ def use_cmd(provider_id: str, fallback: str | None, as_json: bool) -> None:
                     "ok": True,
                     "primary_provider": provider_id,
                     "fallback_provider": llm.get("fallback_provider"),
+                    "model_updated": model_updated,
+                    "model": model if model_updated else None,
                 },
             )
         )
     else:
         click.secho(f"Primary provider set to {provider_id}.", fg="green")
+        if model_updated:
+            click.echo(f"  model:    {model or '<cleared>'}")
         if llm.get("fallback_provider"):
             click.echo(f"  fallback: {llm['fallback_provider']}")
+
+
+# ---------------------------------------------------------------------------
+# set-model (Phase 17.9.10)
+# ---------------------------------------------------------------------------
+
+
+@provider_cmd.command("set-model")
+@click.argument("provider_id")
+@click.argument("model")
+@click.option("--json", "as_json", is_flag=True)
+def set_model_cmd(provider_id: str, model: str, as_json: bool) -> None:
+    """Update the model for an already-connected provider.
+
+    Same effect as `provider set-key --model X` but without prompting
+    for a key. Useful for switching between catalog entries (gpt-4o-mini
+    -> gpt-4.1) without re-entering credentials.
+    """
+    _get_or_die(provider_id, as_json=as_json, command="provider.set-model")
+    creds = get_registry().store.get(provider_id)
+    if creds is None:
+        _emit_error(
+            "provider.set-model",
+            f"{provider_id!r} is not connected yet. Run "
+            f"`autoapply provider set-key {provider_id} --model {model}` first.",
+            as_json=as_json,
+            exit_code=2,
+        )
+    previous = creds.metadata.get("model")
+    new_model = model.strip()
+    creds.metadata["model"] = new_model or None
+    get_registry().store.set(creds)
+    if as_json:
+        emit_json(
+            build_json_payload(
+                command="provider.set-model",
+                data={
+                    "ok": True,
+                    "provider_id": provider_id,
+                    "model": new_model or None,
+                    "previous_model": previous,
+                },
+            )
+        )
+    else:
+        click.secho(
+            f"{provider_id} model: {previous or '<default>'} -> "
+            f"{new_model or '<default>'}",
+            fg="green",
+        )
+
+
+# ---------------------------------------------------------------------------
+# small-tier (Phase 17.9.10) -- mirrors the Settings UI knob.
+# ---------------------------------------------------------------------------
+
+
+@provider_cmd.group("small-tier")
+def small_tier_group() -> None:
+    """Configure the optional cheap-model tier for extraction calls."""
+
+
+@small_tier_group.command("show")
+@click.option("--json", "as_json", is_flag=True)
+def small_tier_show_cmd(as_json: bool) -> None:
+    """Print the currently-configured small_provider / small_model."""
+    # Read directly from the sandbox-aware path so this works under
+    # tests that monkeypatch `_SETTINGS_PATH`.
+    raw = _load_settings()
+    llm = raw.get("llm", {}) if isinstance(raw, dict) else {}
+    small_provider = llm.get("small_provider")
+    small_model = llm.get("small_model")
+    if as_json:
+        emit_json(
+            build_json_payload(
+                command="provider.small-tier.show",
+                data={
+                    "ok": True,
+                    "small_provider": small_provider,
+                    "small_model": small_model,
+                },
+            )
+        )
+        return
+    if not small_provider and not small_model:
+        click.echo("Small-tier: disabled (extraction calls go through primary).")
+        return
+    click.echo("Small-tier:")
+    click.echo(f"  provider: {small_provider or '<unset>'}")
+    click.echo(f"  model:    {small_model or '<provider default>'}")
+
+
+@small_tier_group.command("set")
+@click.argument("provider_id")
+@click.option(
+    "--model",
+    default=None,
+    help="Model id for the small tier (omit to use the provider's default).",
+)
+@click.option("--json", "as_json", is_flag=True)
+def small_tier_set_cmd(
+    provider_id: str, model: str | None, as_json: bool
+) -> None:
+    """Route extraction calls (JD parsing, resume import) through PROVIDER_ID."""
+    from src.core.config import update_llm_settings  # noqa: PLC0415
+
+    _get_or_die(provider_id, as_json=as_json, command="provider.small-tier.set")
+    raw = _load_settings()
+    llm = raw.get("llm", {}) if isinstance(raw, dict) else {}
+    update_llm_settings(
+        llm.get("primary_provider") or llm.get("provider") or "claude-cli",
+        llm.get("fallback_provider"),
+        bool(llm.get("allow_fallback")),
+        config_path=_SETTINGS_PATH,
+        small_provider=provider_id,
+        small_model=(model or "").strip() or None,
+        small_tier_action="set",
+    )
+    if as_json:
+        emit_json(
+            build_json_payload(
+                command="provider.small-tier.set",
+                data={
+                    "ok": True,
+                    "small_provider": provider_id,
+                    "small_model": model or None,
+                },
+            )
+        )
+    else:
+        click.secho(
+            f"Small-tier: {provider_id}"
+            + (f" (model={model})" if model else " (provider default)"),
+            fg="green",
+        )
+
+
+@small_tier_group.command("clear")
+@click.option("--json", "as_json", is_flag=True)
+def small_tier_clear_cmd(as_json: bool) -> None:
+    """Disable the small tier; extraction calls go back to the primary chain."""
+    from src.core.config import update_llm_settings  # noqa: PLC0415
+
+    raw = _load_settings()
+    llm = raw.get("llm", {}) if isinstance(raw, dict) else {}
+    update_llm_settings(
+        llm.get("primary_provider") or llm.get("provider") or "claude-cli",
+        llm.get("fallback_provider"),
+        bool(llm.get("allow_fallback")),
+        config_path=_SETTINGS_PATH,
+        small_tier_action="clear",
+    )
+    if as_json:
+        emit_json(
+            build_json_payload(
+                command="provider.small-tier.clear",
+                data={"ok": True},
+            )
+        )
+    else:
+        click.secho("Small-tier cleared.", fg="green")
 
 
 # ---------------------------------------------------------------------------
