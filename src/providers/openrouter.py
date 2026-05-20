@@ -19,6 +19,8 @@ class OpenRouterProvider(OpenAICompatibleProvider):
     api_key_env_var = "OPENROUTER_API_KEY"
     default_base_url = "https://openrouter.ai/api/v1"
     default_model = "anthropic/claude-sonnet-4.6"
+    api_key_pattern = r"^sk-or-[A-Za-z0-9_-]{20,}$"
+    api_key_example = "sk-or-v1-..."
 
     # Curated 2026-05-19 against each upstream provider's own
     # 2026-current ids. OpenRouter has 200+ models -- this list is a

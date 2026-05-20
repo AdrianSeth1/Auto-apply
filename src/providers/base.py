@@ -311,6 +311,10 @@ class LLMProvider(ABC):
             # self-hosted) so the Web UI can render "API key (optional)"
             # and skip its own "key is required" guard.
             "allow_empty_key": bool(getattr(self, "allow_empty_key", False)),
+            # Phase 17.9.13: optional key format hints for the Connect
+            # dialog. Empty strings disable the hint.
+            "api_key_pattern": str(getattr(self, "api_key_pattern", "")),
+            "api_key_example": str(getattr(self, "api_key_example", "")),
         }
 
 

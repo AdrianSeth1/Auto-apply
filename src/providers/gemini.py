@@ -36,6 +36,9 @@ class GeminiProvider(ApiKeyProvider):
     install_hint = "Get an API key from https://aistudio.google.com/apikey"
     api_key_env_var = "GEMINI_API_KEY"
     default_model = DEFAULT_MODEL
+    # Gemini keys are 39-char `AIza...` strings, no version prefix.
+    api_key_pattern = r"^AIza[A-Za-z0-9_-]{30,}$"
+    api_key_example = "AIza..."
 
     # Curated from ai.google.dev/gemini-api/docs/models on 2026-05-19.
     # Gemini 3.5 Flash launched at I/O 2026-05-19; Gemini 2.5 family

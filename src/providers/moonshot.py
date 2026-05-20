@@ -18,6 +18,8 @@ class MoonshotProvider(OpenAICompatibleProvider):
     api_key_env_var = "MOONSHOT_API_KEY"
     default_base_url = "https://api.moonshot.cn/v1"
     default_model = "kimi-k2.6"
+    api_key_pattern = r"^sk-[A-Za-z0-9]{20,}$"
+    api_key_example = "sk-..."
 
     # Curated from platform.kimi.ai/docs/models on 2026-05-19. The
     # base kimi-k2 series is being retired 2026-05-25 in favor of

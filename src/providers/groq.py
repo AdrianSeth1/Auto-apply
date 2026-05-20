@@ -20,6 +20,8 @@ class GroqProvider(OpenAICompatibleProvider):
     api_key_env_var = "GROQ_API_KEY"
     default_base_url = "https://api.groq.com/openai/v1"
     default_model = "openai/gpt-oss-120b"
+    api_key_pattern = r"^gsk_[A-Za-z0-9]{20,}$"
+    api_key_example = "gsk_..."
 
     # Curated from console.groq.com/docs/models on 2026-05-19. Groq's
     # 2026-03-23 deprecation moved moonshotai/kimi-k2-instruct-0905

@@ -23,6 +23,8 @@ class QwenProvider(OpenAICompatibleProvider):
         "https://dashscope.aliyuncs.com/compatible-mode/v1"
     )
     default_model = "qwen-plus"
+    api_key_pattern = r"^sk-[A-Za-z0-9]{20,}$"
+    api_key_example = "sk-..."
 
     # Curated from Alibaba Cloud Model Studio docs on 2026-05-19.
     # Qwen-Turbo / Plus / Max are the stable production aliases that

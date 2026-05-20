@@ -28,6 +28,11 @@ class OpenAIProvider(OpenAICompatibleProvider):
     api_key_env_var = "OPENAI_API_KEY"
     default_base_url = DEFAULT_BASE_URL
     default_model = DEFAULT_MODEL
+    # `sk-` is the historical prefix; `sk-proj-` and `sk-svcacct-`
+    # appeared in 2024-2025 for project and service-account keys. The
+    # pattern stays loose -- the upstream probe is the real validator.
+    api_key_pattern = r"^sk-[A-Za-z0-9_-]{20,}$"
+    api_key_example = "sk-..."
 
     # Curated from developers.openai.com/api/docs/models on 2026-05-19.
     # Legacy ids (gpt-4o, gpt-4.1, o4-mini original) still work on the

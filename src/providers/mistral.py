@@ -14,6 +14,9 @@ class MistralProvider(OpenAICompatibleProvider):
     api_key_env_var = "MISTRAL_API_KEY"
     default_base_url = "https://api.mistral.ai/v1"
     default_model = "mistral-medium-latest"
+    # Mistral keys are 32-char alphanumeric with no fixed prefix.
+    api_key_pattern = r"^[A-Za-z0-9]{20,}$"
+    api_key_example = "a 32-character alphanumeric key"
 
     # Curated from mistral.ai/models on 2026-05-19. Mistral Large 3
     # (Dec 2025) bumps the flagship to a 256k MoE; Medium 3.5

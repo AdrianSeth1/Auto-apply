@@ -14,6 +14,8 @@ class XAIProvider(OpenAICompatibleProvider):
     api_key_env_var = "XAI_API_KEY"
     default_base_url = "https://api.x.ai/v1"
     default_model = "grok-4.3"
+    api_key_pattern = r"^xai-[A-Za-z0-9]{20,}$"
+    api_key_example = "xai-..."
 
     # Curated from docs.x.ai/developers/models on 2026-05-19. Earlier
     # grok-4 / grok-4-fast / grok-code-fast-1 ids were retired

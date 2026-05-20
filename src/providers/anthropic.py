@@ -36,6 +36,8 @@ class AnthropicProvider(ApiKeyProvider):
     install_hint = "Get an API key from https://console.anthropic.com/settings/keys"
     api_key_env_var = "ANTHROPIC_API_KEY"
     default_model = DEFAULT_MODEL
+    api_key_pattern = r"^sk-ant-[A-Za-z0-9_-]{20,}$"
+    api_key_example = "sk-ant-..."
 
     # Curated from platform.claude.com/docs/en/about-claude/models on
     # 2026-05-19. Sonnet 4 and Opus 4 (sans .6/.7) were retired

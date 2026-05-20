@@ -20,6 +20,8 @@ class DeepSeekProvider(OpenAICompatibleProvider):
     api_key_env_var = "DEEPSEEK_API_KEY"
     default_base_url = "https://api.deepseek.com/v1"
     default_model = "deepseek-v4-flash"
+    api_key_pattern = r"^sk-[A-Za-z0-9]{20,}$"
+    api_key_example = "sk-..."
 
     # Curated from api-docs.deepseek.com/quick_start/pricing on
     # 2026-05-19. The legacy aliases `deepseek-chat` and

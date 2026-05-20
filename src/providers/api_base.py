@@ -67,6 +67,14 @@ class ApiKeyProvider(LLMProvider):
     # ``connect()`` / ``get_api_key()`` and the application + CLI
     # layers so the user isn't forced to type a fake key.
     allow_empty_key: bool = False
+    # Phase 17.9.13: soft client-side key format hints. The probe
+    # remains the canonical validator (formats drift -- OpenAI added
+    # `sk-proj-`, `sk-svcacct-` etc. after `sk-`); we surface these
+    # only so the UI can show "looks like a key for a different
+    # provider" before burning a network round-trip. Both are
+    # optional; an empty pattern disables the hint.
+    api_key_pattern: str = ""
+    api_key_example: str = ""
 
     def __init__(
         self,

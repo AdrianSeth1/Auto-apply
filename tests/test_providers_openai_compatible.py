@@ -104,3 +104,33 @@ def test_public_view_surfaces_new_provider_catalog() -> None:
     for _, pid, _, _ in _NEW_PROVIDERS:
         assert pid in by_id
         assert by_id[pid]["known_models"], f"{pid} public_view missing catalog"
+
+
+def test_public_view_surfaces_api_key_format_hints() -> None:
+    """Phase 17.9.13: every shipped API-key provider should expose a
+    soft key-format hint (pattern + example) so the Connect dialog
+    can warn on obvious typos before burning a network probe."""
+    registry = get_registry()
+    by_id = {row["id"]: row for row in registry.public_view()}
+    expected_prefix = {
+        "openai": "sk-",
+        "anthropic": "sk-ant-",
+        "gemini": "AIza",
+        "deepseek": "sk-",
+        "moonshot": "sk-",
+        "qwen": "sk-",
+        "xai": "xai-",
+        "groq": "gsk_",
+        "openrouter": "sk-or-",
+    }
+    for pid, prefix in expected_prefix.items():
+        row = by_id[pid]
+        assert row["api_key_pattern"], f"{pid} missing api_key_pattern"
+        assert row["api_key_example"], f"{pid} missing api_key_example"
+        assert row["api_key_example"].startswith(prefix), (
+            f"{pid} api_key_example {row['api_key_example']!r} "
+            f"doesn't lead with {prefix!r}"
+        )
+    # Mistral keys have no fixed prefix -- still exposed though.
+    assert by_id["mistral"]["api_key_pattern"]
+    assert by_id["mistral"]["api_key_example"]

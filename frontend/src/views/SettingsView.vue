@@ -210,6 +210,12 @@ const connectDialog = reactive({
   baseUrl: "",
   // Whether the provider permits an empty API key (Ollama today).
   allowEmptyKey: false,
+  // Phase 17.9.13: per-provider key format hints. Pattern is a soft
+  // client-side check (the upstream probe stays the canonical
+  // validator); example seeds the placeholder so the user knows
+  // roughly what to paste.
+  apiKeyPattern: "",
+  apiKeyExample: "",
   // "Advanced" panel: base_url lives here so the default dialog stays
   // a one-glance API-key + model picker.
   showAdvanced: false,
@@ -506,6 +512,8 @@ function openConnectDialog(provider) {
   const savedModel = provider.credentials?.metadata?.model || ""
   connectDialog.baseUrl = provider.credentials?.metadata?.base_url || ""
   connectDialog.allowEmptyKey = Boolean(provider.allow_empty_key)
+  connectDialog.apiKeyPattern = provider.api_key_pattern || ""
+  connectDialog.apiKeyExample = provider.api_key_example || ""
   connectDialog.showAdvanced = Boolean(connectDialog.baseUrl)
   connectDialog.error = ""
   connectDialog.submitting = false
@@ -568,6 +576,29 @@ function canSubmitConnect() {
   if (connectDialog.submitting) return false
   if (!connectDialog.allowEmptyKey && !connectDialog.apiKey.trim()) return false
   return true
+}
+
+// Phase 17.9.13: soft format check. Returns a warning string when
+// the entered key doesn't match the provider's known prefix/length;
+// returns "" when the key is empty (handled by the required check)
+// or matches. NEVER blocks submission -- formats drift and the
+// upstream probe stays the source of truth.
+function apiKeyFormatWarning() {
+  const key = connectDialog.apiKey.trim()
+  if (!key) return ""
+  const pattern = connectDialog.apiKeyPattern
+  if (!pattern) return ""
+  try {
+    const re = new RegExp(pattern)
+    if (re.test(key)) return ""
+  } catch (_err) {
+    // A bad pattern from the server shouldn't break the dialog.
+    return ""
+  }
+  const example = connectDialog.apiKeyExample
+    ? ` (expected something like ${connectDialog.apiKeyExample})`
+    : ""
+  return `This doesn't look like a ${connectDialog.providerLabel} key${example}. We'll still try — the upstream check will confirm.`
 }
 
 async function submitConnect() {
@@ -728,6 +759,13 @@ function smallTierModelSelectOptions() {
     { value: "", label: "Provider default" },
     ...toAppSelectOptions(cached.models, cached.default_model),
   ]
+}
+
+function connectDialogModelOptions() {
+  // Connect dialog picker reuses the same adapter the LLM Routing
+  // dropdowns use so the "· default" hint and visual treatment are
+  // identical across the page.
+  return toAppSelectOptions(connectDialog.models, connectDialog.defaultModel)
 }
 
 function smallTierProviderSelectOptions() {
@@ -1580,8 +1618,14 @@ function isPrimary(provider) {
               type="password"
               autocomplete="off"
               spellcheck="false"
-              :placeholder="connectDialog.allowEmptyKey ? 'Leave blank if your server has no auth' : 'sk-...'"
+              :placeholder="connectDialog.allowEmptyKey ? 'Leave blank if your server has no auth' : (connectDialog.apiKeyExample || 'Paste key here')"
             />
+            <p
+              v-if="apiKeyFormatWarning()"
+              class="text-xs text-amber-600 dark:text-amber-500"
+            >
+              {{ apiKeyFormatWarning() }}
+            </p>
           </div>
 
           <div class="space-y-1.5">
@@ -1593,24 +1637,16 @@ function isPrimary(provider) {
                 class="ml-1 text-xs text-muted-foreground"
               >({{ connectDialog.modelsSource === 'runtime' ? 'local server catalog' : 'curated + local' }})</span>
             </Label>
-            <!-- Phase 17.9.11: catalog-only picker. Catalog-outside
-                 ids should go through `autoapply provider set-model`. -->
-            <select
-              id="api-model"
+            <!-- Phase 17.9.11+13: catalog-only AppSelect picker.
+                 Catalog-outside ids should go through `autoapply
+                 provider set-model`. -->
+            <AppSelect
               v-model="connectDialog.modelSelection"
-              class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <option v-if="connectDialog.models.length === 0" value="" disabled>
-                No models in catalog — connect first then update via CLI
-              </option>
-              <option
-                v-for="m in connectDialog.models"
-                :key="m.id"
-                :value="m.id"
-              >
-                {{ m.display_name || m.id }}<template v-if="m.id === connectDialog.defaultModel"> (default)</template>
-              </option>
-            </select>
+              :options="connectDialogModelOptions()"
+              :disabled="connectDialog.models.length === 0"
+              :placeholder="connectDialog.models.length === 0 ? 'No models in catalog — update via CLI after connecting' : 'Pick a model'"
+              aria-label="Model"
+            />
           </div>
 
           <button
