@@ -30,7 +30,7 @@ import click
 import yaml
 
 from src.cli.output import build_json_payload, emit_json
-from src.core.config import PROJECT_ROOT
+from src.core.config import PROJECT_ROOT, bootstrap_user_configs
 from src.providers import get_registry
 from src.providers.base import (
     AuthType,
@@ -632,6 +632,7 @@ def _emit_error(
 
 
 def _load_settings() -> dict[str, Any]:
+    bootstrap_user_configs()
     if not _SETTINGS_PATH.exists():
         return {}
     with _SETTINGS_PATH.open("r", encoding="utf-8") as fh:

@@ -22,7 +22,7 @@ import httpx
 import pytest
 
 from src.providers.anthropic import AnthropicProvider
-from src.providers.api_base import ApiKeyProvider
+from src.providers.api_base import ApiKeyProvider, OpenAICompatibleProvider
 from src.providers.base import ProviderCredentials, ProviderError
 from src.providers.gemini import GeminiProvider
 from src.providers.openai import OpenAIProvider
@@ -107,6 +107,15 @@ def _factory_for(client: _FakeClient):
     return _factory
 
 
+class _KeylessCompatibleProvider(OpenAICompatibleProvider):
+    id = "keyless-compatible"
+    display_name = "Keyless Compatible"
+    api_key_env_var = "KEYLESS_COMPATIBLE_API_KEY"
+    default_base_url = "https://local-llm.example/v1"
+    default_model = "local-model"
+    allow_empty_key = True
+
+
 # ---------------------------------------------------------------------------
 # Shared base class behaviour
 # ---------------------------------------------------------------------------
@@ -159,6 +168,33 @@ class TestApiKeyProviderBase:
             )
         )
         assert OpenAIProvider(store=store).get_model() == "gpt-4o"
+
+    def test_keyless_compatible_provider_omits_empty_auth_header(
+        self, tmp_path: Path
+    ) -> None:
+        store = CredentialStore(path=tmp_path / "c.json")
+        store.set(
+            ProviderCredentials(
+                provider_id="keyless-compatible",
+                auth_type=ApiKeyProvider.auth_type,
+                secret={"api_key": ""},
+            )
+        )
+        client = _FakeClient(
+            get_response=_FakeResponse(200, body={"data": []}),
+            post_response=_FakeResponse(
+                200,
+                body={"choices": [{"message": {"content": "ok"}}]},
+            ),
+        )
+        provider = _KeylessCompatibleProvider(
+            store=store, http_client_factory=_factory_for(client)
+        )
+
+        assert provider.test_connection().ok
+        assert provider.generate("hello") == "ok"
+        assert "Authorization" not in (client.calls[0]["headers"] or {})
+        assert "Authorization" not in (client.calls[1]["headers"] or {})
 
 
 # ---------------------------------------------------------------------------

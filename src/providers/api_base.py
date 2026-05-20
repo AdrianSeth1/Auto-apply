@@ -272,11 +272,14 @@ class OpenAICompatibleProvider(ApiKeyProvider):
         return self.default_base_url.rstrip("/")
 
     def _headers(self, api_key: str) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {api_key}",
+        headers = {
             "Content-Type": "application/json",
             "User-Agent": self.user_agent,
         }
+        key = api_key.strip()
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        return headers
 
     def _probe_connection(
         self, api_key: str, *, timeout: int

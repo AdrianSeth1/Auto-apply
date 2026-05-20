@@ -325,7 +325,7 @@ def test_allow_reorder_sections_false_skips_visibility_pass(
 # ---- Cover letter patcher -------------------------------------------
 
 
-def _build_cover_source(path: Path) -> None:
+def _build_cover_source(path: Path, *, closing: str = "Sincerely,") -> None:
     """Build a fake cover letter DOCX with header / salutation /
     body / closing / signature layout."""
     from docx import Document as _Document
@@ -343,7 +343,7 @@ def _build_cover_source(path: Path) -> None:
     doc.add_paragraph("Original first body paragraph mentioning Python and React.")
     doc.add_paragraph("Original second body paragraph about teamwork.")
     doc.add_paragraph("Original third body paragraph wrapping up.")
-    doc.add_paragraph("Sincerely,")
+    doc.add_paragraph(closing)
     doc.add_paragraph("Liam Liu")
     doc.save(str(path))
 
@@ -453,12 +453,11 @@ def test_patch_cover_letter_appends_when_ir_has_more_paragraphs(
     assert fifth_idx < closing_idx
 
 
-def test_patch_cover_letter_skips_ir_paragraphs_typed_as_closing(
+def test_patch_cover_letter_keeps_ir_opening_and_closing_body_paragraphs(
     tmp_path: Path,
 ) -> None:
-    """IR paragraphs typed ``opening``/``closing`` would duplicate
-    the source DOCX's salutation/closing; the patcher must filter
-    them out."""
+    """IR ``opening``/``closing`` types are body roles, not the
+    source DOCX salutation/sign-off lines."""
     from src.generation.docx_patch import patch_cover_letter_docx
     from src.generation.ir import CoverLetterDocument, CoverLetterParagraph
 
@@ -469,13 +468,17 @@ def test_patch_cover_letter_skips_ir_paragraphs_typed_as_closing(
         recipient={"company": "Acme"},
         applicant={"name": "Liam Liu"},
         paragraphs=[
-            CoverLetterParagraph(type="opening", text="Dear Hiring Manager,"),
+            CoverLetterParagraph(
+                type="opening",
+                text="I am excited to apply for this tailored role.",
+            ),
             CoverLetterParagraph(
                 type="experience_evidence",
                 text="Real tailored body about scaling.",
             ),
             CoverLetterParagraph(
-                type="closing", text="Sincerely,\nLiam Liu"
+                type="closing",
+                text="I would welcome the chance to discuss my fit.",
             ),
         ],
     )
@@ -485,9 +488,33 @@ def test_patch_cover_letter_skips_ir_paragraphs_typed_as_closing(
     doc = Document(str(out))
     texts = [p.text for p in doc.paragraphs]
 
-    # The synthetic salutation/closing from the IR did NOT get
-    # duplicated -- the original ones from the source are preserved
-    # and the tailored body is in between.
+    # The original salutation/closing are preserved, and all generated
+    # body paragraphs are retained between them.
     assert texts.count("Dear Hiring Manager,") == 1
     assert texts.count("Sincerely,") == 1
+    assert "I am excited to apply for this tailored role." in texts
     assert "Real tailored body about scaling." in texts
+    assert "I would welcome the chance to discuss my fit." in texts
+
+
+def test_patch_cover_letter_detects_comma_only_closing(
+    tmp_path: Path,
+) -> None:
+    """Common closings like ``Best,`` must remain outside the body range."""
+    from src.generation.docx_patch import patch_cover_letter_docx
+
+    src = tmp_path / "cover.docx"
+    out = tmp_path / "out.docx"
+    _build_cover_source(src, closing="Best,")
+    ir = _cover_ir([
+        "Tailored opening body.",
+        "Tailored evidence body.",
+        "Tailored closing body.",
+    ])
+
+    patch_cover_letter_docx(src, ir, output_path=out)
+
+    doc = Document(str(out))
+    texts = [p.text for p in doc.paragraphs]
+    assert "Best," in texts
+    assert texts.index("Tailored closing body.") < texts.index("Best,")
