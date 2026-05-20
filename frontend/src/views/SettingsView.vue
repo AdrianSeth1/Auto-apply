@@ -57,6 +57,48 @@ const primaryOptions = computed(() => {
   }))
 })
 
+// Phase 17.9.8: split the registry into "what I've already set up"
+// vs "what I could connect" so the list doesn't run off the screen
+// with 13+ builtins + user-defined providers.
+const connectedProviders = computed(() =>
+  state.providers.filter((p) => p.configured),
+)
+const availableProviders = computed(() =>
+  state.providers.filter((p) => !p.configured),
+)
+const visibleConnectedProviders = computed(() => {
+  if (providerListUi.showAllConnected) return connectedProviders.value
+  return connectedProviders.value.slice(0, CONNECTED_DEFAULT_VISIBLE)
+})
+const hiddenConnectedCount = computed(() =>
+  Math.max(0, connectedProviders.value.length - CONNECTED_DEFAULT_VISIBLE),
+)
+
+// Group rows into labelled sections so the same provider row template
+// renders inside two distinct headers. Empty sections fall out of the
+// list entirely (a fresh install has no Connected section, a fully
+// configured install has no Available section).
+const providerSections = computed(() => {
+  const sections = []
+  if (connectedProviders.value.length > 0) {
+    sections.push({
+      key: "connected",
+      title: "Connected",
+      items: visibleConnectedProviders.value,
+      empty: false,
+    })
+  }
+  if (availableProviders.value.length > 0) {
+    sections.push({
+      key: "available",
+      title: "Available",
+      items: providerListUi.showAvailable ? availableProviders.value : [],
+      empty: !providerListUi.showAvailable,
+    })
+  }
+  return sections
+})
+
 const state = reactive({
   loading: true,
   saving: false,
@@ -165,6 +207,20 @@ const connectDialog = reactive({
 })
 
 const CUSTOM_MODEL_SENTINEL = "__custom__"
+
+// Phase 17.9.8: with the registry now shipping 13+ builtin providers
+// plus user-defined ones, the full flat list runs off the screen on a
+// laptop. The Settings page splits into:
+//   - Connected: always visible; if more than CONNECTED_DEFAULT_VISIBLE
+//     are connected, the overflow collapses behind "Show N more".
+//   - Available (not yet connected): hidden behind a single toggle so
+//     a clean install still sees the full list, but a power user with
+//     three keys doesn't have to scroll past Mistral / Grok / etc.
+const CONNECTED_DEFAULT_VISIBLE = 5
+const providerListUi = reactive({
+  showAllConnected: false,
+  showAvailable: false,
+})
 
 
 function providerOp(providerId) {
@@ -762,22 +818,60 @@ function isPrimary(provider) {
 
         <div class="border-t border-border"></div>
 
-        <!-- Sub-section: Connected providers -->
-        <section class="space-y-3">
-          <h3 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Connected Providers
-          </h3>
-
+        <!-- Sub-section: Providers (split into Connected / Available, Phase 17.9.8) -->
+        <section class="space-y-4">
           <div v-if="state.loading && state.providers.length === 0" class="text-sm text-muted-foreground">
             Loading providers…
           </div>
 
-          <div v-else class="space-y-2">
-            <div
-              v-for="provider in state.providers"
-              :key="provider.id"
-              class="flex flex-col gap-3 rounded-md border border-border bg-card px-3 py-3 text-sm transition-colors hover:bg-muted/30 sm:flex-row sm:items-center sm:justify-between"
-            >
+          <template v-else>
+            <div v-if="connectedProviders.length === 0" class="rounded-md border border-dashed border-border px-3 py-4 text-xs text-muted-foreground">
+              No providers connected yet. Pick one from "Available" below and click Connect.
+            </div>
+
+            <div v-for="section in providerSections" :key="section.key" class="space-y-2">
+              <div class="flex items-center justify-between">
+                <h3 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  {{ section.title }}
+                  <span class="ml-1 text-muted-foreground/70">
+                    ({{
+                      section.key === "connected"
+                        ? connectedProviders.length
+                        : availableProviders.length
+                    }})
+                  </span>
+                </h3>
+                <button
+                  v-if="section.key === 'connected' && hiddenConnectedCount > 0"
+                  type="button"
+                  class="text-xs text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
+                  @click="providerListUi.showAllConnected = !providerListUi.showAllConnected"
+                >
+                  {{
+                    providerListUi.showAllConnected
+                      ? "Show fewer"
+                      : `Show ${hiddenConnectedCount} more`
+                  }}
+                </button>
+                <button
+                  v-if="section.key === 'available'"
+                  type="button"
+                  class="text-xs text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
+                  @click="providerListUi.showAvailable = !providerListUi.showAvailable"
+                >
+                  {{ providerListUi.showAvailable ? "Hide" : "Show all" }}
+                </button>
+              </div>
+
+              <div v-if="section.empty" class="rounded-md border border-dashed border-border/60 px-3 py-2 text-xs text-muted-foreground">
+                {{ availableProviders.length }} provider(s) ready to connect — click "Show all" to see the list.
+              </div>
+
+              <div
+                v-for="provider in section.items"
+                :key="provider.id"
+                class="flex flex-col gap-3 rounded-md border border-border bg-card px-3 py-3 text-sm transition-colors hover:bg-muted/30 sm:flex-row sm:items-center sm:justify-between"
+              >
               <div class="min-w-0 flex-1 space-y-1">
                 <div class="flex flex-wrap items-center gap-2">
                   <span class="font-medium text-foreground">{{ provider.display_name }}</span>
@@ -867,6 +961,7 @@ function isPrimary(provider) {
               </div>
             </div>
           </div>
+          </template>
         </section>
       </CardContent>
     </Card>
