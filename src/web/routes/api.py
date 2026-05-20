@@ -100,6 +100,7 @@ from src.application.tracking import (
     discard_paused_application,
     load_applications_data,
     load_dashboard_data,
+    soft_delete_application,
     submit_paused_application,
     update_application_outcome,
 )
@@ -755,6 +756,35 @@ async def update_outcome(application_id: str, payload: OutcomePayload) -> dict:
     if not result["ok"]:
         if result["error_code"] == "invalid_outcome":
             raise HTTPException(status_code=400, detail=result["error"])
+        if result["error_code"] == "application_not_found":
+            raise HTTPException(status_code=404, detail=result["error"])
+        raise HTTPException(status_code=500, detail=result["error"])
+    return result
+
+
+@router.delete("/applications/{application_id}")
+async def delete_application(
+    application_id: str, cascade: bool = False
+) -> dict:
+    """Phase 18.4 soft-delete.
+
+    Marks the application's ``deleted_at`` column. Permanent purge
+    (artifacts + DB row) is the cleanup task's job and runs after
+    ``cleanup.soft_deleted_retention_days``. ``cascade=true`` moves
+    the linked resume / cover-letter artifact files into the cleanup
+    quarantine immediately instead of waiting for that window.
+    """
+    try:
+        from uuid import UUID
+
+        application_uuid = UUID(application_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid application ID") from exc
+
+    result = soft_delete_application(
+        application_id=application_uuid, cascade=cascade
+    )
+    if not result["ok"]:
         if result["error_code"] == "application_not_found":
             raise HTTPException(status_code=404, detail=result["error"])
         raise HTTPException(status_code=500, detail=result["error"])

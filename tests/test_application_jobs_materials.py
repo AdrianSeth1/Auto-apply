@@ -163,7 +163,15 @@ def test_patch_existing_uses_unique_output_paths(monkeypatch, tmp_path: Path) ->
     assert first_note is None
     assert second_note is None
     assert first != second
-    assert outputs == [first, second]
+    # Phase 18.4: patch_resume_docx now writes through atomic_write,
+    # so the path the patcher sees is a ``.tmp`` sibling of the
+    # eventually-renamed final path. The unique-output guarantee is
+    # what this test cares about, so we assert the two tmp paths
+    # were distinct and the renamed final paths line up.
+    assert len(outputs) == 2
+    assert outputs[0] != outputs[1]
+    for tmp_arg, final_path in zip(outputs, [first, second], strict=True):
+        assert Path(tmp_arg).name.startswith(final_path.name)
     assert first.name.startswith("patched_resume_")
     assert second.name.startswith("patched_resume_")
 

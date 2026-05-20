@@ -363,8 +363,53 @@ def linkedin_cookie_refresh(self: AutoApplyTask) -> dict[str, Any]:
 
 @celery_app.task(name="maintenance.cache_eviction", base=AutoApplyTask, bind=True)
 def cache_eviction(self: AutoApplyTask) -> dict[str, Any]:
-    logger.info("cache_eviction tick")
-    return {"task": "maintenance.cache_eviction", "status": "stubbed"}
+    """Phase 18.4: drive the artifact cleanup + quarantine pipeline.
+
+    The Beat schedule fires this hourly on the :30 minute. Each tick:
+
+    1. Walks ``data/output`` and moves eligible orphan / tmp / failed
+       artifacts to ``data/quarantine/<run_id>/`` (writes a
+       :class:`CleanupRun` + per-file :class:`CleanupItem` audit).
+    2. Then purges any quarantine entries older than
+       ``cleanup.quarantine_days`` so the recovered-bytes accounting
+       stays accurate.
+
+    The name (``cache_eviction``) is preserved from Phase 14 for Beat
+    schedule continuity; the body is now the real cleanup, not a stub.
+    DB / FS errors are caught + recorded into the task return value so
+    the audit row can still surface them without bouncing the worker.
+    """
+    from src.core.database import get_session_factory  # noqa: PLC0415
+    from src.maintenance.artifacts import (  # noqa: PLC0415
+        clean,
+        purge_quarantine,
+    )
+    from src.tasks.context import current_tenant_id  # noqa: PLC0415
+
+    tenant_id = current_tenant_id() or "default"
+    factory = get_session_factory()
+
+    summaries: dict[str, dict[str, Any]] = {}
+    try:
+        with factory() as session, session.begin():
+            clean_report = clean(
+                session, tenant_id=tenant_id, trigger="scheduled"
+            )
+            summaries["clean"] = clean_report.to_summary()
+        with factory() as session, session.begin():
+            purge_report = purge_quarantine(
+                session, tenant_id=tenant_id, trigger="scheduled"
+            )
+            summaries["purge_quarantine"] = purge_report.to_summary()
+    except Exception as exc:  # noqa: BLE001 -- never crash the worker
+        logger.exception("cache_eviction: cleanup pipeline failed")
+        summaries["error"] = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "task": "maintenance.cache_eviction",
+        "status": "ok" if "error" not in summaries else "error",
+        "summaries": summaries,
+    }
 
 
 @celery_app.task(name="maintenance.gate_expire_sweep", base=AutoApplyTask, bind=True)

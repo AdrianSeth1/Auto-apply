@@ -38,6 +38,7 @@ def cli(ctx: click.Context, verbose: bool) -> None:
 
 # Import and register sub-commands
 from src.cli.cmd_apply import apply_cmd  # noqa: E402
+from src.cli.cmd_cleanup import cleanup_cmd  # noqa: E402  (Phase 18.4)
 from src.cli.cmd_eval import eval_cmd  # noqa: E402
 from src.cli.cmd_init import init_cmd  # noqa: E402
 from src.cli.cmd_jobs import jobs_cmd  # noqa: E402
@@ -75,6 +76,8 @@ cli.add_command(schedule_cmd, "schedule")
 cli.add_command(plan_runs_cmd, "plan-runs")
 cli.add_command(pause_plan_runs_cmd, "pause-plan-runs")
 cli.add_command(resume_plan_runs_cmd, "resume-plan-runs")
+# Phase 18.4 artifact cleanup commands.
+cli.add_command(cleanup_cmd, "cleanup")
 
 
 def main() -> None:

@@ -272,6 +272,178 @@ def discard_paused_application(
         }
 
 
+def soft_delete_application(
+    *,
+    application_id: UUID,
+    cascade: bool = False,
+    reason: str | None = None,
+) -> dict:
+    """Phase 18.4: soft-delete an application.
+
+    Sets ``Application.deleted_at`` to the current timestamp. When
+    ``cascade=True``, the resume / cover-letter artifact paths the
+    row references are moved into the artifact-cleanup quarantine
+    immediately (instead of waiting for the
+    ``cleanup.soft_deleted_retention_days`` window). The row itself
+    stays around until that window expires so the audit trail is
+    preserved.
+
+    Returns the standard ``{ok, ...}`` envelope used by the
+    surrounding routes. ``cascade`` failures degrade gracefully: the
+    soft-delete succeeds even if the cascade move can't find a file.
+    """
+    try:
+        from src.core.database import get_session_factory
+        from src.core.models import Application
+
+        session_factory = get_session_factory(load_config())
+        with session_factory() as session:
+            app = session.get(Application, application_id)
+            if app is None:
+                return {
+                    "ok": False,
+                    "error": "Application not found",
+                    "error_code": "application_not_found",
+                }
+            if app.deleted_at is not None:
+                return {
+                    "ok": True,
+                    "status": "already_deleted",
+                    "message": "Application was already soft-deleted.",
+                    "application_id": str(app.id),
+                    "deleted_at": app.deleted_at.isoformat(),
+                    "cascade": False,
+                }
+            now = datetime.now(UTC)
+            app.deleted_at = now
+            history = list(app.state_history or [])
+            history.append(
+                {
+                    "timestamp": now.isoformat(),
+                    "event": "USER_DELETED",
+                    "from": str(app.status),
+                    "to": str(app.status),
+                    "meta": {
+                        "reason": (reason or "").strip() or None,
+                        "cascade": bool(cascade),
+                    },
+                }
+            )
+            app.state_history = history
+
+            cascade_paths: list[str] = []
+            if cascade:
+                for raw in (app.resume_version, app.cover_letter_version):
+                    if isinstance(raw, str) and raw:
+                        cascade_paths.append(raw)
+            session.commit()
+
+        cascade_result: dict | None = None
+        if cascade:
+            cascade_result = _cascade_quarantine_application_artifacts(
+                tenant_id=str(app.tenant_id),
+                paths=cascade_paths,
+            )
+
+        return {
+            "ok": True,
+            "status": "deleted",
+            "message": "Application soft-deleted.",
+            "application_id": str(app.id),
+            "deleted_at": now.isoformat(),
+            "cascade": bool(cascade),
+            "cascade_summary": cascade_result,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "error": f"Failed to soft-delete application: {exc}",
+            "error_code": "soft_delete_failed",
+        }
+
+
+def _cascade_quarantine_application_artifacts(
+    *, tenant_id: str, paths: list[str]
+) -> dict:
+    """Helper for cascade=True: run a one-shot ``clean`` over just the
+    referenced files. We piggyback on the Phase 18.4 cleanup pipeline
+    rather than reinvent the quarantine layout."""
+    if not paths:
+        return {"moved": 0, "missing": 0}
+    import shutil
+    from pathlib import Path
+    from uuid import uuid4
+
+    from src.core.database import get_session_factory
+    from src.core.models import CleanupItem, CleanupRun
+    from src.maintenance.artifacts import (
+        ACTION_QUARANTINED,
+        CATEGORY_ORPHAN_OUTPUT,
+        QUARANTINE_ROOT,
+    )
+
+    run_id = uuid4()
+    run_dir = QUARANTINE_ROOT / run_id.hex
+    moved = 0
+    missing = 0
+    session_factory = get_session_factory(load_config())
+    now = datetime.now(UTC)
+    with session_factory() as session, session.begin():
+        run = CleanupRun(
+            id=run_id,
+            tenant_id=tenant_id,
+            mode="clean",
+            trigger="api",
+            started_at=now,
+        )
+        session.add(run)
+        for raw in paths:
+            source = Path(raw)
+            if not source.is_absolute():
+                from src.core.config import PROJECT_ROOT
+
+                source = PROJECT_ROOT / source
+            if not source.exists():
+                missing += 1
+                continue
+            destination = run_dir / source.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                size = source.stat().st_size
+            except OSError:
+                size = None
+            try:
+                shutil.move(str(source), str(destination))
+            except OSError:
+                missing += 1
+                continue
+            moved += 1
+            session.add(
+                CleanupItem(
+                    run_id=run_id,
+                    tenant_id=tenant_id,
+                    path=str(source),
+                    quarantine_path=str(destination),
+                    category=CATEGORY_ORPHAN_OUTPUT,
+                    action=ACTION_QUARANTINED,
+                    size_bytes=size,
+                    mtime=None,
+                    quarantined_at=now,
+                    reason="cascade=True on DELETE /api/applications",
+                )
+            )
+        run.finished_at = datetime.now(UTC)
+        run.scanned_count = moved + missing
+        run.quarantined_count = moved
+        run.summary = {
+            "trigger": "api",
+            "moved": moved,
+            "missing": missing,
+            "paths": paths,
+        }
+    return {"moved": moved, "missing": missing, "run_id": run_id.hex}
+
+
 def load_status_data(
     *,
     company: str | None = None,
