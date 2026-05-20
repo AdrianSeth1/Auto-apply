@@ -19,6 +19,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -277,6 +278,15 @@ class TaskRecord(Base):
         Index("ix_tasks_celery_task_id", "celery_task_id"),
         Index("ix_tasks_tenant_status", "tenant_id", "status", "created_at"),
         Index("ix_tasks_kind", "tenant_id", "kind"),
+        # Phase 18.3: partial DLQ index for the "Stuck / failed" tab.
+        # Mirrors the migration; declared here so schema-introspection
+        # tests can pin the contract.
+        Index(
+            "ix_tasks_dlq",
+            "tenant_id",
+            "dead_lettered_at",
+            postgresql_where=text("status = 'dead_lettered'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
@@ -302,6 +312,14 @@ class TaskRecord(Base):
     scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Phase 18.3: dead-letter queue plumbing. ``last_attempted_at``
+    # mirrors the most-recent attempt start so the operator can tell
+    # at a glance how long a row has been parked. ``dead_lettered_at``
+    # + ``dlq_reason`` are populated when the task exhausts
+    # ``max_retries`` instead of letting the row sit at ``failed``.
+    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dead_lettered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dlq_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow

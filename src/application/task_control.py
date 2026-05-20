@@ -77,9 +77,18 @@ def cancel_task_record(row: TaskRecord) -> TaskRecord:
 
 
 def retry_task_record(row: TaskRecord) -> dict[str, Any]:
-    if row.status not in {"failed", "cancelled"}:
+    """Retry a failed / cancelled / dead-lettered task.
+
+    Phase 18.3: ``dead_lettered`` is the third allowable input state
+    so the "Stuck / failed" tab can replay rows the worker gave up
+    on after ``max_retries``. The original row is preserved (still
+    queryable for audit); a *new* Celery dispatch is created so the
+    new attempt counter starts at zero and ``last_error`` doesn't
+    inherit the prior failure message.
+    """
+    if row.status not in {"failed", "cancelled", "dead_lettered"}:
         raise TaskControlError(
-            f"only failed/cancelled tasks may be retried; got {row.status}"
+            f"only failed/cancelled/dead_lettered tasks may be retried; got {row.status}"
         )
     result = celery_app.send_task(
         row.kind,
@@ -94,9 +103,27 @@ def retry_task_record(row: TaskRecord) -> dict[str, Any]:
     }
 
 
+def discard_task_record(row: TaskRecord) -> TaskRecord:
+    """Phase 18.3: drop a dead-lettered task without retrying it.
+
+    Operator action exposed from the "Stuck / failed" tab. The row
+    transitions to ``cancelled`` so the audit trail records the
+    operator's decision; subsequent retries are still possible (per
+    the existing ``retry_task_record`` contract that accepts
+    cancelled rows) if the operator changes their mind."""
+    if row.status not in {"dead_lettered", "failed"}:
+        raise TaskControlError(
+            f"only dead_lettered/failed tasks may be discarded; got {row.status}"
+        )
+    row.status = "cancelled"
+    row.updated_at = datetime.now(UTC)
+    return row
+
+
 __all__ = [
     "TaskControlError",
     "cancel_task_record",
+    "discard_task_record",
     "list_task_records",
     "require_task_for_tenant",
     "resolve_task_record",

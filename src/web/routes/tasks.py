@@ -30,6 +30,7 @@ from src.application.schedule_control import (
 from src.application.task_control import (
     TaskControlError,
     cancel_task_record,
+    discard_task_record,
     list_task_records,
     require_task_for_tenant,
     retry_task_record,
@@ -103,6 +104,10 @@ class TaskRowDTO(BaseModel):
     scheduled_for: datetime | None
     started_at: datetime | None
     finished_at: datetime | None
+    # Phase 18.3: dead-letter queue plumbing.
+    last_attempted_at: datetime | None
+    dead_lettered_at: datetime | None
+    dlq_reason: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -128,6 +133,9 @@ class TaskRowDTO(BaseModel):
             scheduled_for=row.scheduled_for,
             started_at=row.started_at,
             finished_at=row.finished_at,
+            last_attempted_at=row.last_attempted_at,
+            dead_lettered_at=row.dead_lettered_at,
+            dlq_reason=row.dlq_reason,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -303,6 +311,27 @@ def retry_task(
             detail=str(exc),
         ) from exc
     return {"retried": result["retried"], "kind": result["kind"]}
+
+
+@router.post("/api/tasks/{task_id}/discard")
+def discard_task(
+    task_id: str,
+    tenant: str = Depends(get_tenant),
+    session: Session = Depends(get_session),
+) -> TaskRowDTO:
+    """Phase 18.3: drop a dead-lettered / failed row from the
+    "Stuck / failed" tab. The row transitions to ``cancelled``;
+    a retry is still possible via the cancelled-state path."""
+    row = require_task_for_tenant(session, task_id, tenant_id=tenant)
+    if row is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    try:
+        discard_task_record(row)
+    except TaskControlError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    session.commit()
+    session.refresh(row)
+    return TaskRowDTO.from_row(row)
 
 
 # ---- /api/schedule -----------------------------------------------------

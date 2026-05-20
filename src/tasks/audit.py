@@ -299,8 +299,12 @@ def task_prerun_handler(
             return
         row.status = "running"
         row.attempts = (row.attempts or 0) + 1
+        attempt_start = _utcnow()
         if row.started_at is None:
-            row.started_at = _utcnow()
+            row.started_at = attempt_start
+        # Phase 18.3: mirror the most-recent attempt start so the
+        # operator can spot "stuck running" rows at a glance.
+        row.last_attempted_at = attempt_start
 
     _safe_update(task_id or "", _mutate)
 
@@ -350,18 +354,28 @@ def task_postrun_handler(
 def task_failure_handler(
     task_id: str | None = None,
     exception: BaseException | None = None,
+    sender: Any = None,
     **_kwargs: Any,
 ) -> None:  # pragma: no cover
     summary = repr(exception)[:1000] if exception else None
+    # Phase 18.3: if the task exhausted ``max_retries``, the row goes
+    # to ``dead_lettered`` instead of ``failed``. ``sender`` is the
+    # Celery Task instance; we read its ``max_retries`` to compare
+    # against the row's attempt count.
+    max_retries = getattr(sender, "max_retries", None)
 
     def _mutate(row: TaskRecord) -> None:
-        # cancelled is terminal -- a failed body after the operator
-        # cancelled does not promote the row out of cancelled (see
-        # task_postrun_handler for the full rationale).
         if row.status == "cancelled":
             return
-        row.status = "failed"
-        row.finished_at = _utcnow()
+        now = _utcnow()
+        attempts = row.attempts or 0
+        if max_retries is not None and attempts > max_retries:
+            row.status = "dead_lettered"
+            row.dead_lettered_at = now
+            row.dlq_reason = (summary or "max_retries exhausted")[:1000]
+        else:
+            row.status = "failed"
+        row.finished_at = now
         if summary:
             row.last_error = summary
 
