@@ -127,6 +127,7 @@ class ClaudeCliProvider(LLMProvider):
         system: str = "",
         timeout: int = 120,
         output_format: str = "text",
+        model: str | None = None,  # noqa: ARG002 -- CLI auth pins the model
     ) -> str:
         if not self.is_installed():
             raise ProviderError(

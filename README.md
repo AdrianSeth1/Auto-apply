@@ -2,7 +2,7 @@
 
 AutoApply is a local-first job application automation workspace. It helps a job seeker discover roles, score fit, generate tailored application materials, prepare applications, and track outcomes while keeping every submit behind an explicit human decision.
 
-The product combines a Vue/FastAPI operator console, PostgreSQL-backed job and application records, Redis/Celery background work, auditable agent traces, and a provider-agnostic LLM layer for OpenAI, Anthropic, Gemini, Claude CLI, and Codex CLI.
+The product combines a Vue/FastAPI operator console, PostgreSQL-backed job and application records, Redis/Celery background work, auditable agent traces, and a provider-agnostic LLM layer supporting OpenAI, Anthropic, Gemini, DeepSeek, Moonshot/Kimi, Qwen, xAI Grok, Groq, Mistral, OpenRouter, Ollama (local), the Claude and Codex CLIs, and user-defined custom OpenAI-compatible providers.
 
 > **License**: [PolyForm Noncommercial 1.0.0](LICENSE). Personal, academic, and nonprofit use is free. Commercial use requires a separate license; see [Commercial Use](#commercial-use).
 
@@ -21,13 +21,13 @@ AutoApply is designed for users who want automation without losing control over 
 
 ## Current Status
 
-Core product development is complete through **Phase 17.8: Material Strategy & Document Library**.
+Core product development is complete through **Phase 17.9: LLM Provider Expansion** (layered on top of Phase 17.8: Material Strategy & Document Library).
 
-The current application includes the Job Index, task queue, plan-run automation, review queue, document library, material strategy defaults, provider management, LinkedIn session management, and the modern Vue web console. The next planned product hardening area is **Phase 18: Multi-Tenancy & Auth Hardening**.
+The current application includes the Job Index, task queue, plan-run automation, review queue, document library, material strategy defaults, multi-vendor provider management with per-provider model catalogs, a Settings model picker, custom OpenAI-compatible provider support, and an optional cheap-model tier, plus LinkedIn session management and the modern Vue web console. The next planned product hardening area is **Phase 18: Worker Activation, Reliability, Parallelism, Cleanup** (re-ordered 2026-05-19). Multi-tenancy & auth hardening, originally Phase 18, has been deferred to Phase 19 until the personal-version product is feature-complete.
 
 Latest local verification in this workspace:
 
-- `uv run pytest -q`: 1514 passed, 1 skipped
+- `uv run pytest -q`: 1597 passed, 1 skipped (2026-05-19, after Phase 17.9)
 - `npm run build`: passed, with the existing Vite chunk-size warning
 - Legacy batch-run naming cleanup: no remaining obsolete product strings in source docs or built SPA assets
 
@@ -35,7 +35,14 @@ For implementation-level history, see [Phase History](docs/PHASE_HISTORY.md) and
 
 ## Quick Start
 
+Bring up Postgres (with pgvector) and Redis via the bundled Compose
+file, then launch the app on the host:
+
 ```powershell
+# 1. Set AUTOAPPLY_DB_PASSWORD in .env (any non-empty value)
+docker compose up -d
+
+# 2. Install Python deps + Chromium and run migrations
 uv sync
 uv run playwright install chromium
 uv run alembic upgrade head
@@ -44,6 +51,13 @@ uv run autoapply web
 ```
 
 Open the web console at `http://127.0.0.1:8000`.
+
+The Compose file only runs the **data dependencies** (Postgres + Redis).
+The Python app stays on the host — Playwright and the docx→PDF
+toolchain run more reliably native than in a container. For a
+single-server production install that runs the web GUI, Celery
+worker, and Beat under one supervisor, see `supervisord.conf` at the
+repo root and section 15 of [the deployment guide](docs/DEPLOYMENT.md).
 
 If you modify frontend files:
 
@@ -64,7 +78,7 @@ The repository includes built SPA assets under `src/web/static/spa`, so a fronte
 | Database | PostgreSQL 16+ with pgvector |
 | Browser | Playwright Chromium |
 | Cache and queue | Redis for cache, locks, Celery broker, and Beat metadata |
-| LLM provider | At least one of OpenAI, Anthropic, Gemini, Claude CLI, or Codex CLI |
+| LLM provider | At least one of OpenAI, Anthropic, Gemini, DeepSeek, Moonshot, Qwen, xAI, Groq, Mistral, OpenRouter, a local Ollama server, the Claude / Codex CLIs, or a user-defined custom OpenAI-compatible endpoint |
 
 ## Common Commands
 

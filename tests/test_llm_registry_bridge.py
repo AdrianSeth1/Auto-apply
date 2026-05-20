@@ -52,6 +52,7 @@ class _ScriptedProvider(LLMProvider):
         system: str = "",
         timeout: int = 120,
         output_format: str = "text",
+        model: str | None = None,  # noqa: ARG002 -- exercised separately
     ) -> str:
         if self.raise_on_generate is not None:
             raise self.raise_on_generate
@@ -153,6 +154,7 @@ class TestDispatchViaRegistry:
                 system: str = "",
                 timeout: int = 120,
                 output_format: str = "text",
+                model: str | None = None,  # noqa: ARG002
             ) -> str:
                 captured["output_format"] = output_format
                 return "ok"

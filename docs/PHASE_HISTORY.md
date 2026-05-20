@@ -27,12 +27,13 @@ This file is the compact archive of shipped AutoApply phases. It preserves proje
 | 16 | Filter agent and explainability | Added structured rule evidence, score breakdowns, score-breakdown tool, borderline EdgeCaseAgent, matching explanation API, rejected-job UI explanations, and filter-borderline eval suite. |
 | 17 | Plan runs and review queue | Added `plan_run` orchestration, review queue state machine, review kanban, bulk actions, pre-submit freshness gate, morning digest, pause/resume plan-run kill switch, and application submission approval flow. |
 | 17.8 | Material strategy and document library | Added `user_documents`, document upload/download/promote APIs, profile-from-library flow, material defaults, per-plan material overrides, replace-materials actions, and library/template tabs in the Materials workspace. |
+| 17.9 | LLM provider expansion | Added DeepSeek, Moonshot/Kimi, Qwen, xAI Grok, Groq, Mistral, OpenRouter, Ollama, per-provider model catalogs, Settings model picker, small-model routing tier, and user-defined OpenAI-compatible custom providers. |
 
 ## Current Product Baseline
 
-The current baseline is a local-first automation product with a web console, durable Postgres records, Redis/Celery background execution, explicit review before submit, user-curated document library, and provider-agnostic LLM support.
+The current baseline is a local-first automation product with a web console, durable Postgres records, Redis/Celery background execution, explicit review before submit, user-curated document library, and multi-vendor provider-agnostic LLM support.
 
-The next planned milestone is Phase 18: Multi-Tenancy & Auth Hardening.
+The next planned milestone is **Phase 18: Worker Activation, Reliability, Parallelism, Cleanup** (re-ordered 2026-05-19). Multi-tenancy & auth hardening, originally Phase 18, has been deferred to Phase 19 until the personal-version product is feature-complete.
 
 ## Detail Pointers
 

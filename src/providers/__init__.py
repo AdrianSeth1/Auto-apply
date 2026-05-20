@@ -22,6 +22,7 @@ unchanged in this sub-phase; integration lands in 10.6.
 from src.providers.base import (
     AuthType,
     LLMProvider,
+    ModelInfo,
     ProviderCredentials,
     ProviderError,
     ProviderTestResult,
@@ -33,6 +34,7 @@ __all__ = [
     "AuthType",
     "CredentialStore",
     "LLMProvider",
+    "ModelInfo",
     "ProviderCredentials",
     "ProviderError",
     "ProviderRegistry",

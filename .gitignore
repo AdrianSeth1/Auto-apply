@@ -45,6 +45,21 @@ data/output/*
 !data/output/.gitkeep
 data/.linkedin_session/
 
+# User-editable configs — track .example (project defaults), ignore live
+# files so each developer's local edits don't follow them to remote.
+# bootstrap_user_configs() in src/core/config.py copies .example → live
+# on first load.
+config/settings.yaml
+config/companies.yaml
+config/filters.yaml
+config/search_profiles.yaml
+config/material_defaults.yaml
+
+# Profile data — pure user state (PII: name, email, phone, work history).
+# Created via the web UI; never tracked.
+data/profile/active_profile.txt
+data/profile/profiles/*.yaml
+
 # Alembic (may contain DB credentials)
 alembic.ini
 

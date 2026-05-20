@@ -123,9 +123,15 @@ def parse_requirements(description: str, use_llm: bool = True) -> JobRequirement
 
 
 def _parse_with_llm(text: str) -> JobRequirements:
-    """Use Claude CLI to extract structured requirements."""
+    """Use the configured LLM to extract structured requirements.
+
+    JD parsing is a pure extraction task -- pull years / skills / etc
+    out of fixed-format prose -- so we route it via Phase 17.9.5's
+    small tier when configured (llm.small_provider / llm.small_model).
+    No small config? The dispatcher silently uses the primary chain.
+    """
     prompt = f"Parse this job description:\n\n<job_description>\n{text}\n</job_description>"
-    data = generate_json(prompt, system=EXTRACTION_SYSTEM, timeout=90)
+    data = generate_json(prompt, system=EXTRACTION_SYSTEM, timeout=90, tier="small")
     if isinstance(data, str):
         data = json.loads(data)
 

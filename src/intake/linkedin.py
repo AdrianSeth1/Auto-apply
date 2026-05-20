@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import re
 import shutil
 from contextlib import suppress
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -60,6 +62,56 @@ DEFAULT_USER_AGENT = (
 
 # Persistent storage for cookies/session
 DEFAULT_SESSION_DIR = PROJECT_ROOT / "data" / ".linkedin_session"
+
+# Probe-result cache. We don't want to spin up a headless Chromium every time
+# the web UI loads, so we cache the last real authentication probe for a short
+# TTL. The file lives inside the session dir so `clear_linkedin_session`
+# (which rmtree's the dir) wipes it for free; `has_saved_session_data` ignores
+# it so its presence doesn't falsely imply a saved browser profile.
+_PROBE_CACHE_FILENAME = ".last_probe.json"
+_PROBE_TTL = timedelta(minutes=5)
+
+
+def _probe_cache_path(session_dir: Path) -> Path:
+    return session_dir / _PROBE_CACHE_FILENAME
+
+
+def _read_probe_cache(session_dir: Path) -> dict | None:
+    """Return the cached probe result if fresh, else None."""
+    path = _probe_cache_path(session_dir)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return None
+    try:
+        data = json.loads(raw)
+        checked_at = datetime.fromisoformat(data["checked_at"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    if datetime.now(timezone.utc) - checked_at > _PROBE_TTL:
+        return None
+    return data
+
+
+def _write_probe_cache(
+    session_dir: Path,
+    *,
+    authenticated: bool,
+    has_session_data: bool,
+) -> None:
+    """Persist the latest probe result. Best-effort; never raises."""
+    payload = {
+        "authenticated": bool(authenticated),
+        "has_session_data": bool(has_session_data),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        session_dir.mkdir(parents=True, exist_ok=True)
+        _probe_cache_path(session_dir).write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.debug("Failed to write LinkedIn probe cache: %s", exc)
 
 # LinkedIn time filter mapping
 TIME_FILTER_MAP = {
@@ -206,11 +258,30 @@ class LinkedInSession:
         logger.info("LinkedIn session started (session_dir=%s)", self.session_dir)
 
     async def close(self) -> None:
-        """Close browser and save session state."""
-        if self._context:
-            await self._context.close()
-        if self._playwright:
-            await self._playwright.stop()
+        """Close browser and save session state.
+
+        Resilient against the underlying context/browser having already died
+        (e.g. LinkedIn anti-bot killed the headless page, or the persistent
+        profile crashed on launch). We always try to stop the playwright
+        driver so its background task does not leak as an unretrieved future
+        ("Connection closed while reading from the driver").
+        """
+        context = self._context
+        playwright = self._playwright
+        self._context = None
+        self._page = None
+        self._playwright = None
+
+        if context is not None:
+            try:
+                await context.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("LinkedIn context already closed: %s", exc)
+        if playwright is not None:
+            try:
+                await playwright.stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("LinkedIn playwright stop failed: %s", exc)
         logger.info("LinkedIn session closed")
 
     async def get_page(self) -> Page:
@@ -226,7 +297,12 @@ class LinkedInSession:
         """Return True when the persistent profile already contains browser state."""
         if not self.session_dir.exists():
             return False
-        ignored = {"SingletonCookie", "SingletonLock", "SingletonSocket"}
+        ignored = {
+            "SingletonCookie",
+            "SingletonLock",
+            "SingletonSocket",
+            _PROBE_CACHE_FILENAME,
+        }
         return any(entry.name not in ignored for entry in self.session_dir.iterdir())
 
     async def is_authenticated(self) -> bool:
@@ -1474,8 +1550,35 @@ def _parse_html_job_card(attrs: str, body: str, *, search_mode: str) -> RawJob |
 async def get_linkedin_session_status(
     session_dir: Path = DEFAULT_SESSION_DIR,
     headless: bool = True,
+    force_refresh: bool = False,
 ) -> dict:
-    """Return the current LinkedIn session status for the saved browser profile."""
+    """Return the current LinkedIn session status for the saved browser profile.
+
+    By default this returns a cached probe result if one was taken within the
+    last ``_PROBE_TTL`` window — we don't want to spin up a headless Chromium
+    on every web-UI mount. Pass ``force_refresh=True`` to bypass the cache and
+    run a real probe (e.g. before kicking off an authenticated search).
+    """
+    if not force_refresh:
+        cached = _read_probe_cache(session_dir)
+        if cached is not None:
+            authenticated = cached["authenticated"]
+            message = (
+                "LinkedIn session is ready for authenticated searches."
+                if authenticated
+                else "LinkedIn session is not authenticated. Connect LinkedIn to sign in."
+            )
+            return {
+                "ok": True,
+                "authenticated": authenticated,
+                "has_session_data": cached["has_session_data"],
+                "message": message,
+                "error": None,
+                "error_code": None,
+                "cached": True,
+                "checked_at": cached["checked_at"],
+            }
+
     try:
         async with LinkedInSession(session_dir=session_dir, headless=headless) as session:
             authenticated = await session.is_authenticated()
@@ -1489,7 +1592,14 @@ async def get_linkedin_session_status(
             "message": f"Failed to inspect LinkedIn session: {exc}",
             "error": str(exc),
             "error_code": "linkedin_session_status_failed",
+            "cached": False,
         }
+
+    _write_probe_cache(
+        session_dir,
+        authenticated=authenticated,
+        has_session_data=has_session_data,
+    )
 
     message = (
         "LinkedIn session is ready for authenticated searches."
@@ -1503,6 +1613,8 @@ async def get_linkedin_session_status(
         "message": message,
         "error": None,
         "error_code": None,
+        "cached": False,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -1527,6 +1639,11 @@ async def connect_linkedin_session(
         }
 
     if authenticated:
+        _write_probe_cache(
+            session_dir,
+            authenticated=True,
+            has_session_data=has_session_data,
+        )
         return {
             "ok": True,
             "authenticated": True,

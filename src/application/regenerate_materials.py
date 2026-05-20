@@ -47,6 +47,9 @@ async def regenerate_application_material(
     strategy: str | None = None,
     template_id: str | None = None,
     source_document_id: str | None = None,
+    patch_aggressiveness: str | None = None,
+    patch_allow_reorder_sections: bool | None = None,
+    patch_allow_add_remove_bullets: bool | None = None,
 ) -> dict[str, Any]:
     document_type = MATERIAL_TYPE_TO_DOCUMENT_TYPE.get(material_type)
     if document_type is None:
@@ -108,6 +111,9 @@ async def regenerate_application_material(
         profile_id=None,
         strategy=strategy,
         source_document_id=source_document_id,
+        patch_aggressiveness=patch_aggressiveness,
+        patch_allow_reorder_sections=patch_allow_reorder_sections,
+        patch_allow_add_remove_bullets=patch_allow_add_remove_bullets,
     )
     if not result.get("ok"):
         return {

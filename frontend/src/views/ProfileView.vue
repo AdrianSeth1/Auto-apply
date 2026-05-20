@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Loader2,
   Pencil,
   PenLine,
   Plus,
@@ -26,7 +27,9 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { EmptyState } from "@/components/ui/empty-state"
+import { ProgressBanner } from "@/components/ui/progress-banner"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Spinner } from "@/components/ui/spinner"
 import { api } from "@/lib/api"
 
 const route = useRoute()
@@ -40,9 +43,11 @@ const state = reactive({
   loading: true,
   ready: false,
   saving: false,
+  saving_target: "",
   uploading: false,
   importingFromLibrary: false,
   deleting: false,
+  deleting_target: "",
   renaming: false,
   error: "",
   message: "",
@@ -91,6 +96,14 @@ watch(
 )
 
 onBeforeRouteLeave(() => {
+  // When the user is deleting the current profile, the editor's
+  // unsaved-edits prompt is meaningless — the whole profile is going
+  // away. Letting the dirty guard run here would block the post-delete
+  // redirect and strand the user on a phantom editor for a file that
+  // no longer exists on disk.
+  if (state.deleting) {
+    return true
+  }
   if (!isEditingView.value || !isDirty.value) {
     return true
   }
@@ -279,6 +292,7 @@ async function uploadProfileFromFile() {
 
 async function activateProfile(profileId) {
   state.saving = true
+  state.saving_target = profileId
   state.error = ""
   state.message = ""
 
@@ -292,6 +306,7 @@ async function activateProfile(profileId) {
     state.error = error.message
   } finally {
     state.saving = false
+    state.saving_target = ""
   }
 }
 
@@ -380,6 +395,7 @@ async function deleteProfile(profileId) {
   }
 
   state.deleting = true
+  state.deleting_target = profileId
   state.error = ""
   state.message = ""
 
@@ -395,6 +411,7 @@ async function deleteProfile(profileId) {
     state.error = error.message
   } finally {
     state.deleting = false
+    state.deleting_target = ""
   }
 }
 
@@ -938,7 +955,11 @@ function makeId(prefix) {
 
 <template>
   <div class="space-y-6">
-    <div v-if="state.loading && !state.ready" class="space-y-2">
+    <div v-if="state.loading && !state.ready" class="space-y-3">
+      <ProgressBanner
+        title="Loading your profiles…"
+        detail="Reading the profile library from disk."
+      />
       <Skeleton class="h-8 w-40" />
       <Skeleton class="h-24 w-full" />
     </div>
@@ -987,10 +1008,18 @@ function makeId(prefix) {
 
             <div class="actions-row align-end">
               <button class="icon-button primary" type="button" :disabled="state.saving" aria-label="Create Profile" title="Create Profile" @click="createProfile">
-                <Plus class="h-4 w-4" />
+                <Loader2 v-if="state.saving" class="h-4 w-4 animate-spin" />
+                <Plus v-else class="h-4 w-4" />
               </button>
             </div>
           </div>
+
+          <ProgressBanner
+            v-if="state.createMode === 'template' && state.saving"
+            title="Creating profile…"
+            detail="Setting up a blank profile and making it active."
+            class="mt-2"
+          />
 
           <div v-if="state.createMode === 'import'" class="form-grid profile-create-grid">
             <label class="field">
@@ -1000,20 +1029,30 @@ function makeId(prefix) {
 
             <label class="field">
               <span>Resume File</span>
-              <input ref="fileInput" class="input file-input" type="file" accept=".pdf,.docx" />
+              <input ref="fileInput" class="input file-input" type="file" accept=".pdf,.docx" :disabled="state.uploading" />
             </label>
 
             <label class="checkbox-row">
-              <input v-model="state.overwriteUpload" type="checkbox" />
+              <input v-model="state.overwriteUpload" type="checkbox" :disabled="state.uploading" />
               <span>Overwrite If Profile Already Exists</span>
             </label>
 
             <div class="actions-row align-end">
               <button class="icon-button primary" type="button" :disabled="state.uploading" aria-label="Import Profile" title="Import Profile" @click="uploadProfileFromFile">
-                <Upload class="h-4 w-4" />
+                <Loader2 v-if="state.uploading" class="h-4 w-4 animate-spin" />
+                <Upload v-else class="h-4 w-4" />
               </button>
             </div>
           </div>
+
+          <ProgressBanner
+            v-if="state.createMode === 'import' && state.uploading"
+            title="Parsing your resume…"
+            detail="Uploading the file and asking the language model to extract structured fields."
+            class="mt-2"
+          >
+            This usually takes 20–60 seconds. Please keep this tab open.
+          </ProgressBanner>
 
           <div v-if="state.createMode === 'library'" class="form-grid profile-create-grid">
             <label class="field">
@@ -1027,14 +1066,18 @@ function makeId(prefix) {
                 v-model="state.selectedLibraryDocumentId"
                 :options="libraryDocumentOptions"
                 aria-label="Resume in your library"
+                :disabled="state.importingFromLibrary || state.libraryDocumentsLoading"
               />
-              <div class="muted-inline">
+              <div v-if="state.libraryDocumentsLoading" class="muted-inline inline-flex items-center gap-1.5">
+                <Loader2 class="h-3 w-3 animate-spin" /> Loading your library…
+              </div>
+              <div v-else class="muted-inline">
                 Drop one into your library on the <RouterLink to="/materials/library" class="link-inline">Materials → Library</RouterLink> tab.
               </div>
             </label>
 
             <label class="checkbox-row">
-              <input v-model="state.overwriteFromLibrary" type="checkbox" />
+              <input v-model="state.overwriteFromLibrary" type="checkbox" :disabled="state.importingFromLibrary" />
               <span>Overwrite If Profile Already Exists</span>
             </label>
 
@@ -1047,10 +1090,20 @@ function makeId(prefix) {
                 title="Import Profile From Library"
                 @click="importProfileFromLibrary"
               >
-                <Upload class="h-4 w-4" />
+                <Loader2 v-if="state.importingFromLibrary" class="h-4 w-4 animate-spin" />
+                <Upload v-else class="h-4 w-4" />
               </button>
             </div>
           </div>
+
+          <ProgressBanner
+            v-if="state.createMode === 'library' && state.importingFromLibrary"
+            title="Parsing your resume…"
+            detail="Reading the file from your library and asking the language model to extract structured fields."
+            class="mt-2"
+          >
+            This usually takes 20–60 seconds. Please keep this tab open.
+          </ProgressBanner>
         </div>
 
         <div v-if="profiles.length" class="profile-library-grid">
@@ -1075,26 +1128,29 @@ function makeId(prefix) {
 
               <div class="actions-row">
                 <Button variant="default" size="icon" type="button" :disabled="state.renaming" aria-label="Save Rename" title="Save Rename" @click="renameProfile(profile.id)">
-                  <Save class="h-4 w-4" />
+                  <Loader2 v-if="state.renaming" class="h-4 w-4 animate-spin" />
+                  <Save v-else class="h-4 w-4" />
                 </Button>
-                <Button variant="ghost" size="icon" type="button" aria-label="Cancel Rename" title="Cancel Rename" @click="cancelRename">
+                <Button variant="ghost" size="icon" type="button" :disabled="state.renaming" aria-label="Cancel Rename" title="Cancel Rename" @click="cancelRename">
                   <X class="h-4 w-4" />
                 </Button>
               </div>
             </div>
 
             <div v-else class="actions-row">
-              <Button variant="ghost" size="icon" type="button" aria-label="Edit Profile" title="Edit Profile" @click="openProfileEditor(profile.id)">
+              <Button variant="ghost" size="icon" type="button" :disabled="state.deleting || state.saving" aria-label="Edit Profile" title="Edit Profile" @click="openProfileEditor(profile.id)">
                 <Pencil class="h-4 w-4" />
               </Button>
-              <Button :variant="profile.is_active ? 'default' : 'ghost'" size="icon" type="button" aria-label="Select Profile" title="Select Profile" @click="activateProfile(profile.id)">
-                <Check class="h-4 w-4" />
+              <Button :variant="profile.is_active ? 'default' : 'ghost'" size="icon" type="button" :disabled="state.saving || state.deleting" aria-label="Select Profile" title="Select Profile" @click="activateProfile(profile.id)">
+                <Loader2 v-if="state.saving && profile.id === state.saving_target" class="h-4 w-4 animate-spin" />
+                <Check v-else class="h-4 w-4" />
               </Button>
-              <Button variant="ghost" size="icon" type="button" aria-label="Rename Profile" title="Rename Profile" @click="startRename(profile)">
+              <Button variant="ghost" size="icon" type="button" :disabled="state.deleting || state.saving" aria-label="Rename Profile" title="Rename Profile" @click="startRename(profile)">
                 <PenLine class="h-4 w-4" />
               </Button>
-              <Button variant="ghost" size="icon" type="button" class="text-destructive hover:bg-destructive/10 hover:text-destructive" :disabled="state.deleting" aria-label="Delete Profile" title="Delete Profile" @click="deleteProfile(profile.id)">
-                <Trash2 class="h-4 w-4" />
+              <Button variant="ghost" size="icon" type="button" class="text-destructive hover:bg-destructive/10 hover:text-destructive" :disabled="state.deleting || state.saving" aria-label="Delete Profile" title="Delete Profile" @click="deleteProfile(profile.id)">
+                <Loader2 v-if="state.deleting && profile.id === state.deleting_target" class="h-4 w-4 animate-spin" />
+                <Trash2 v-else class="h-4 w-4" />
               </Button>
             </div>
           </article>
@@ -1140,14 +1196,17 @@ function makeId(prefix) {
             <Button variant="ghost" size="icon" type="button" aria-label="Back To Profiles" title="Back To Profiles" @click="goToLibrary">
               <ArrowLeft class="h-4 w-4" />
             </Button>
-            <Button :variant="state.data.active_profile_id === currentProfileId ? 'default' : 'ghost'" size="icon" type="button" aria-label="Select Profile" title="Select Profile" @click="activateProfile(currentProfileId)">
-              <Check class="h-4 w-4" />
+            <Button :variant="state.data.active_profile_id === currentProfileId ? 'default' : 'ghost'" size="icon" type="button" :disabled="state.saving || state.deleting" aria-label="Select Profile" title="Select Profile" @click="activateProfile(currentProfileId)">
+              <Loader2 v-if="state.saving && state.saving_target === currentProfileId" class="h-4 w-4 animate-spin" />
+              <Check v-else class="h-4 w-4" />
             </Button>
-            <Button variant="ghost" size="icon" type="button" class="text-destructive hover:bg-destructive/10 hover:text-destructive" :disabled="state.deleting" aria-label="Delete Profile" title="Delete Profile" @click="deleteProfile(currentProfileId)">
-              <Trash2 class="h-4 w-4" />
+            <Button variant="ghost" size="icon" type="button" class="text-destructive hover:bg-destructive/10 hover:text-destructive" :disabled="state.deleting || state.saving" aria-label="Delete Profile" title="Delete Profile" @click="deleteProfile(currentProfileId)">
+              <Loader2 v-if="state.deleting" class="h-4 w-4 animate-spin" />
+              <Trash2 v-else class="h-4 w-4" />
             </Button>
-            <Button variant="default" size="icon" type="button" :disabled="state.saving" aria-label="Save Profile" title="Save Profile" @click="saveProfile">
-              <Save class="h-4 w-4" />
+            <Button variant="default" size="icon" type="button" :disabled="state.saving || state.deleting" aria-label="Save Profile" title="Save Profile" @click="saveProfile">
+              <Loader2 v-if="state.saving && !state.saving_target" class="h-4 w-4 animate-spin" />
+              <Save v-else class="h-4 w-4" />
             </Button>
           </div>
         </CardHeader>

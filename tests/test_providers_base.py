@@ -21,6 +21,7 @@ import pytest
 from src.providers.base import (
     AuthType,
     LLMProvider,
+    ModelInfo,
     ProviderCredentials,
     ProviderError,
     ProviderTestResult,
@@ -303,3 +304,63 @@ class TestLLMProviderDefaults:
         assert view["configured"] is True
         assert view["credentials"]["connected_at"] == "2026-01-01T00:00:00+00:00"
         assert "secret" not in view["credentials"]
+
+
+# ---------------------------------------------------------------------------
+# ModelInfo + KNOWN_MODELS catalog (Phase 17.9)
+# ---------------------------------------------------------------------------
+
+
+class TestModelCatalog:
+    def test_model_info_to_dict_round_trip(self) -> None:
+        info = ModelInfo(
+            id="m1",
+            display_name="Model 1",
+            context_window=8192,
+            max_output_tokens=2048,
+            supports_json=False,
+            tags=("fast", "cheap"),
+        )
+        as_dict = info.to_dict()
+        assert as_dict["id"] == "m1"
+        assert as_dict["display_name"] == "Model 1"
+        assert as_dict["context_window"] == 8192
+        assert as_dict["max_output_tokens"] == 2048
+        assert as_dict["supports_json"] is False
+        assert as_dict["tags"] == ["fast", "cheap"]
+
+    def test_display_name_defaults_to_id(self) -> None:
+        info = ModelInfo(id="bare")
+        assert info.to_dict()["display_name"] == "bare"
+
+    def test_base_provider_default_catalog_is_empty(self) -> None:
+        assert LLMProvider.KNOWN_MODELS == ()
+
+    def test_public_view_includes_known_models(self) -> None:
+        class _WithCatalog(_StubProvider):
+            id = "catalogged"
+            KNOWN_MODELS = (
+                ModelInfo(id="m1", display_name="M1", context_window=1024),
+                ModelInfo(id="m2"),
+            )
+
+        provider = _WithCatalog()
+        view = provider.public_view()
+        ids = [m["id"] for m in view["known_models"]]
+        assert ids == ["m1", "m2"]
+
+    def test_builtin_providers_expose_catalogs(self) -> None:
+        # 17.9.1 ships curated lists for OpenAI / Anthropic / Gemini.
+        from src.providers.anthropic import AnthropicProvider  # noqa: PLC0415
+        from src.providers.gemini import GeminiProvider  # noqa: PLC0415
+        from src.providers.openai import OpenAIProvider  # noqa: PLC0415
+
+        for cls in (OpenAIProvider, AnthropicProvider, GeminiProvider):
+            assert len(cls.KNOWN_MODELS) > 0, f"{cls.__name__} should ship a catalog"
+            ids = {m.id for m in cls.KNOWN_MODELS}
+            assert len(ids) == len(cls.KNOWN_MODELS), f"{cls.__name__} duplicate ids"
+            # default_model should appear in the catalog so the picker
+            # can highlight it.
+            assert cls.default_model in ids, (
+                f"{cls.__name__} default_model {cls.default_model!r} not in catalog"
+            )

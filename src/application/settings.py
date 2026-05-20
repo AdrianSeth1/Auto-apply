@@ -54,13 +54,39 @@ def update_llm_settings_data(
     allow_fallback: bool = False,
     cache_enabled: bool = True,
     cache_ttl_hours: int = 24,
+    small_provider: str | None = None,
+    small_model: str | None = None,
+    small_tier_action: str = "preserve",
 ) -> dict:
+    """Persist primary + fallback + small-tier LLM settings.
+
+    Phase 17.9.9: the small-tier knobs follow the same three-state
+    pattern as ``update_llm_settings``:
+
+    * ``small_tier_action='preserve'`` (default) -- ignore the small_*
+      arguments. Existing callers that don't know about the tier yet
+      keep working unchanged.
+    * ``small_tier_action='set'`` -- write ``small_provider`` /
+      ``small_model`` (either may be None to disable just that knob).
+    * ``small_tier_action='clear'`` -- remove both keys from disk.
+
+    A self-referential small_provider (= primary_provider) is allowed
+    and lands as-is: the user might want a different model on the same
+    provider, which is a valid configuration.
+    """
     fallback = fallback_provider or None
     if fallback == primary_provider:
         fallback = None
 
     try:
-        update_llm_settings(primary_provider, fallback, allow_fallback and fallback is not None)
+        update_llm_settings(
+            primary_provider,
+            fallback,
+            allow_fallback and fallback is not None,
+            small_provider=small_provider,
+            small_model=small_model,
+            small_tier_action=small_tier_action,
+        )
         _update_search_cache_settings(enabled=cache_enabled, ttl_hours=cache_ttl_hours)
     except Exception as exc:
         return {

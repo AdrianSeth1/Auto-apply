@@ -15,7 +15,7 @@ To reduce duplication, use the following source-of-truth split:
 | User-facing setup | `docs/DEPLOYMENT.md` |
 | This file | Strategy, historical roadmap context, long-form planning notes |
 
-Last refreshed: **2026-05-16 (documentation cleanup)**. v3.1 calibrated the roadmap in four places:
+Last refreshed: **2026-05-19 (Phase 17.9 documentation sync)**. Current operating status, verification, and next roadmap live in `docs/PROJECT_MANAGEMENT.md`. This plan keeps the long-form rationale. v3.1 calibrated the roadmap in four places:
 (a) Phase 14 task queue switches to Celery (the original "self-built task model +
 queue transport + worker runtime" plan is dropped; see D025). APScheduler is
 retired in favor of Celery Beat for cron triggers.
@@ -29,6 +29,8 @@ reinvent it (see D026).
 (d) Phase 15.3 LaTeX scope is clarified: `src/documents/latex_engine.py` already
 exists, so Phase 15 is not "build LaTeX from scratch" — it is "add the template
 package spec + manifest + adapter convention on top of an existing engine."
+
+The 2026-05-19 refresh records Phase 17.9 as complete: the provider layer now covers OpenAI, Anthropic, Gemini, DeepSeek, Moonshot/Kimi, Qwen, xAI Grok, Groq, Mistral, OpenRouter, Ollama, Claude CLI, Codex CLI, and user-defined OpenAI-compatible providers. Phase 18 is now worker activation / reliability / parallelism / cleanup; multi-tenancy and auth hardening moved to Phase 19.
 
 ---
 
@@ -79,7 +81,7 @@ no SaaS business layer is on the table yet.
 | Backend | FastAPI + Click CLI (`autoapply`) | Single codebase serves web + CLI |
 | Frontend | Vue 3 + Vue Router + Vite + Tailwind v3 + shadcn-vue + reka-ui | See D015 |
 | Browser automation | Playwright (Python, async) | Full DOM access + persistent context for LinkedIn login |
-| LLM providers | OpenAI / Anthropic / Gemini (REST via `httpx`) **or** Claude Code CLI / Codex CLI (subprocess) — all behind `ProviderRegistry` | See D016 |
+| LLM providers | OpenAI / Anthropic / Gemini plus DeepSeek, Moonshot/Kimi, Qwen, xAI Grok, Groq, Mistral, OpenRouter, Ollama, Claude Code CLI, Codex CLI, and user-defined OpenAI-compatible providers — all behind `ProviderRegistry` | See D016 and Phase 17.9 |
 | Agent harness | In-house ReAct loop in `src/agent/` — bounded steps, allow-listed `ToolRegistry`, Postgres-backed HITL for task flows, JSON-on-disk trace store, fixture-driven eval | See D017 (no LangChain / LangGraph) |
 | Database (source of truth) | PostgreSQL + pgvector + alembic | Vector search for matching; alembic for schema migrations |
 | Cache / lock / queue (Phase 12+) | Redis 7+ | L2 cache, distributed lock primitive (`SET NX PX`), task queue substrate; see D018 |
@@ -101,8 +103,9 @@ src/
 │   └── eval/            #   fixture-driven eval runner + scorers
 ├── providers/           # LLM provider abstraction
 │   ├── base.py          #   LLMProvider ABC + ProviderKind + AuthType
-│   ├── openai.py / anthropic.py / gemini.py   # REST adapters via httpx
-│   ├── claude_cli.py / codex.py               # Subprocess adapters
+│   ├── openai.py / anthropic.py / gemini.py   # first-party REST adapters
+│   ├── deepseek.py / moonshot.py / qwen.py / xai.py / groq.py / mistral.py / openrouter.py / ollama.py
+│   ├── claude_cli.py / codex.py               # subprocess adapters
 │   ├── api_base.py      #   shared REST helpers
 │   ├── store.py         #   credential storage (0600 file + OS keyring fallback)
 │   └── registry.py      #   primary / fallback dispatch into generate_text
@@ -233,7 +236,7 @@ DISCOVERED → QUALIFIED → MATERIALS_READY → FORM_OPENED
 → REVIEW_REQUIRED → SUBMITTED → FAILED → NEEDS_RETRY
 ```
 
-Phase 13 will add a separate cluster of tables for the **Job Index &
+Phase 13 added a separate cluster of tables for the **Job Index &
 Freshness Engine**:
 
 ```sql
@@ -247,7 +250,7 @@ refresh_tasks       -- priority queue of pending scrapes
 Plus a new `applications.job_snapshot_id` FK that pins every
 generated artifact to the exact JD content it was produced against.
 Every Phase-12+ table carries a `tenant_id` column (default `"default"`
-until Phase 18). Phase 13.9 backfills the same column onto every legacy
+until Phase 19). Phase 13.9 backfills the same column onto every legacy
 table (`jobs`, `applications`, `applicant_profile`, `bullet_pool`,
 `story_bank`, `qa_bank`, etc.) — see D020 / D026.
 
@@ -256,7 +259,7 @@ table (`jobs`, `applications`, `applicant_profile`, `bullet_pool`,
 ### Layer 1: Job Intake
 Greenhouse / Lever / Ashby / LinkedIn adapters; unified `RawJob` schema;
 LLM-assisted JD parsing with regex fallback; deduplication on `(source,
-company, source_id)`. Phase 13 will replace the file-backed search cache
+company, source_id)`. Phase 13 replaced the file-backed search cache
 with the Job Index & Freshness Engine.
 
 ### Layer 2: Matching & Filtering
@@ -337,10 +340,10 @@ baseline (post-Phase-10): **680 passed, 1 skipped** (`pytest -q`),
 
 See `docs/CHANGELOG.md` for the per-sub-phase shipping log.
 
-## 8. Roadmap (Phase 11 → 18) — v3.1, calibrated 2026-05-14
+## 8. Roadmap (Phase 11 → 19) — v3.2, refreshed 2026-05-19
 
 v3 corrected four issues from v1/v2 (preserved below); v3.1 further calibrates
-v3 in four places (see the top-of-file version note).
+v3 in four places (see the top-of-file version note). v3.2 records Phase 17.9 and the Phase 18/19 reorder.
 
 The v2/v3 re-plan reflects four corrections to the v1 draft:
 
@@ -362,9 +365,7 @@ phase (**Phase 13: Job Index & Freshness Engine**) because the
 problem is content versioning + freshness state machines + audit
 binding, not key-value eviction. (See D019.)
 
-A new **Phase 18: Multi-Tenancy & Auth Hardening** closes the v1
-commercial-ready core; every Phase 12-17 table is built with
-`tenant_id` from day one. (See D020.)
+Multi-tenancy & auth hardening still closes the commercial-ready core, but it is now **Phase 19**. **Phase 18** is worker activation, reliability, parallelism, and cleanup so the personal-version product is solid before hosted multi-user work resumes. Every Phase 12-17 table is still built with `tenant_id` from day one. (See D020.)
 
 ### Phase 11: Reliability & Cleanup (~1 week)
 Tighten the provider layer; ship the migration tool needed for users
@@ -433,7 +434,7 @@ Job Intelligence Database.
   backfills existing rows; ORM models add the field. Existing query paths
   are not forced to filter (preserving today's global-read behavior), but
   every new Phase-14 code path must thread an explicit tenant context. The
-  "default tenant" fallback is replaced by Phase 18 auth middleware + RLS.
+  "default tenant" fallback is replaced by Phase 19 auth middleware + RLS.
 
 ### Phase 14: Task Queue + Scheduled Work (~2.5 weeks, Celery-based) — **Complete**
 
@@ -722,7 +723,194 @@ back to regenerate with a warning), LaTeX source patching (same).
 Picked up by Phase 18+ when the materials generation worker body
 actually consumes `MaterialsGeneratePayload`.
 
-### Phase 18: Multi-Tenancy & Auth Hardening (~2.5 weeks)
+### Phase 17.9: LLM Provider Expansion (~0.5 week) — **Complete**
+
+Hardens the Phase 10 provider abstraction before worker activation. The goal was to make provider choice an operator setting instead of a code change.
+
+- **17.9.1** Extracted `OpenAICompatibleProvider`, added `ModelInfo`, and gave first-party providers curated model catalogs.
+- **17.9.2** Added DeepSeek, Moonshot/Kimi, Qwen, xAI Grok, Groq, Mistral, and OpenRouter.
+- **17.9.3** Added local Ollama support with empty-key credential handling and live `/api/tags` catalog probing.
+- **17.9.4** Added `GET /api/providers/{id}/models` and a Settings model picker with a custom-model escape hatch.
+- **17.9.5** Added the optional `llm.small_provider` / `llm.small_model` tier for extraction workloads such as JD parsing and resume import.
+- **17.9.6** Added `llm.custom_providers` so users can register OpenAI-compatible proxies, private vLLM / LM Studio endpoints, or newer upstreams without code changes.
+
+### Phase 18: Worker Activation, Reliability, Parallelism, Cleanup (~2.5–3 weeks)
+
+> **Re-ordering (2026-05-19)**: this used to be Phase 19, after
+> Multi-Tenancy. We moved it forward because:
+> (a) the personal-version product is the active priority; multi-
+>     tenancy/commercialization is paused until the single-user
+>     product is rock-solid;
+> (b) garbage is accumulating in `data/output/` today and the cleanup
+>     debt is hurting day-to-day use right now;
+> (c) the worker activation work in 18.1 is a prerequisite for
+>     reliability / parallelism / scalability across all subsequent
+>     phases, multi-tenancy included.
+> Multi-tenancy & auth hardening is now Phase 19, deferred until the
+> personal version is feature-complete.
+
+A **fix-focused phase**, not a feature phase. Phase 14 shipped the
+Celery scaffold (queues, base task, audit table, reliability config,
+Beat schedule); Phase 17 shipped the per-plan strategy + review loop
+on top of it; the project memory accurately summarised the state in
+mid-May 2026 as "the bones of MQ are there, the body isn't." This
+phase fills the body in, and pays down the cleanup debt that has
+been accumulating since Phase 15.
+
+Four pillars, mapped one-to-one to the failure modes surfaced during
+the late-Phase-17 / Phase-18-prep sweep:
+
+1. **The work isn't on the queue.** `materials.generate`,
+   `application.prepare/fill/submit`, `maintenance.cache_eviction`,
+   `maintenance.gate_expire_sweep` — every task body is a stub that
+   logs "queued" and returns `"scheduled"`. The actual generation
+   runs synchronously inside the FastAPI request handler, so closing
+   a browser tab mid-LLM-call loses the work and worker horizontal
+   scaling is impossible.
+2. **MQ reliability is configured but unexercised.** `task_acks_late=
+   True`, `task_reject_on_worker_lost=True`, `worker_prefetch_
+   multiplier=1`, idempotency-key short-circuit, `TaskRecord` audit
+   row state machine — all of it sits unverified because (1).
+3. **Parallelism is left on the table.** Bullet rewrites run serially
+   inside `rewrite_bullets` (one LLM call per bullet); resume +
+   cover-letter generation are sequential inside one request; JD
+   parsing for N search results runs one-LLM-at-a-time. LinkedIn
+   detail-page enrichment is **correctly** serial (anti-bot) and
+   stays that way.
+4. **No garbage collection.** `data/output/` only grows; failed
+   patches leave half-written `patched_resume_<uuid>.docx`; screenshot
+   directories accumulate every form-fill attempt; `TaskRecord` has
+   no retention policy; `delete_document` is the only path that
+   removes a file from disk.
+
+**Honest scope**: 18.1 is net-new code (real task bodies, async API
+contract). 18.2 is "exercise + add DLQ + manual-retry UI" on top of
+infrastructure that already exists. 18.3 is mostly `asyncio.gather`
++ rate-limit threading. 18.4 is net-new (no cleanup logic exists
+today outside `delete_document` + the profile-import `_upload_*`
+tmpfile unlink). The four are bundled into one phase because they
+share a single audience (the worker + operator), but they're
+internally sequential: 18.4 (cleanup) is independent and ships
+first to stop the bleed; 18.1 (activation) unblocks 18.2 and 18.3.
+
+Sub-phases:
+
+- **18.1 Worker activation** — fill the stub task bodies with the
+  real call chain. Concretely:
+  - `materials.generate` invokes `generate_material_for_job` end-to-end
+    using the `MaterialsGeneratePayload` already shaped in Phase 17.8.
+    Writes the resulting artifact paths back onto the `Application`
+    row via the same code path `regenerate_application_material`
+    uses today, so the audit `state_history` event is unchanged.
+  - `application.prepare` / `application.fill` / `application.submit`
+    bodies — `application.submit` keeps the pre-submit gate (Phase
+    17) wiring; HITL transitions still use the `waiting_human` audit
+    state (no `time.sleep` in workers).
+  - Async REST surface: `POST /api/jobs/generate-material` and
+    `POST /api/applications/{id}/regenerate-material` switch to
+    "enqueue + return `task_id`", with `GET /api/tasks/{task_id}`
+    polling endpoint backed by `TaskRecord`. SPA gets a generic
+    "long-running operation" hook so existing views can swap in
+    progress polling without per-view boilerplate.
+  - The existing synchronous endpoints are retained behind a feature
+    flag (`AUTOAPPLY_SYNC_MATERIALS=1`) for a one-week soak; default
+    is async.
+  - **Tests**: end-to-end test that fires `materials.generate` via
+    `apply_async` against an in-process Celery worker (`task_always_
+    eager=True` is **not** used — we need the real broker contract).
+
+- **18.2 Resilience exercise + DLQ + manual retry** —
+  - Add a `tests/test_worker_resilience.py` suite that kills a
+    worker mid-task (`os.kill(pid, SIGTERM)` on a subprocess Celery
+    worker) and asserts the task is requeued exactly once with the
+    same `idempotency_key`. Same for poison-message handling.
+  - Dead-letter queue: tasks that exhaust `max_retries=3` move to
+    a per-kind DLQ (`materials.generate.dlq`, etc.) instead of being
+    silently absorbed by the audit row's `failed` state. DLQ entries
+    surface in the Tasks UI with a "Retry from DLQ" button that
+    creates a fresh task with the same payload + a new idempotency
+    key (so the original failure stays auditable).
+  - `TaskRecord` lifecycle hooks already exist; this phase verifies
+    them end-to-end and adds the missing `last_attempted_at` /
+    `dlq_reason` fields if the audit rows don't already capture them.
+  - SPA `/tasks` view grows a "Stuck / failed" tab that lists DLQ
+    entries with payload preview + retry / discard actions.
+
+- **18.3 Strategic parallelism** —
+  - `rewrite_bullets` rewritten as `asyncio.gather` of
+    `_rewrite_single_bullet`, capped at 5 concurrent LLM calls
+    (provider-rate-limit dependent). Expected: ~30s → ~6s for a
+    10-bullet resume.
+  - `_generate_selected_material` runs `generate_resume` and
+    `generate_cover_letter` for one job in parallel via
+    `asyncio.to_thread` (both are sync today; this preserves their
+    bodies). Expected: ~75s → ~45s for the dual-doc case.
+  - `intake.jd_parser.parse_requirements_batch()`: new helper that
+    accepts N descriptions and runs them concurrently with the same
+    rate-limit ceiling. Called from search post-processing when
+    `use_llm=True`. Expected: 25 jobs × 3s/parse = 75s → ~15s.
+  - **Out of scope (intentionally)**: parallelising LinkedIn detail-
+    page fetches. The current serial + random-delay loop in
+    `enrich_with_details` is the anti-bot contract and must not
+    change inside this phase.
+  - Each parallel hot-spot lands behind a config flag
+    (`parallelism.bullet_rewrites.max_concurrent=5`) so an operator
+    can dial it down if a provider rate-limits.
+
+- **18.4 Cleanup policy + scheduled garbage collection** —
+  - `docs/DECISIONS.md` gets a new entry (likely D026):
+    "data/output/ is a cache, not a vault" — explicit retention
+    rules per artifact category. Reviewed before writing code.
+  - Atomic-write helper: a `with atomic_write(target_path) as tmp`
+    context manager that writes to `target_path.with_suffix(
+    target_path.suffix + ".tmp")` and renames on success, unlinks
+    on exception. Applied to every `generate_*` / `patch_*` /
+    `_copy_library_document_to_output` call site so crashes can't
+    leave half-written DOCX/PDF on disk.
+  - `maintenance.cache_eviction` task body — actually walks
+    `data/output/` once a day, deletes files older than
+    `cleanup.output_retention_days=30` that are NOT referenced by
+    any `Application.resume_version` / `cover_letter_version` /
+    `user_documents.storage_path`. Dry-run mode flag lands a
+    `cleanup_report` audit row before deletion is enabled.
+  - Screenshot rotation: per-application directory keeps only the
+    latest 5 screenshots; older ones go in a `data/output/screenshots/
+    archive/` tarball nightly.
+  - `TaskRecord` retention: succeeded rows older than 30 days collapse
+    into a `tasks_archive` summary table (per-tenant, per-kind,
+    per-day counts + last error sample). Failed rows kept for 90.
+    HITL `waiting_human` rows never expire.
+  - `Application` delete API + UI — `DELETE /api/applications/{id}`
+    with a `cascade=true` option to unlink the on-disk artifacts.
+    Soft-delete (sets `Application.deleted_at`) by default;
+    cascade removal cleans the files only after the row's audit
+    history is summarised into the archive table.
+  - Orphan scanner CLI: `autoapply cleanup scan` prints what
+    `cache_eviction` would delete; `--apply` actually deletes. Lets
+    operators audit before the scheduled task runs.
+
+Sequencing rationale: 18.4 ships first (the orphans are accumulating
+today, independent of MQ status). 18.1 next (unblocks 18.2, 18.3 and
+fixes the lost-work-on-tab-close problem). 18.2 and 18.3 then ship
+in parallel because they touch disjoint files.
+
+Open questions deferred to Phase 20+:
+- Persistent task progress UI (real-time SSE streaming, not poll-based).
+  Phase 18 only does poll.
+- Cross-tenant DLQ surfacing for the future ops dashboard.
+- Anti-bot session pooling — would let LinkedIn detail-page parallelism
+  become safe by routing through N independent sessions. Out of scope
+  here.
+
+### Phase 19: Multi-Tenancy & Auth Hardening (~2.5 weeks, deferred)
+
+> **Re-ordering (2026-05-19)**: this used to be Phase 18, the next
+> milestone after Phase 17.8. We pushed it after the worker /
+> cleanup phase because the personal-version product is the active
+> focus and multi-tenancy/commercialization is paused until the
+> single-user version is solid. The schema-level `tenant_id` ground-
+> work from Phase 13.9 remains valid; activating it can wait.
+
 Activates the commercial-readiness work seeded across 12-17. SaaS
 business layer (billing, sign-up flow, marketing site) is NOT in
 scope — this phase only makes the existing system safe to host for
@@ -731,30 +919,30 @@ multiple isolated users.
 **Honest scope**: Phase 13.9 already lands the schema-level `tenant_id`
 column on every table, so the "add column + backfill" portion is genuinely
 "activate existing work." But the following sub-phases are **net-new
-construction**, not retrofit: 18.2 auth middleware (`src/web/` has no
-auth layer today), 18.4 Redis namespace refactor (keys today are
+construction**, not retrofit: 19.2 auth middleware (`src/web/` has no
+auth layer today), 19.4 Redis namespace refactor (keys today are
 `{version}:{namespace}:{key}` with no tenant prefix — every wrapper
-needs to change), and 18.7 credential store (`src/providers/store.py`
+needs to change), and 19.7 credential store (`src/providers/store.py`
 is a single global JSON file today; needs per-tenant directory split +
-keyring entry renaming). 18.1 / 18.3 / 18.5 / 18.6 are the only true
+keyring entry renaming). 19.1 / 19.3 / 19.5 / 19.6 are the only true
 "activations."
 
-- **18.1** `tenants` + `users` tables; bind the `tenant_id='default'`
+- **19.1** `tenants` + `users` tables; bind the `tenant_id='default'`
   rows that 13.9 left behind to real tenants.
-- **18.2** **Build from scratch** the FastAPI auth middleware —
+- **19.2** **Build from scratch** the FastAPI auth middleware —
   session/token parsing, `current_tenant_id` injected into a
   `ContextVar`; ORM sessions auto-filter via SQLAlchemy events; Celery
   task headers carry tenant context (14.3 reserves the hook).
-- **18.3** Postgres Row-Level Security policies — DB-level backstop
+- **19.3** Postgres Row-Level Security policies — DB-level backstop
   that catches any ORM bypass.
-- **18.4** **Refactor** Redis key naming — every namespace now prefixed
+- **19.4** **Refactor** Redis key naming — every namespace now prefixed
   `tenant:{id}:`; `src/cache/base.py` key construction requires an
   explicit tenant context (raises rather than falling back to default).
-- **18.5** Per-tenant quotas (LLM tokens, scrape rate, storage).
+- **19.5** Per-tenant quotas (LLM tokens, scrape rate, storage).
   Exceeding returns 429.
-- **18.6** Audit log table — `audit_events` (submission, settings
+- **19.6** Audit log table — `audit_events` (submission, settings
   change, credential operation, manual schedule trigger). Append-only.
-- **18.7** **Refactor** credential store — `src/providers/store.py`
+- **19.7** **Refactor** credential store — `src/providers/store.py`
   moves from one global JSON file to
   `data/tenants/{id}/credentials/`; keyring entries get tenant prefixes;
   migrate existing `data/providers/credentials.json` into the `default`
@@ -762,22 +950,34 @@ keyring entry renaming). 18.1 / 18.3 / 18.5 / 18.6 are the only true
 
 ### Timeline summary
 
-| Phase | Scope | Est. | Cumulative |
-|-------|-------|------|------------|
-| 11 | Reliability & Cleanup | 1w | 1w (done) |
-| 12 | Cache Infrastructure (Redis) | 1.5w | 2.5w (done) |
-| 13 | Job Index & Freshness Engine | 2w | 4.5w (13.1-13.8 done) |
-| 13.9 | tenant_id retrofit migration | 0.3w | 4.8w |
-| 14 | Task Queue + Scheduled Work (Celery) | 2.5w | 7.3w |
-| 15 | Resume & Cover Letter Generation v2 | 3w | 10.3w |
-| 16 | Filter Agent + Explainability | 1.5w | 11.8w |
-| 17 | Plan Run Loop + Review Queue | 2w | 13.8w |
-| 18 | Multi-Tenancy & Auth Hardening | 2.5w | 16.3w |
+Status as of 2026-05-19: Phases 1-17.9 are shipped on `dev`. Phase 18
+is the next milestone after the worker-system audit re-prioritised
+the roadmap.
 
-~3.5-4 months to v1.0 commercial-ready core (no SaaS business layer).
-Phase 14 grows 0.5w over v3 to absorb the HITL gate backend migration;
-Phase 18 grows 0.5w to honestly reflect that auth middleware / Redis
-namespace / credential store are net-new builds.
+| Phase | Scope | Est. | Status |
+|-------|-------|------|------------|
+| 11 | Reliability & Cleanup | 1w | Done |
+| 12 | Cache Infrastructure (Redis) | 1.5w | Done |
+| 13 | Job Index & Freshness Engine | 2w | Done |
+| 13.9 | tenant_id retrofit migration | 0.3w | Done |
+| 14 | Task Queue + Scheduled Work (Celery) | 2.5w | Done (bodies stubbed — activated in 18.1) |
+| 15 | Resume & Cover Letter Generation v2 | 3w | Done |
+| 16 | Filter Agent + Explainability | 1.5w | Done |
+| 17 | Plan Run Loop + Review Queue | 2w | Done |
+| 17.8 | Material Strategy & Document Library | 1w | Done |
+| 17.9 | LLM Provider Expansion | 0.5w | Done |
+| **18** | **Worker Activation, Reliability, Parallelism, Cleanup** | **2.5–3w** | **Next** |
+| 19 | Multi-Tenancy & Auth Hardening | 2.5w | Deferred (post personal-version maturity) |
+
+The personal-version product (single user, local-first, no auth) is
+feature-complete through Phase 17.9. Phase 18 hardens it (real
+workers, retention, parallelism); Phase 19 then activates the
+multi-tenancy plumbing that Phases 12-17 left dormant. Phase 18 was
+scoped after a Phase-18-prep audit found the task bodies were stubs,
+no cleanup policy existed, and parallelism opportunities were
+unexplored. Phase 19 was originally the next milestone (Multi-Tenancy
+& Auth) and grew 0.5w over v3 to honestly reflect that auth
+middleware / Redis namespace / credential store are net-new builds.
 
 ## 9. Cross-cutting Quality Bars
 
@@ -793,7 +993,7 @@ Enforced from Phase 11 onward:
   updated at the end of every Phase, not in a batch later.
 - **Multi-tenancy hygiene** (Phase 12+) — every new table carries
   `tenant_id`; every new Redis key is prefixed; every new background
-  task accepts a tenant context. No exceptions, or Phase 18 turns
+  task accepts a tenant context. No exceptions, or Phase 19 turns
   into a rewrite.
 
 ## 10. Verification Checklist (per-phase smoke)
@@ -819,7 +1019,10 @@ Enforced from Phase 11 onward:
 | 15 | DOCX patch preserves named styles; three LaTeX templates compile from the same IR; cover-letter eval 5/5 pass; artifacts bind snapshot/source/template/trace IDs |
 | 16 | Any rejected job in JobsView surfaces a reason chain in < 5s; agent cost < $0.50 per 100 jobs |
 | 17 | Schedule custom batch tasks that produce N pre-tailored applications in review queue, each approvable in < 30s |
-| 18 | Two tenants seeded with overlapping email / LinkedIn cookies → cannot read each other's jobs / snapshots / applications / credentials / Redis keys (verified by direct SQL and direct Redis CLI); quota exhaustion returns 429 |
+| 17.8 | Upload a trusted resume to the document library → set it as a default material source → regenerate a paused review entry with that source → promote the output back to the library |
+| 17.9 | Connect/test every built-in provider class that has credentials available; Settings model picker lists curated/live catalogs; `tier="small"` routes extraction calls through the configured small provider |
+| 18 | Enqueue real `materials.generate` and `application.*` tasks through Celery workers; worker loss requeues safely; DLQ/manual retry works; cleanup dry-run reports orphaned artifacts before deletion |
+| 19 | Two tenants seeded with overlapping email / LinkedIn cookies → cannot read each other's jobs / snapshots / applications / credentials / Redis keys (verified by direct SQL and direct Redis CLI); quota exhaustion returns 429 |
 
 ## 11. Risk & Open Questions
 
@@ -827,13 +1030,13 @@ Enforced from Phase 11 onward:
   context cookies, randomized delays, controlled concurrency, and
   the Phase 13 distributed-lock-gated force-refresh. Still a real
   risk for any aggressive custom schedule.
-- **LLM cost drift.** Mitigated by the Phase 12 cache + the Phase 11
-  fallback chain (cheap models in the fallback slot) + the eval
-  $1 / 100 ceiling. Cost telemetry (Phase 9.4) is the early-warning.
-- **Task execution is still synchronous today.** Until Phase 14 lands,
-  long-running search, generation, and apply work can still block CLI/web
-  flows and manual retries remain operationally expensive.
-- **Arbitrary LaTeX is not zero-config.** Phase 15 will accept arbitrary
+- **LLM cost drift.** Mitigated by the Phase 12 cache, the Phase 11
+  fallback chain, the Phase 17.9 small-model tier, and the eval
+  $1 / 100 ceiling. Cost telemetry is the early-warning.
+- **Worker bodies still need activation.** Phase 14 landed the Celery
+  skeleton, but Phase 18 is where long-running search, generation, and
+  apply work move fully into real worker tasks with retry and DLQ behavior.
+- **Arbitrary LaTeX is not zero-config.** Phase 15 accepts arbitrary
   templates only after a manifest/adapter exists and sample compile passes.
   A fully automatic import may still need user correction.
 - **Single-instance assumption today.** Phase 14 + D018/D023 plant the
@@ -844,6 +1047,6 @@ Enforced from Phase 11 onward:
 - **Auto-submit safety.** `--auto-submit` exists in `apply`, but
   still routes through the HITL gate. We have not yet seen the eval
   data that would justify removing the gate even per-vendor.
-- **No SaaS business layer.** Phase 18 is multi-tenant hosting
+- **No SaaS business layer.** Phase 19 is multi-tenant hosting
   infra, not billing / signup / marketing. That work is out of
   scope until / unless a commercial license customer signs.

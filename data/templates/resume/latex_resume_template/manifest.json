@@ -16,7 +16,7 @@
   "styles": {},
   "sections": {
     "summary": {
-      "enabled": true,
+      "enabled": false,
       "max_items": 1
     },
     "education": {

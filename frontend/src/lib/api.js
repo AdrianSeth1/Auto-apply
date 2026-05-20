@@ -101,8 +101,12 @@ export const api = {
       method: "DELETE",
     })
   },
-  linkedinSession() {
-    return request("/api/jobs/linkedin/session")
+  linkedinSession({ forceRefresh = false } = {}) {
+    // Default path is cache-served on the backend (5-min TTL) so opening the
+    // UI doesn't spin up a headless Chromium every time. Pass forceRefresh to
+    // run a real probe — e.g. from an explicit "Check status" click.
+    const suffix = forceRefresh ? "?refresh=true" : ""
+    return request(`/api/jobs/linkedin/session${suffix}`)
   },
   connectLinkedIn() {
     return request("/api/jobs/linkedin/session/connect", {
@@ -240,7 +244,20 @@ export const api = {
       method: "DELETE",
     })
   },
-  generateJobMaterial(job, materialType, templateId = "", profileId = "") {
+  generateJobMaterial(
+    job,
+    materialType,
+    templateId = "",
+    profileId = "",
+    options = {},
+  ) {
+    const {
+      strategy = null,
+      sourceDocumentId = null,
+      patchAggressiveness = null,
+      patchAllowReorderSections = null,
+      patchAllowAddRemoveBullets = null,
+    } = options
     return request("/api/jobs/generate-material", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -249,6 +266,11 @@ export const api = {
         material_type: materialType,
         template_id: templateId || null,
         profile_id: profileId || null,
+        strategy,
+        source_document_id: sourceDocumentId,
+        patch_aggressiveness: patchAggressiveness,
+        patch_allow_reorder_sections: patchAllowReorderSections,
+        patch_allow_add_remove_bullets: patchAllowAddRemoveBullets,
       }),
     })
   },
@@ -279,7 +301,18 @@ export const api = {
       body: JSON.stringify({ reason: reason || null }),
     })
   },
-  regenerateApplicationMaterial(applicationId, { materialType, strategy = null, templateId = null, sourceDocumentId = null } = {}) {
+  regenerateApplicationMaterial(
+    applicationId,
+    {
+      materialType,
+      strategy = null,
+      templateId = null,
+      sourceDocumentId = null,
+      patchAggressiveness = null,
+      patchAllowReorderSections = null,
+      patchAllowAddRemoveBullets = null,
+    } = {},
+  ) {
     return request(`/api/applications/${applicationId}/regenerate-material`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -288,6 +321,9 @@ export const api = {
         strategy,
         template_id: templateId,
         source_document_id: sourceDocumentId,
+        patch_aggressiveness: patchAggressiveness,
+        patch_allow_reorder_sections: patchAllowReorderSections,
+        patch_allow_add_remove_bullets: patchAllowAddRemoveBullets,
       }),
     })
   },
@@ -356,6 +392,21 @@ export const api = {
   },
   providers() {
     return request("/api/providers")
+  },
+  providerModels(providerId) {
+    return request(
+      `/api/providers/${encodeURIComponent(providerId)}/models`,
+    )
+  },
+  setProviderModel(providerId, model) {
+    return request(
+      `/api/providers/${encodeURIComponent(providerId)}/model`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: model || null }),
+      },
+    )
   },
   providersHealth() {
     return request("/api/providers/health")

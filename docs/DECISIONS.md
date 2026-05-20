@@ -205,11 +205,11 @@ This log captures key decisions, their rationale, and alternatives considered. E
 
 ## D020 — `tenant_id` on every new table from Phase 12 onward (2026-05-12)
 
-**Decision**: Every table created from Phase 12 forward carries a non-null `tenant_id` column (default value `"default"` until Phase 18 activates real multi-tenancy). Every new Redis key is prefixed `tenant:{id}:`. Every new background task accepts an explicit tenant context. No exceptions, including tables that "feel global" (e.g. `refresh_tasks`, `search_queries`).
+**Decision**: Every table created from Phase 12 forward carries a non-null `tenant_id` column (default value `"default"` until Phase 19 activates real multi-tenancy; this was originally Phase 18 before the 2026-05-19 roadmap reorder). Every new Redis key is prefixed `tenant:{id}:`. Every new background task accepts an explicit tenant context. No exceptions, including tables that "feel global" (e.g. `refresh_tasks`, `search_queries`).
 
-**Rationale**: Retrofitting multi-tenancy onto a populated single-tenant schema is a known nightmare: every query gets a `WHERE tenant_id = ?` audit, every Redis key gets a rename migration, every cached result gets invalidated. Doing it pre-emptively from Phase 12 -- when the new tables are still empty in production -- adds one column and ~zero developer friction. Phase 18 then becomes "fill in the middleware and RLS policies" rather than "rewrite the schema".
+**Rationale**: Retrofitting multi-tenancy onto a populated single-tenant schema is a known nightmare: every query gets a `WHERE tenant_id = ?` audit, every Redis key gets a rename migration, every cached result gets invalidated. Doing it pre-emptively from Phase 12 -- when the new tables are still empty in production -- adds one column and ~zero developer friction. Phase 19 then becomes "fill in the middleware and RLS policies" rather than "rewrite the schema".
 
-**Trade-off**: Every Phase 12-17 PR carries an extra `tenant_id` column and a `default` literal in seed data. Accepted as cheap insurance.
+**Trade-off**: Every Phase 12-18 PR carries an extra `tenant_id` column and a `default` literal in seed data. Accepted as cheap insurance.
 
 **Enforcement**: Phase 11.3 docs sync notes this rule; subsequent code review treats a missing `tenant_id` on a new table as a P1 blocker.
 

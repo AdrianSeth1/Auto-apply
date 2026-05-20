@@ -137,12 +137,32 @@ def get_llm_settings(config: dict[str, Any] | None = None) -> dict[str, Any]:
     else:
         allow_fallback = bool(allow_fallback_raw)
 
+    # Phase 17.9.5: optional small-tier routing. Both are independent
+    # of the primary chain so users can put a cheap fast model behind
+    # the same primary provider, or route to an entirely different
+    # provider (e.g. primary=anthropic, small=groq) for extraction-
+    # style work where accuracy / creativity matters less.
+    small_provider_raw = llm.get("small_provider")
+    small_provider = (
+        _normalize_provider(str(small_provider_raw), role="small")
+        if isinstance(small_provider_raw, str) and small_provider_raw.strip()
+        else None
+    )
+    small_model_raw = llm.get("small_model")
+    small_model = (
+        str(small_model_raw).strip()
+        if isinstance(small_model_raw, str) and small_model_raw.strip()
+        else None
+    )
+
     return {
         "primary_provider": primary,
         "fallback_provider": chain[0] if chain else None,
         "fallback_providers": chain,
         "allow_fallback": allow_fallback,
         "timeout": timeout,
+        "small_provider": small_provider,
+        "small_model": small_model,
     }
 
 
@@ -240,6 +260,7 @@ def generate_text(
     output_format: str = "text",
     config: dict[str, Any] | None = None,
     cache: bool = False,
+    tier: str = "primary",
 ) -> str:
     """Generate text using the configured provider chain.
 
@@ -269,25 +290,70 @@ def generate_text(
     """
     settings = get_llm_settings(config)
     timeout = timeout or settings["timeout"]
-    providers: list[str] = [settings["primary_provider"]]
-    if settings["allow_fallback"]:
-        providers.extend(settings["fallback_providers"])
+
+    # Phase 17.9.5: tier resolution. Default ("primary") preserves the
+    # existing behaviour exactly: primary provider first, then the
+    # configured fallback chain. The "small" tier swaps in the
+    # ``small_provider`` (or stays on primary if only ``small_model``
+    # is set) and threads ``small_model`` as a per-call model override.
+    # When neither knob is configured, "small" silently behaves as
+    # "primary" so call sites can opt in optimistically.
+    model_override: str | None = None
+    if tier == "small":
+        model_override = settings.get("small_model")
+        small_provider = settings.get("small_provider")
+        if small_provider:
+            providers = [small_provider]
+            # The small tier still gets the fallback chain as a safety
+            # net, but with the small_provider promoted to head and
+            # de-duplicated against the rest.
+            for entry in (
+                [settings["primary_provider"], *settings["fallback_providers"]]
+                if settings["allow_fallback"]
+                else [settings["primary_provider"]]
+            ):
+                if entry not in providers:
+                    providers.append(entry)
+        else:
+            providers = [settings["primary_provider"]]
+            if settings["allow_fallback"]:
+                providers.extend(settings["fallback_providers"])
+    elif tier == "primary":
+        providers = [settings["primary_provider"]]
+        if settings["allow_fallback"]:
+            providers.extend(settings["fallback_providers"])
+    else:
+        raise LLMError(
+            f"Unknown LLM tier {tier!r}. Expected 'primary' or 'small'."
+        )
 
     attempts: list[dict[str, Any]] = []
     last_attempt_chain.set(attempts)
     fatal_kind = None
 
+    # The provider whose answer we'd store under -- always the head of
+    # the configured chain for this tier (small_provider for "small"
+    # mode, primary_provider otherwise). The fingerprint and the
+    # "only cache when this provider answered" guard both use it.
+    primary_id = providers[0]
+
     cache_key: str | None = None
     if cache:
-        model, base_url = _resolve_provider_fingerprint_inputs(
-            settings["primary_provider"]
+        provider_model, base_url = _resolve_provider_fingerprint_inputs(
+            primary_id
         )
+        # Phase 17.9.5: the small-tier model override is part of what
+        # determines the response, so fold it into the cache key. Without
+        # this, primary and small-tier requests with otherwise identical
+        # prompt+provider would collide and serve each other's cached
+        # answers.
+        effective_model = model_override or provider_model
         cache_key = _cache_fingerprint(
-            primary_provider=settings["primary_provider"],
+            primary_provider=primary_id,
             system=system,
             prompt=prompt,
             output_format=output_format,
-            model=model,
+            model=effective_model,
             base_url=base_url,
         )
         try:
@@ -304,7 +370,7 @@ def generate_text(
             # convention shared with the upcoming Phase 12.7 dashboard.
             attempts.append(
                 {
-                    "provider": settings["primary_provider"],
+                    "provider": primary_id,
                     "ok": True,
                     "kind": "cache_hit",
                     "error": None,
@@ -314,7 +380,6 @@ def generate_text(
             )
             return cached_value
 
-    primary_id = settings["primary_provider"]
     for provider in providers:
         start = time.monotonic()
         attempt: dict[str, Any] = {
@@ -332,6 +397,7 @@ def generate_text(
                 system=system,
                 timeout=timeout,
                 output_format=output_format,
+                model=model_override,
             )
         except LLMError as exc:
             attempt["latency_ms"] = int((time.monotonic() - start) * 1000)
@@ -387,6 +453,7 @@ def generate_json(
     timeout: int | None = None,
     config: dict[str, Any] | None = None,
     cache: bool = False,
+    tier: str = "primary",
 ) -> Any:
     """Generate JSON-like output using the configured provider order.
 
@@ -395,6 +462,9 @@ def generate_json(
     the JSON parse happens on every call so a corrupted cache entry
     is still caught by the parser rather than masquerading as the
     parsed value.
+
+    Phase 17.9.5: ``tier='small'`` opts into the optional cheap-model
+    route configured under ``llm.small_provider`` / ``llm.small_model``.
     """
     raw = generate_text(
         prompt,
@@ -403,6 +473,7 @@ def generate_json(
         output_format="json",
         config=config,
         cache=cache,
+        tier=tier,
     )
     return _parse_json_response(raw)
 
@@ -421,20 +492,48 @@ def claude_generate(
             "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
         )
 
-    cmd = [executable, "-p", prompt, "--output-format", output_format]
+    # Phase 17.x: invoking ``claude`` from inside the AutoApply project
+    # tree makes the CLI auto-discover this repo (CLAUDE.md, AGENTS.md,
+    # hooks, .git, and the per-project memory under ``~/.claude/
+    # projects/<cwd-hash>/``). The CLI then slips into its default
+    # "coding agent in this repo" persona, our resume-parser system
+    # prompt gets drowned out, and the model asks "What would you like
+    # me to work on in ``C:\\Projects\\AutoApply``?" instead of
+    # returning YAML.
+    #
+    # We tried ``--bare`` (the CLI's documented minimal-inference
+    # mode) but on 2.1.133 it changes Anthropic auth to
+    # ``ANTHROPIC_API_KEY``-only -- subscription users lose auth and
+    # the CLI either errors or returns canned greetings. The mode
+    # also appears to drop the positional ``[prompt]`` argument
+    # entirely.
+    #
+    # The fix that survives all of that: keep the CLI in its normal
+    # mode (so OAuth / keychain auth still works) and just hand the
+    # subprocess an empty scratch directory as cwd. The CLI then has
+    # no project tree to discover, the per-project memory hash points
+    # at an empty dir, and user-level config under ``$HOME`` continues
+    # to load normally for auth. No env vars touched, no impact on
+    # the API-based providers (which never spawn a subprocess).
+    cmd = [executable, "--print", "--output-format", output_format]
     if system:
         cmd.extend(["--system-prompt", system])
+    cmd.append(prompt)
 
-    logger.debug("Claude CLI call: prompt=%d chars, system=%d chars", len(prompt), len(system))
+    logger.debug(
+        "Claude CLI call: prompt=%d chars, system=%d chars", len(prompt), len(system)
+    )
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            encoding="utf-8",
-        )
+        with tempfile.TemporaryDirectory(prefix="claude-cli-cwd-") as scratch_cwd:
+            result = subprocess.run(
+                cmd,
+                cwd=scratch_cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+            )
     except subprocess.TimeoutExpired:
         raise LLMError(f"Claude CLI timed out after {timeout}s")
     except FileNotFoundError as exc:
@@ -491,14 +590,22 @@ def codex_generate(
 
     logger.debug("Codex CLI call: prompt=%d chars, system=%d chars", len(prompt), len(system))
 
+    # Phase 17.x: same cwd-isolation rationale as ``claude_generate``.
+    # Codex CLI auto-discovers AGENTS.md and project state from the
+    # cwd tree -- running from the AutoApply repo lets that project
+    # context override our prompt. A fresh empty cwd keeps the CLI
+    # in pure-inference mode. User-level Codex auth under ``$HOME``
+    # is untouched.
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            encoding="utf-8",
-        )
+        with tempfile.TemporaryDirectory(prefix="codex-cli-cwd-") as scratch_cwd:
+            result = subprocess.run(
+                cmd,
+                cwd=scratch_cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+            )
     except subprocess.TimeoutExpired:
         output_path.unlink(missing_ok=True)
         raise LLMError(f"Codex CLI timed out after {timeout}s")
@@ -550,6 +657,7 @@ def _call_provider(
     system: str,
     timeout: int,
     output_format: str,
+    model: str | None = None,
 ) -> str:
     """Dispatch to the selected provider.
 
@@ -557,6 +665,10 @@ def _call_provider(
     legacy hard-wired CLI dispatch for the two original providers
     (``claude-cli`` / ``codex-cli``) so behaviour is unchanged for
     users who haven't enrolled a provider via the registry yet.
+
+    ``model`` is the Phase 17.9.5 per-call override forwarded from
+    ``generate_text`` when the small-tier knob is active. Subprocess
+    providers ignore it (their CLI pins the model via its own auth).
     """
     if _dispatch_via_registry_enabled():
         registry_result = _dispatch_via_registry(
@@ -565,6 +677,7 @@ def _call_provider(
             system=system,
             timeout=timeout,
             output_format=output_format,
+            model=model,
         )
         if registry_result is not None:
             return registry_result
@@ -588,6 +701,7 @@ def _dispatch_via_registry(
     system: str,
     timeout: int,
     output_format: str,
+    model: str | None = None,
 ) -> str | None:
     """Try to satisfy the request from the provider registry.
 
@@ -626,6 +740,7 @@ def _dispatch_via_registry(
             system=system,
             timeout=timeout,
             output_format=output_format,
+            model=model,
         )
     except ProviderError as exc:
         # Re-raise as LLMError so generate_text's fallback loop

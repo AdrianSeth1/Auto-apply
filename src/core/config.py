@@ -6,6 +6,7 @@ Loads settings from config/settings.yaml and .env, with environment variable ove
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,33 @@ from dotenv import load_dotenv
 
 # Project root is two levels up from this file (src/core/config.py -> AutoApply/)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# User-editable config files that are not tracked in git (each developer keeps
+# their own local edits). The repository ships a `<name>.example` for each;
+# bootstrap_user_configs() copies example -> live on first load so a fresh
+# clone Just Works.
+_BOOTSTRAPPED_CONFIGS = (
+    "settings.yaml",
+    "companies.yaml",
+    "filters.yaml",
+    "search_profiles.yaml",
+)
+
+
+def bootstrap_user_configs() -> None:
+    """Copy `<name>.example` -> `<name>` for any missing user-editable config.
+
+    Idempotent. Safe to call on every startup. Files that already exist are
+    left untouched so the user's local edits are never clobbered.
+    """
+    config_dir = PROJECT_ROOT / "config"
+    for live_name in _BOOTSTRAPPED_CONFIGS:
+        live = config_dir / live_name
+        example = config_dir / f"{live_name}.example"
+        if live.exists() or not example.exists():
+            continue
+        config_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(example, live)
 
 
 def load_config(config_path: Path | None = None) -> dict[str, Any]:
@@ -24,6 +52,8 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
     2. .env file
     3. config/settings.yaml defaults
     """
+    bootstrap_user_configs()
+
     # Load .env if it exists
     env_path = PROJECT_ROOT / ".env"
     if env_path.exists():
@@ -47,6 +77,8 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
 
 def load_raw_config(config_path: Path | None = None) -> dict[str, Any]:
     """Load config YAML without env overrides or path resolution."""
+    bootstrap_user_configs()
+
     if config_path is None:
         config_path = PROJECT_ROOT / "config" / "settings.yaml"
 
@@ -68,6 +100,10 @@ def update_llm_settings(
     fallback_provider: str | None,
     allow_fallback: bool,
     config_path: Path | None = None,
+    *,
+    small_provider: str | None = None,
+    small_model: str | None = None,
+    small_tier_action: str = "preserve",
 ) -> dict[str, Any]:
     """Update the persisted LLM provider settings in config/settings.yaml.
 
@@ -76,6 +112,14 @@ def update_llm_settings(
     already migrated to the list form will not see fallback changes
     take effect (``get_llm_settings`` prefers the list when both
     exist).
+
+    Phase 17.9.9 added ``small_provider`` / ``small_model`` for the
+    cheap-model tier. Because legacy callers (cmd_init, the original
+    web settings PUT path) only know about the primary chain, the
+    small-tier knobs default to "preserve whatever is already in the
+    file". To actually write them, pass ``small_tier_action='set'``
+    (with the desired provider/model values) or ``'clear'`` (which
+    deletes both keys from disk).
     """
     config = load_raw_config(config_path)
     llm = config.setdefault("llm", {})
@@ -84,6 +128,21 @@ def update_llm_settings(
     llm["fallback_provider"] = fallback_provider
     llm["fallback_providers"] = [fallback_provider] if fallback_provider else []
     llm["allow_fallback"] = allow_fallback
+
+    if small_tier_action == "set":
+        # Empty / falsy values become explicit nulls so the YAML reflects
+        # the writer's intent (rather than silently leaving stale data).
+        llm["small_provider"] = small_provider or None
+        llm["small_model"] = small_model or None
+    elif small_tier_action == "clear":
+        llm.pop("small_provider", None)
+        llm.pop("small_model", None)
+    elif small_tier_action != "preserve":
+        raise ValueError(
+            f"Unknown small_tier_action {small_tier_action!r}. "
+            "Expected 'preserve', 'set', or 'clear'."
+        )
+
     save_config(config, config_path)
     return config
 

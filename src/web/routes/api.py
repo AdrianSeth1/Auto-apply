@@ -79,8 +79,10 @@ from src.application.profile import (
 from src.application.providers import (
     connect_api_key_provider,
     disconnect_provider,
+    list_provider_models,
     list_providers,
     test_provider_connection,
+    update_provider_model,
     use_provider_as_primary,
 )
 from src.application.regenerate_materials import regenerate_application_material
@@ -140,8 +142,13 @@ class JobMaterialPayload(BaseModel):
     template_id: str | None = None
     profile_id: str | None = None
     # Phase 17.8: caller may override the user's saved defaults.
-    strategy: str | None = None  # "regenerate" | "patch_existing"
+    strategy: str | None = None  # "regenerate" | "patch_existing" | "use_library"
     source_document_id: str | None = None  # UserDocument id
+    # Phase 18.x: per-call overrides for the three patch knobs (only
+    # consulted when strategy is ``patch_existing``).
+    patch_aggressiveness: str | None = None
+    patch_allow_reorder_sections: bool | None = None
+    patch_allow_add_remove_bullets: bool | None = None
 
 
 class TemplateCreatePayload(BaseModel):
@@ -219,6 +226,11 @@ class RegenerateMaterialPayload(BaseModel):
     strategy: str | None = None
     template_id: str | None = None
     source_document_id: str | None = None
+    # Phase 18.x: per-call overrides for the three patch knobs. When
+    # ``None`` the saved material default for this document_type wins.
+    patch_aggressiveness: str | None = None
+    patch_allow_reorder_sections: bool | None = None
+    patch_allow_add_remove_bullets: bool | None = None
 
 
 class LLMSettingsPayload(BaseModel):
@@ -227,6 +239,13 @@ class LLMSettingsPayload(BaseModel):
     allow_fallback: bool = False
     cache_enabled: bool = True
     cache_ttl_hours: int = 24
+    # Phase 17.9.9: optional small-tier knobs. Both are nullable to
+    # represent "disabled". small_tier_action distinguishes "the client
+    # is not touching these" (preserve, default) from "set" and "clear",
+    # mirroring the same three-state contract on the writer below.
+    small_provider: str | None = None
+    small_model: str | None = None
+    small_tier_action: str = "preserve"
 
 
 class ProviderSetKeyPayload(BaseModel):
@@ -237,6 +256,13 @@ class ProviderSetKeyPayload(BaseModel):
 
 class ProviderUsePayload(BaseModel):
     fallback_provider: str | None = None
+
+
+class ProviderSetModelPayload(BaseModel):
+    """Phase 17.9.11: swap the model on an already-connected provider
+    without re-entering the API key."""
+
+    model: str | None = None
 
 
 class ProfileSavePayload(BaseModel):
@@ -342,8 +368,15 @@ async def search_jobs(payload: JobSearchPayload) -> dict:
 
 
 @router.get("/jobs/linkedin/session")
-async def linkedin_session_status() -> dict:
-    return await get_linkedin_session_status_usecase()
+async def linkedin_session_status(refresh: bool = False) -> dict:
+    """Return the LinkedIn session status.
+
+    By default served from a short-lived cache so opening the web UI doesn't
+    spin up a headless Chromium every time. Pass ``?refresh=true`` to force a
+    real probe (e.g. when the user explicitly clicks "Check status" or right
+    before an authenticated search kicks off).
+    """
+    return await get_linkedin_session_status_usecase(force_refresh=refresh)
 
 
 @router.post("/jobs/linkedin/session/connect")
@@ -374,6 +407,9 @@ async def generate_job_material(payload: JobMaterialPayload) -> dict:
         profile_id=payload.profile_id,
         strategy=payload.strategy,
         source_document_id=payload.source_document_id,
+        patch_aggressiveness=payload.patch_aggressiveness,
+        patch_allow_reorder_sections=payload.patch_allow_reorder_sections,
+        patch_allow_add_remove_bullets=payload.patch_allow_add_remove_bullets,
     )
     if result["ok"]:
         return result
@@ -755,13 +791,36 @@ async def regenerate_application_material_route(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid application ID") from exc
 
-    result = await regenerate_application_material(
-        application_id=application_uuid,
-        material_type=payload.material_type,
-        strategy=payload.strategy,
-        template_id=payload.template_id,
-        source_document_id=payload.source_document_id,
-    )
+    try:
+        result = await regenerate_application_material(
+            application_id=application_uuid,
+            material_type=payload.material_type,
+            strategy=payload.strategy,
+            template_id=payload.template_id,
+            source_document_id=payload.source_document_id,
+            patch_aggressiveness=payload.patch_aggressiveness,
+            patch_allow_reorder_sections=payload.patch_allow_reorder_sections,
+            patch_allow_add_remove_bullets=payload.patch_allow_add_remove_bullets,
+        )
+    except Exception as exc:
+        # The inner functions are supposed to catch their own failures
+        # and return a structured error dict, but a few code paths
+        # (model serialization, downstream DB writes) can still raise
+        # bare exceptions. Without this catch FastAPI just renders
+        # ``Internal Server Error`` with no traceback in our log,
+        # leaving the operator with nothing to debug.
+        import logging
+        logging.getLogger("autoapply.web.routes.api").exception(
+            "regenerate-material crashed: material_type=%s strategy=%s "
+            "source_document_id=%s",
+            payload.material_type,
+            payload.strategy,
+            payload.source_document_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Regeneration crashed: {type(exc).__name__}: {exc}",
+        ) from exc
     if result["ok"]:
         return result
     status_code_map = {
@@ -771,12 +830,23 @@ async def regenerate_application_material_route(
         "database_unavailable": 503,
         "missing_artifact": 500,
         "generation_failed": 500,
+        "material_generation_failed": 500,
+        "serialization_failed": 500,
         "load_failed": 500,
         "application_update_failed": 500,
     }
+    # Surface ``strategy_notes`` (e.g. "Library document is a PDF
+    # file -- generated fresh instead") to the user. Without this
+    # the front-end only sees the generic ``error`` field and the
+    # operator can't tell whether the patch fell back, why the
+    # artifact is missing, or which step actually failed.
+    notes = result.get("strategy_notes") or []
+    detail = result["error"]
+    if notes:
+        detail = f"{detail} Notes: {'; '.join(notes)}"
     raise HTTPException(
         status_code=status_code_map.get(result["error_code"], 400),
-        detail=result["error"],
+        detail=detail,
     )
 
 
@@ -942,12 +1012,23 @@ async def update_material_defaults(payload: MaterialDefaultsPayload) -> dict:
 
 @router.put("/settings/llm")
 async def update_settings(payload: LLMSettingsPayload) -> dict:
+    if payload.small_tier_action not in {"preserve", "set", "clear"}:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid small_tier_action {payload.small_tier_action!r}; "
+                "expected 'preserve', 'set', or 'clear'."
+            ),
+        )
     result = update_llm_settings_data(
         primary_provider=payload.primary_provider,
         fallback_provider=payload.fallback_provider,
         allow_fallback=payload.allow_fallback,
         cache_enabled=payload.cache_enabled,
         cache_ttl_hours=payload.cache_ttl_hours,
+        small_provider=payload.small_provider,
+        small_model=payload.small_model,
+        small_tier_action=payload.small_tier_action,
     )
     if not result["ok"]:
         raise HTTPException(status_code=500, detail=result["error"])
@@ -973,6 +1054,20 @@ async def providers_list() -> dict:
     return list_providers()
 
 
+@router.get("/providers/{provider_id}/models")
+async def providers_models(provider_id: str) -> dict:
+    """Phase 17.9.4 model catalog for the Connect dialog picker.
+
+    Returns the curated KNOWN_MODELS for ``provider_id``, plus the
+    live runtime catalog for providers that have one (Ollama today).
+    Unknown ids 404.
+    """
+    result = list_provider_models(provider_id)
+    if not result["ok"] and result.get("error_code") == "unknown_provider":
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
 @router.post("/providers/{provider_id}/test")
 async def providers_test(provider_id: str) -> dict:
     result = test_provider_connection(provider_id)
@@ -996,6 +1091,21 @@ async def providers_set_key(
         raise HTTPException(status_code=404, detail=result["error"])
     if code in {"wrong_auth_type", "empty_api_key"}:
         raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@router.put("/providers/{provider_id}/model")
+async def providers_set_model(
+    provider_id: str, payload: ProviderSetModelPayload
+) -> dict:
+    """Phase 17.9.11: change a provider's model without re-entering its key."""
+    result = update_provider_model(provider_id, model=payload.model)
+    if not result["ok"]:
+        code = result.get("error_code")
+        if code == "unknown_provider":
+            raise HTTPException(status_code=404, detail=result["error"])
+        if code == "not_connected":
+            raise HTTPException(status_code=409, detail=result["error"])
     return result
 
 

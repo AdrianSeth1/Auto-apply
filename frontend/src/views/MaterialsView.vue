@@ -9,6 +9,7 @@ import {
   ChevronRight,
   FileText,
   Info,
+  Loader2,
   Sparkles,
   UserCircle,
   Wand2,
@@ -22,6 +23,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { EmptyState } from "@/components/ui/empty-state"
 import { Input } from "@/components/ui/input"
+import { ProgressBanner } from "@/components/ui/progress-banner"
 import { api } from "@/lib/api"
 import { jobsState } from "@/lib/jobs-state"
 import {
@@ -74,6 +76,19 @@ const state = reactive({
     cover_letter_tex: false,
   },
   templateIds: { resume: "", cover_letter: "" },
+  // Phase 18.x: per-call strategy + patch knob overrides. Empty
+  // strings / nulls mean "inherit from Settings → Default material
+  // strategy" — the backend treats them the same way regenerate-material
+  // does.
+  strategies: { resume: "", cover_letter: "" },
+  sourceDocuments: { resume: "", cover_letter: "" },
+  patchAggressiveness: { resume: null, cover_letter: null },
+  patchAllowReorderSections: { resume: null, cover_letter: null },
+  patchAllowAddRemoveBullets: { resume: null, cover_letter: null },
+  // Library document catalogue, lazy-loaded once we open the
+  // Materials page (cheap call, used for both source_document_id
+  // pickers).
+  libraryDocuments: { resume: [], cover_letter: [] },
   expandedMaterial: { resume: false, cover_letter: false },
   customJob: {
     company: "",
@@ -139,8 +154,39 @@ const canGenerate = computed(
   () =>
     Boolean(state.profileId) &&
     Boolean(currentJobPayload.value) &&
-    selectedTargets.value.length > 0,
+    selectedTargets.value.length > 0 &&
+    // Every selected target whose strategy is patch_existing or
+    // use_library must have a source document picked. Otherwise the
+    // backend will downgrade to regenerate silently.
+    selectedTargets.value.every((target) => {
+      const docType = target.templateType
+      const strategy = state.strategies[docType] || ""
+      if (strategy === "patch_existing" || strategy === "use_library") {
+        return Boolean(state.sourceDocuments[docType])
+      }
+      return true
+    }),
 )
+
+const MATERIALS_STRATEGY_OPTIONS = [
+  { value: "", label: "Use my Settings default" },
+  { value: "regenerate", label: "Regenerate from a template" },
+  { value: "patch_existing", label: "Patch a document from my library" },
+  { value: "use_library", label: "Use library document as-is" },
+]
+
+const MATERIALS_PATCH_AGGRESSIVENESS_OPTIONS = [
+  { value: null, label: "Inherit from Settings" },
+  { value: "conservative", label: "Conservative · barely touch the wording" },
+  { value: "balanced", label: "Balanced · sensible rewriting" },
+  { value: "aggressive", label: "Aggressive · rewrite freely" },
+]
+
+const MATERIALS_TRISTATE_OPTIONS = [
+  { value: null, label: "Inherit from Settings" },
+  { value: true, label: "Yes" },
+  { value: false, label: "No" },
+]
 
 const currentJobPayload = computed(() => {
   if (state.sourceMode === "job") {
@@ -193,7 +239,7 @@ const showJobBody = computed(() => !state.jobLocked || !jobReady.value)
 
 onMounted(async () => {
   try {
-    await Promise.all([loadProfiles(), loadTemplates()])
+    await Promise.all([loadProfiles(), loadTemplates(), loadLibraryDocuments()])
     syncTemplateDefaults()
     applyRouteJob()
   } catch (error) {
@@ -202,6 +248,34 @@ onMounted(async () => {
     state.loading = false
   }
 })
+
+async function loadLibraryDocuments() {
+  // Best-effort: the page still works without library docs, those
+  // just disable the patch/use-library strategies. Failure stays
+  // out of state.error so a missing DB doesn't block regenerate.
+  try {
+    const resp = await api.documents()
+    const docs = resp?.documents || []
+    state.libraryDocuments = {
+      resume: docs.filter((d) => d.document_type === "resume"),
+      cover_letter: docs.filter((d) => d.document_type === "cover_letter"),
+    }
+  } catch (err) {
+    // Soft-fail: log to console for debugging but don't surface to
+    // the user; per-call strategy controls just won't have options.
+    console.warn("MaterialsView: library document load failed", err)
+  }
+}
+
+function libraryDocumentOptions(documentType) {
+  return [
+    { value: "", label: "Pick a document…" },
+    ...(state.libraryDocuments[documentType] || []).map((doc) => ({
+      value: doc.id,
+      label: `${doc.display_name} · ${doc.source_type.toUpperCase()}`,
+    })),
+  ]
+}
 
 watch(
   () => route.query.jobId,
@@ -284,16 +358,39 @@ async function generateMaterials() {
 
   state.generating = true
   const settled = await Promise.allSettled(
-    selectedTargets.value.map((target) =>
-      api
+    selectedTargets.value.map((target) => {
+      const docType = target.templateType
+      const strategy = state.strategies[docType] || null
+      const sourceDocumentId =
+        strategy === "patch_existing" || strategy === "use_library"
+          ? state.sourceDocuments[docType] || null
+          : null
+      const overrides = {
+        strategy,
+        sourceDocumentId,
+        patchAggressiveness:
+          strategy === "patch_existing"
+            ? state.patchAggressiveness[docType]
+            : null,
+        patchAllowReorderSections:
+          strategy === "patch_existing"
+            ? state.patchAllowReorderSections[docType]
+            : null,
+        patchAllowAddRemoveBullets:
+          strategy === "patch_existing"
+            ? state.patchAllowAddRemoveBullets[docType]
+            : null,
+      }
+      return api
         .generateJobMaterial(
           job,
           primaryMaterialType(target),
           state.templateIds[target.templateType],
           state.profileId,
+          overrides,
         )
-        .then((response) => ({ target, response })),
-    ),
+        .then((response) => ({ target, response }))
+    }),
   )
   const successes = []
   const failures = []
@@ -694,7 +791,24 @@ function jobSummaryParts(job) {
                 v-if="state.expandedMaterial[target.id]"
                 class="space-y-3 border-t border-border px-4 py-3"
               >
+                <!-- Strategy: regenerate / patch_existing / use_library -->
                 <label class="grid gap-1.5">
+                  <span class="text-xs font-medium text-muted-foreground">Strategy</span>
+                  <AppSelect
+                    v-model="state.strategies[target.templateType]"
+                    :options="MATERIALS_STRATEGY_OPTIONS"
+                    :aria-label="`${target.label} strategy`"
+                    :disabled="!state.selectedMaterials[target.id]"
+                  />
+                </label>
+
+                <!-- Template: shown only when regenerating (or
+                     inheriting, since the user's Settings default
+                     might be regenerate too) -->
+                <label
+                  v-if="state.strategies[target.templateType] !== 'patch_existing' && state.strategies[target.templateType] !== 'use_library'"
+                  class="grid gap-1.5"
+                >
                   <span class="text-xs font-medium text-muted-foreground">Template</span>
                   <AppSelect
                     v-model="state.templateIds[target.templateType]"
@@ -705,6 +819,80 @@ function jobSummaryParts(job) {
                     :disabled="!state.selectedMaterials[target.id]"
                   />
                 </label>
+
+                <!-- Library document picker for patch_existing /
+                     use_library strategies -->
+                <label
+                  v-else
+                  class="grid gap-1.5"
+                >
+                  <span class="text-xs font-medium text-muted-foreground">
+                    {{
+                      state.strategies[target.templateType] === 'use_library'
+                        ? 'Document to use as-is'
+                        : 'Library document to patch'
+                    }}
+                  </span>
+                  <AppSelect
+                    v-model="state.sourceDocuments[target.templateType]"
+                    :options="libraryDocumentOptions(target.templateType)"
+                    :aria-label="`${target.label} library document`"
+                    :disabled="!state.selectedMaterials[target.id]"
+                  />
+                  <span
+                    v-if="state.strategies[target.templateType] === 'use_library'"
+                    class="text-xs text-muted-foreground"
+                  >
+                    The chosen document is attached to the application as-is — no LLM, no edits.
+                  </span>
+                  <span
+                    v-else
+                    class="text-xs text-muted-foreground"
+                  >
+                    DOCX-only today. PDF / LaTeX sources fall back to regenerate with a warning.
+                  </span>
+                </label>
+
+                <!-- Per-call patch knob overrides, shown only when
+                     strategy is patch_existing. Each defaults to
+                     'Inherit from Settings' so a user who's happy
+                     with their defaults sees a single readable
+                     "patch behaviour" line rather than three nags. -->
+                <div
+                  v-if="state.strategies[target.templateType] === 'patch_existing'"
+                  class="space-y-2 rounded-md border border-dashed bg-muted/30 p-3"
+                >
+                  <div class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Patch behaviour (override Settings defaults)
+                  </div>
+                  <label class="grid gap-1.5">
+                    <span class="text-xs font-medium text-muted-foreground">Rewrite intensity</span>
+                    <AppSelect
+                      v-model="state.patchAggressiveness[target.templateType]"
+                      :options="MATERIALS_PATCH_AGGRESSIVENESS_OPTIONS"
+                      :aria-label="`${target.label} rewrite intensity`"
+                      :disabled="!state.selectedMaterials[target.id]"
+                    />
+                  </label>
+                  <label class="grid gap-1.5">
+                    <span class="text-xs font-medium text-muted-foreground">Allow re-ordering sections</span>
+                    <AppSelect
+                      v-model="state.patchAllowReorderSections[target.templateType]"
+                      :options="MATERIALS_TRISTATE_OPTIONS"
+                      :aria-label="`${target.label} allow section reorder`"
+                      :disabled="!state.selectedMaterials[target.id]"
+                    />
+                  </label>
+                  <label class="grid gap-1.5">
+                    <span class="text-xs font-medium text-muted-foreground">Allow adding/removing bullets</span>
+                    <AppSelect
+                      v-model="state.patchAllowAddRemoveBullets[target.templateType]"
+                      :options="MATERIALS_TRISTATE_OPTIONS"
+                      :aria-label="`${target.label} allow bullet add/remove`"
+                      :disabled="!state.selectedMaterials[target.id]"
+                    />
+                  </label>
+                </div>
 
                 <fieldset class="grid gap-1.5">
                   <legend class="text-xs font-medium text-muted-foreground">Output formats</legend>
@@ -732,14 +920,24 @@ function jobSummaryParts(job) {
         <!-- Generate button -->
         <div class="flex flex-wrap items-center gap-3 pt-2">
           <Button type="button" :disabled="state.generating || !canGenerate" @click="generateMaterials">
-            <Sparkles class="h-4 w-4" />
-            {{ state.generating ? "Generating..." : "Generate materials" }}
+            <Loader2 v-if="state.generating" class="h-4 w-4 animate-spin" />
+            <Sparkles v-else class="h-4 w-4" />
+            {{ state.generating ? "Generating…" : "Generate materials" }}
           </Button>
-          <p v-if="!canGenerate" class="flex items-center gap-1 text-xs text-muted-foreground">
+          <p v-if="!canGenerate && !state.generating" class="flex items-center gap-1 text-xs text-muted-foreground">
             <Info class="h-3.5 w-3.5" />
             Select a job, applicant, and at least one material with a format.
           </p>
         </div>
+
+        <ProgressBanner
+          v-if="state.generating"
+          title="Generating your materials…"
+          detail="Asking the language model to tailor each selected document to the job description."
+          class="mt-3"
+        >
+          Resume + cover letter generation typically takes 30–90 seconds. You can leave this tab open in the background.
+        </ProgressBanner>
       </CardContent>
     </Card>
 
@@ -792,8 +990,9 @@ function jobSummaryParts(job) {
               :disabled="state.generating || !canGenerate"
               @click="generateMaterials"
             >
-              <Sparkles class="h-4 w-4" />
-              Generate materials
+              <Loader2 v-if="state.generating" class="h-4 w-4 animate-spin" />
+              <Sparkles v-else class="h-4 w-4" />
+              {{ state.generating ? "Generating…" : "Generate materials" }}
             </Button>
           </template>
         </EmptyState>

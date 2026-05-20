@@ -1,22 +1,71 @@
-# Phase 12 introduces Redis as the L2 cache / lock / queue substrate
-# (Phases 13, 14, 17, 18 all build on it). This compose file is the
-# operator-facing way to run AutoApply's runtime dependencies
-# locally; nothing in the Python codebase requires Docker to be
-# present -- the cache layer degrades to L1-only if `REDIS_URL` is
-# unreachable.
+# This compose file is the operator-facing way to run AutoApply's
+# runtime data dependencies (Postgres + Redis) locally. The Python
+# codebase itself is NOT containerized here -- Playwright + docx2pdf
+# pull in a heavy native toolchain that runs better on the host, and
+# AutoApply is a local-first, single-tenant tool. The app is launched
+# via `uv run autoapply ...` (or supervised by `supervisord.conf` in
+# a single-server production install).
+#
+# Postgres (Phase 1+) is the durable source of truth for jobs,
+# applications, tasks, gate state, etc. The `pgvector/pgvector:pg16`
+# image bundles the `vector` extension so the initial migration's
+# `CREATE EXTENSION IF NOT EXISTS vector` succeeds without extra
+# steps.
+#
+# Redis (Phase 12+) is the L2 cache / distributed lock / Celery
+# broker + result backend / redbeat schedule store. The cache layer
+# degrades to L1-only if `REDIS_URL` is unreachable, but Celery
+# (Phase 14) hard-requires it.
 #
 # Usage:
-#   docker compose up -d redis       # bring just Redis up
+#   docker compose up -d             # bring up postgres + redis
+#   docker compose up -d redis       # bring up just one service
 #   docker compose ps                # confirm health
-#   docker compose down              # stop, preserve `redis-data` volume
-#   docker compose down -v           # stop and delete the volume (loses cache)
+#   docker compose down              # stop, preserve named volumes
+#   docker compose down -v           # stop and DELETE volumes (data loss)
 #
-# AOF (append-only file) is enabled with `everysec` fsync so cache
-# state survives a restart with at most ~1s of write loss. That is
-# the correct trade-off for a cache (vs. RDB-only) -- a stale entry
-# costs one re-fetch, not a correctness failure.
+# Both services bind to 127.0.0.1 only so the host's firewall posture
+# does not accidentally expose them; put them behind a private network
+# or SSH tunnel for any multi-host setup.
 
 services:
+  postgres:
+    # `pgvector/pgvector:pg16` = official Postgres 16 + pgvector
+    # preinstalled. Matches the project's "PostgreSQL 16+ with
+    # pgvector" requirement so a fresh `alembic upgrade head`
+    # succeeds without an operator running `CREATE EXTENSION`
+    # manually -- the initial migration does it.
+    image: pgvector/pgvector:pg16
+    container_name: autoapply-postgres
+    restart: unless-stopped
+    environment:
+      # User / db default to `autoapply` to match
+      # `config/settings.yaml`. Password is required: compose will
+      # refuse to start if `AUTOAPPLY_DB_PASSWORD` is unset, which
+      # forces operators to put a real value in `.env` instead of
+      # shipping a default credential.
+      POSTGRES_USER: ${AUTOAPPLY_DB_USER:-autoapply}
+      POSTGRES_DB: ${AUTOAPPLY_DB_NAME:-autoapply}
+      POSTGRES_PASSWORD: ${AUTOAPPLY_DB_PASSWORD:?AUTOAPPLY_DB_PASSWORD must be set in .env}
+      # Speeds up local restores; harmless on a single-tenant box.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      # Host 5432 -> container 5432. Matches the default
+      # `localhost:5432` in `config/settings.yaml` so the app
+      # connects without extra wiring.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` is the cheap liveness probe Postgres ships with.
+      # 5s interval is fine -- Celery / FastAPI tolerate a brief
+      # connection retry on first boot.
+      test: ["CMD-SHELL", "pg_isready -U ${AUTOAPPLY_DB_USER:-autoapply} -d ${AUTOAPPLY_DB_NAME:-autoapply}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
   redis:
     # 7.2 is the current stable line as of Phase 12; bumping the
     # major version invalidates no client API we depend on. Pin a
@@ -53,6 +102,11 @@ services:
       start_period: 5s
 
 volumes:
+  postgres-data:
+    # Postgres data dir. Named volume so the container owns
+    # permissions; back this up with `pg_dump` (not by copying the
+    # raw files) for restores across major Postgres versions.
+    driver: local
   redis-data:
     # AOF lives here. Named volume (not bind mount) so the container
     # owns the file permissions; operators who want a host-readable

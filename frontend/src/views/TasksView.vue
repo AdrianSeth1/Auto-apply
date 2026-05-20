@@ -7,6 +7,7 @@ import {
   ChevronDown,
   Clock3,
   ListChecks,
+  Loader2,
   Play,
   Plus,
   RefreshCw,
@@ -98,6 +99,20 @@ const PLAN_STRATEGY_OPTIONS = [
   { value: "", label: "Use my default" },
   { value: "regenerate", label: "Regenerate from a template" },
   { value: "patch_existing", label: "Patch a library document" },
+  { value: "use_library", label: "Use library document as-is" },
+]
+
+const PLAN_PATCH_AGGRESSIVENESS_OPTIONS = [
+  { value: "", label: "Use my default" },
+  { value: "conservative", label: "Conservative · barely touch the wording" },
+  { value: "balanced", label: "Balanced · sensible rewriting" },
+  { value: "aggressive", label: "Aggressive · rewrite freely" },
+]
+
+const PLAN_TRISTATE_OPTIONS = [
+  { value: null, label: "Use my default" },
+  { value: true, label: "Yes" },
+  { value: false, label: "No" },
 ]
 
 function planTemplateOptions(docType) {
@@ -154,14 +169,20 @@ function defaultPlanForm() {
     skip_previously_applied: true,
     top_n: 10,
     dry_run: false,
-    // Phase 17.8: per-plan material overrides. Empty strings mean
-    // "inherit Settings → Default material strategy".
+    // Phase 17.8 / 18.x: per-plan material overrides. Empty strings
+    // mean "inherit Settings → Default material strategy".
     resume_strategy: "",
     resume_template_id: "",
     resume_source_document_id: "",
+    resume_patch_aggressiveness: "",
+    resume_patch_allow_reorder_sections: null,
+    resume_patch_allow_add_remove_bullets: null,
     cover_letter_strategy: "",
     cover_letter_template_id: "",
     cover_letter_source_document_id: "",
+    cover_letter_patch_aggressiveness: "",
+    cover_letter_patch_allow_reorder_sections: null,
+    cover_letter_patch_allow_add_remove_bullets: null,
   }
 }
 
@@ -346,9 +367,20 @@ function openEditPlan(entry) {
     resume_strategy: entry.resume_strategy || "",
     resume_template_id: entry.resume_template_id || "",
     resume_source_document_id: entry.resume_source_document_id || "",
+    resume_patch_aggressiveness: entry.resume_patch_aggressiveness || "",
+    resume_patch_allow_reorder_sections:
+      entry.resume_patch_allow_reorder_sections ?? null,
+    resume_patch_allow_add_remove_bullets:
+      entry.resume_patch_allow_add_remove_bullets ?? null,
     cover_letter_strategy: entry.cover_letter_strategy || "",
     cover_letter_template_id: entry.cover_letter_template_id || "",
     cover_letter_source_document_id: entry.cover_letter_source_document_id || "",
+    cover_letter_patch_aggressiveness:
+      entry.cover_letter_patch_aggressiveness || "",
+    cover_letter_patch_allow_reorder_sections:
+      entry.cover_letter_patch_allow_reorder_sections ?? null,
+    cover_letter_patch_allow_add_remove_bullets:
+      entry.cover_letter_patch_allow_add_remove_bullets ?? null,
   }
   state.advancedOpen = Boolean(
     entry.dry_run || entry.scrape_enabled === false,
@@ -357,9 +389,11 @@ function openEditPlan(entry) {
     entry.resume_strategy ||
       entry.resume_template_id ||
       entry.resume_source_document_id ||
+      entry.resume_patch_aggressiveness ||
       entry.cover_letter_strategy ||
       entry.cover_letter_template_id ||
-      entry.cover_letter_source_document_id,
+      entry.cover_letter_source_document_id ||
+      entry.cover_letter_patch_aggressiveness,
   )
   state.planFormOpen = true
   state.message = ""
@@ -679,7 +713,10 @@ onMounted(refreshAll)
                     />
                   </label>
                   <label
-                    v-if="state.planForm[`${docType}_strategy`] !== 'patch_existing'"
+                    v-if="
+                      state.planForm[`${docType}_strategy`] !== 'patch_existing' &&
+                      state.planForm[`${docType}_strategy`] !== 'use_library'
+                    "
                     class="space-y-1.5"
                   >
                     <span class="text-xs font-medium text-muted-foreground">Template (optional)</span>
@@ -693,11 +730,46 @@ onMounted(refreshAll)
                     v-else
                     class="space-y-1.5"
                   >
-                    <span class="text-xs font-medium text-muted-foreground">Library document</span>
+                    <span class="text-xs font-medium text-muted-foreground">
+                      {{
+                        state.planForm[`${docType}_strategy`] === 'use_library'
+                          ? 'Document to attach'
+                          : 'Library document to patch'
+                      }}
+                    </span>
                     <AppSelect
                       v-model="state.planForm[`${docType}_source_document_id`]"
                       :options="planDocumentOptions(docType)"
                       :aria-label="`${planDocTypeLabel(docType)} library document`"
+                    />
+                  </label>
+                </div>
+                <div
+                  v-if="state.planForm[`${docType}_strategy`] === 'patch_existing'"
+                  class="grid gap-2 md:grid-cols-3 rounded border border-dashed bg-background/60 p-2"
+                >
+                  <label class="space-y-1.5">
+                    <span class="text-xs font-medium text-muted-foreground">Rewrite intensity</span>
+                    <AppSelect
+                      v-model="state.planForm[`${docType}_patch_aggressiveness`]"
+                      :options="PLAN_PATCH_AGGRESSIVENESS_OPTIONS"
+                      :aria-label="`${planDocTypeLabel(docType)} rewrite intensity`"
+                    />
+                  </label>
+                  <label class="space-y-1.5">
+                    <span class="text-xs font-medium text-muted-foreground">Re-order sections</span>
+                    <AppSelect
+                      v-model="state.planForm[`${docType}_patch_allow_reorder_sections`]"
+                      :options="PLAN_TRISTATE_OPTIONS"
+                      :aria-label="`${planDocTypeLabel(docType)} allow section re-order`"
+                    />
+                  </label>
+                  <label class="space-y-1.5">
+                    <span class="text-xs font-medium text-muted-foreground">Add/remove bullets</span>
+                    <AppSelect
+                      v-model="state.planForm[`${docType}_patch_allow_add_remove_bullets`]"
+                      :options="PLAN_TRISTATE_OPTIONS"
+                      :aria-label="`${planDocTypeLabel(docType)} allow bullet add/remove`"
                     />
                   </label>
                 </div>
@@ -731,8 +803,9 @@ onMounted(refreshAll)
 
           <div class="flex items-center justify-end">
             <Button size="sm" :disabled="!!state.busy.planForm" @click="savePlan">
-              <Save class="size-4" />
-              Save plan
+              <Loader2 v-if="state.busy.planForm" class="size-4 animate-spin" />
+              <Save v-else class="size-4" />
+              {{ state.busy.planForm ? 'Saving…' : 'Save plan' }}
             </Button>
           </div>
         </div>
@@ -773,8 +846,9 @@ onMounted(refreshAll)
                 :disabled="!!state.busy[entry.name]"
                 @click="runScheduleNow(entry.name)"
               >
-                <Play class="size-4" />
-                Run now
+                <Loader2 v-if="state.busy[entry.name] === 'run-now'" class="size-4 animate-spin" />
+                <Play v-else class="size-4" />
+                {{ state.busy[entry.name] === 'run-now' ? 'Starting…' : 'Run now' }}
               </Button>
               <Button
                 v-if="!entry.read_only"
@@ -865,8 +939,9 @@ onMounted(refreshAll)
                     :disabled="!!state.busy[task.id]"
                     @click="retryTask(task.id)"
                   >
-                    <RotateCcw class="size-4" />
-                    Retry
+                    <Loader2 v-if="state.busy[task.id] === 'retry'" class="size-4 animate-spin" />
+                    <RotateCcw v-else class="size-4" />
+                    {{ state.busy[task.id] === 'retry' ? 'Retrying…' : 'Retry' }}
                   </Button>
                   <Button
                     v-else-if="task.status === 'queued'"
@@ -875,7 +950,8 @@ onMounted(refreshAll)
                     :disabled="!!state.busy[task.id]"
                     @click="cancelTask(task.id)"
                   >
-                    Cancel
+                    <Loader2 v-if="state.busy[task.id] === 'cancel'" class="size-4 animate-spin" />
+                    {{ state.busy[task.id] === 'cancel' ? 'Cancelling…' : 'Cancel' }}
                   </Button>
                   <CheckCircle2
                     v-else-if="task.status === 'succeeded'"

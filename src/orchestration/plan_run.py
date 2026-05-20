@@ -168,15 +168,21 @@ async def run_plan(
     auto_submit: bool = False,
     skip_previously_applied: bool = True,
     scrape_enabled: bool = True,
-    # Phase 17.8: optional per-plan material strategy overrides. ``None``
-    # for any of these means "let the materials.generate task fall back
-    # to the user's Settings → Default material strategy".
+    # Phase 17.8 / 18.x: optional per-plan material strategy overrides.
+    # ``None`` for any of these means "let the materials.generate task
+    # fall back to the user's Settings → Default material strategy".
     resume_strategy: str | None = None,
     resume_template_id: str | None = None,
     resume_source_document_id: str | None = None,
+    resume_patch_aggressiveness: str | None = None,
+    resume_patch_allow_reorder_sections: bool | None = None,
+    resume_patch_allow_add_remove_bullets: bool | None = None,
     cover_letter_strategy: str | None = None,
     cover_letter_template_id: str | None = None,
     cover_letter_source_document_id: str | None = None,
+    cover_letter_patch_aggressiveness: str | None = None,
+    cover_letter_patch_allow_reorder_sections: bool | None = None,
+    cover_letter_patch_allow_add_remove_bullets: bool | None = None,
     search_fn: SearchFn | None = None,
     score_fn: ScoreFn | None = None,
     enqueue_fn: EnqueueFn | None = None,
@@ -383,6 +389,18 @@ async def run_plan(
                     materials_payload["resume_template_id"] = resume_template_id
                 if resume_source_document_id:
                     materials_payload["resume_source_document_id"] = resume_source_document_id
+                if resume_patch_aggressiveness:
+                    materials_payload["resume_patch_aggressiveness"] = (
+                        resume_patch_aggressiveness
+                    )
+                if resume_patch_allow_reorder_sections is not None:
+                    materials_payload["resume_patch_allow_reorder_sections"] = (
+                        resume_patch_allow_reorder_sections
+                    )
+                if resume_patch_allow_add_remove_bullets is not None:
+                    materials_payload["resume_patch_allow_add_remove_bullets"] = (
+                        resume_patch_allow_add_remove_bullets
+                    )
                 if cover_letter_strategy:
                     materials_payload["cover_letter_strategy"] = cover_letter_strategy
                 if cover_letter_template_id:
@@ -390,6 +408,18 @@ async def run_plan(
                 if cover_letter_source_document_id:
                     materials_payload["cover_letter_source_document_id"] = (
                         cover_letter_source_document_id
+                    )
+                if cover_letter_patch_aggressiveness:
+                    materials_payload["cover_letter_patch_aggressiveness"] = (
+                        cover_letter_patch_aggressiveness
+                    )
+                if cover_letter_patch_allow_reorder_sections is not None:
+                    materials_payload["cover_letter_patch_allow_reorder_sections"] = (
+                        cover_letter_patch_allow_reorder_sections
+                    )
+                if cover_letter_patch_allow_add_remove_bullets is not None:
+                    materials_payload["cover_letter_patch_allow_add_remove_bullets"] = (
+                        cover_letter_patch_allow_add_remove_bullets
                     )
 
                 mat_id = enqueue_fn(

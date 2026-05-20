@@ -18,6 +18,7 @@ import httpx
 
 from src.providers.api_base import ApiKeyProvider
 from src.providers.base import (
+    ModelInfo,
     ProviderError,
     ProviderErrorKind,
     ProviderTestResult,
@@ -25,16 +26,60 @@ from src.providers.base import (
 )
 
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.5-flash"
 
 
 class GeminiProvider(ApiKeyProvider):
     id = "gemini"
     display_name = "Google Gemini"
-    description = "Google Gemini generative-language API"
+    description = "Google Gemini generative-language API (2.5 GA + 3.x preview)"
     install_hint = "Get an API key from https://aistudio.google.com/apikey"
     api_key_env_var = "GEMINI_API_KEY"
     default_model = DEFAULT_MODEL
+    # Gemini keys are 39-char `AIza...` strings, no version prefix.
+    api_key_pattern = r"^AIza[A-Za-z0-9_-]{30,}$"
+    api_key_example = "AIza..."
+
+    # Curated from ai.google.dev/gemini-api/docs/models on 2026-05-19.
+    # Gemini 3.5 Flash launched at I/O 2026-05-19; Gemini 2.5 family
+    # stays GA until 2026-10-16; Gemini 2.0 Flash retires 2026-06-01.
+    KNOWN_MODELS = (
+        ModelInfo(
+            id="gemini-3.1-flash-lite",
+            display_name="Gemini 3.1 Flash-Lite",
+            context_window=1_000_000,
+            max_output_tokens=8_192,
+            tags=("fast", "cheap"),
+        ),
+        ModelInfo(
+            id="gemini-3.5-flash",
+            display_name="Gemini 3.5 Flash",
+            context_window=1_048_576,
+            max_output_tokens=64_000,
+            tags=("balanced", "long-context"),
+        ),
+        ModelInfo(
+            id="gemini-2.5-flash",
+            display_name="Gemini 2.5 Flash (GA fallback)",
+            context_window=1_000_000,
+            max_output_tokens=8_192,
+            tags=("balanced",),
+        ),
+        ModelInfo(
+            id="gemini-2.5-pro",
+            display_name="Gemini 2.5 Pro",
+            context_window=2_000_000,
+            max_output_tokens=8_192,
+            tags=("smart", "long-context"),
+        ),
+        ModelInfo(
+            id="gemini-3.1-pro-preview",
+            display_name="Gemini 3.1 Pro (preview)",
+            context_window=2_000_000,
+            max_output_tokens=64_000,
+            tags=("smart", "preview"),
+        ),
+    )
 
     def _base_url(self) -> str:
         creds = self.credentials()
@@ -96,9 +141,11 @@ class GeminiProvider(ApiKeyProvider):
         system: str = "",
         timeout: int = 120,
         output_format: str = "text",  # noqa: ARG002 -- JSON is prompt-driven for REST providers
+        model: str | None = None,
     ) -> str:
         api_key = self.get_api_key()
-        model = self.get_model()
+        # Phase 17.9.5: per-call override for tiered dispatch.
+        model = (model or "").strip() or self.get_model()
         url = f"{self._base_url()}/models/{model}:generateContent"
 
         payload: dict[str, Any] = {

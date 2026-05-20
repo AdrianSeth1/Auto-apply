@@ -55,6 +55,8 @@ class TestAppFactory:
         assert "/api/providers/{provider_id}/set-key" in paths
         assert "/api/providers/{provider_id}" in paths
         assert "/api/providers/{provider_id}/use" in paths
+        # Phase 17.9.4: model catalog endpoint
+        assert "/api/providers/{provider_id}/models" in paths
 
 
 class TestSpaShell:
@@ -966,6 +968,60 @@ class TestSettingsApi:
         assert response.status_code == 200
         assert response.json()["message"] == "LLM settings updated successfully."
 
+    def test_settings_update_llm_forwards_small_tier(self, client):
+        """Phase 17.9.9: small_provider / small_model / small_tier_action
+        must reach update_llm_settings_data as keyword arguments."""
+        with patch(
+            "src.web.routes.api.update_llm_settings_data",
+            return_value={
+                "ok": True,
+                "status": "updated",
+                "message": "LLM settings updated successfully.",
+                "llm": {
+                    "primary_provider": "anthropic",
+                    "fallback_provider": None,
+                    "allow_fallback": False,
+                    "small_provider": "groq",
+                    "small_model": "llama-3.3-70b-versatile",
+                },
+                "search_cache": {"enabled": True, "ttl_hours": 24},
+                "available_providers": {},
+                "config_path": "config/settings.yaml",
+            },
+        ) as mocked:
+            response = client.put(
+                "/api/settings/llm",
+                json={
+                    "primary_provider": "anthropic",
+                    "fallback_provider": None,
+                    "allow_fallback": False,
+                    "cache_enabled": True,
+                    "cache_ttl_hours": 24,
+                    "small_provider": "groq",
+                    "small_model": "llama-3.3-70b-versatile",
+                    "small_tier_action": "set",
+                },
+            )
+        assert response.status_code == 200
+        kwargs = mocked.call_args.kwargs
+        assert kwargs["small_provider"] == "groq"
+        assert kwargs["small_model"] == "llama-3.3-70b-versatile"
+        assert kwargs["small_tier_action"] == "set"
+
+    def test_settings_update_llm_rejects_bad_small_tier_action(self, client):
+        response = client.put(
+            "/api/settings/llm",
+            json={
+                "primary_provider": "anthropic",
+                "fallback_provider": None,
+                "allow_fallback": False,
+                "cache_enabled": True,
+                "cache_ttl_hours": 24,
+                "small_tier_action": "kaboom",
+            },
+        )
+        assert response.status_code == 400
+
     def test_settings_clear_search_cache(self, client):
         with patch(
             "src.web.routes.api.clear_search_cache_data",
@@ -1098,6 +1154,99 @@ class TestProvidersApi:
             )
         assert response.status_code == 200
         assert mocked.call_args.kwargs["fallback_provider"] == "claude-cli"
+
+    def test_provider_models_unknown_404s(self, client):
+        with patch(
+            "src.web.routes.api.list_provider_models",
+            return_value={
+                "ok": False,
+                "error": "Unknown provider 'nope'.",
+                "error_code": "unknown_provider",
+                "provider_id": "nope",
+            },
+        ):
+            response = client.get("/api/providers/nope/models")
+        assert response.status_code == 404
+
+    def test_provider_models_returns_catalog(self, client):
+        with patch(
+            "src.web.routes.api.list_provider_models",
+            return_value={
+                "ok": True,
+                "provider_id": "openai",
+                "default_model": "gpt-4o-mini",
+                "models": [
+                    {
+                        "id": "gpt-4o-mini",
+                        "display_name": "GPT-4o mini",
+                        "context_window": 128000,
+                        "max_output_tokens": 16384,
+                        "supports_json": True,
+                        "tags": ["fast", "cheap"],
+                    }
+                ],
+                "source": "catalog",
+            },
+        ):
+            response = client.get("/api/providers/openai/models")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert body["default_model"] == "gpt-4o-mini"
+        assert body["models"][0]["id"] == "gpt-4o-mini"
+        assert body["source"] == "catalog"
+
+    def test_set_provider_model_ok(self, client):
+        """Phase 17.9.11: PUT /api/providers/{id}/model updates the
+        provider's credential metadata without re-entering the key."""
+        with patch(
+            "src.web.routes.api.update_provider_model",
+            return_value={
+                "ok": True,
+                "provider_id": "openai",
+                "model": "gpt-4.1",
+                "previous_model": "gpt-4o-mini",
+                "message": "Model: gpt-4o-mini -> gpt-4.1",
+            },
+        ) as mocked:
+            response = client.put(
+                "/api/providers/openai/model",
+                json={"model": "gpt-4.1"},
+            )
+        assert response.status_code == 200
+        assert mocked.call_args.args == ("openai",)
+        assert mocked.call_args.kwargs == {"model": "gpt-4.1"}
+        assert response.json()["model"] == "gpt-4.1"
+
+    def test_set_provider_model_unknown_404s(self, client):
+        with patch(
+            "src.web.routes.api.update_provider_model",
+            return_value={
+                "ok": False,
+                "error": "Unknown provider 'nope'.",
+                "error_code": "unknown_provider",
+                "provider_id": "nope",
+            },
+        ):
+            response = client.put(
+                "/api/providers/nope/model", json={"model": "anything"}
+            )
+        assert response.status_code == 404
+
+    def test_set_provider_model_not_connected_409s(self, client):
+        with patch(
+            "src.web.routes.api.update_provider_model",
+            return_value={
+                "ok": False,
+                "error": "'openai' is not connected yet.",
+                "error_code": "not_connected",
+                "provider_id": "openai",
+            },
+        ):
+            response = client.put(
+                "/api/providers/openai/model", json={"model": "gpt-4.1"}
+            )
+        assert response.status_code == 409
 
 
 class TestWebCLI:

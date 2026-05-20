@@ -76,6 +76,127 @@ class TestWritersSyncListAndScalar:
         assert out["llm"]["fallback_providers"] == []
 
 
+class TestUpdateLLMSettingsSmallTier:
+    """Phase 17.9.9: `update_llm_settings` accepts an optional small-tier
+    block via a three-state action (preserve / set / clear)."""
+
+    def test_preserve_is_default(self, tmp_path):
+        """Existing callers that don't pass small_tier_action keep
+        whatever is already in the file."""
+        from src.core.config import update_llm_settings  # noqa: PLC0415
+
+        config_path = tmp_path / "settings.yaml"
+        config_path.write_text(
+            "llm:\n"
+            "  primary_provider: claude-cli\n"
+            "  small_provider: groq\n"
+            "  small_model: llama-3.3-70b-versatile\n",
+            encoding="utf-8",
+        )
+        update_llm_settings(
+            "anthropic",
+            fallback_provider=None,
+            allow_fallback=False,
+            config_path=config_path,
+        )
+        import yaml  # noqa: PLC0415
+
+        out = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert out["llm"]["small_provider"] == "groq"
+        assert out["llm"]["small_model"] == "llama-3.3-70b-versatile"
+
+    def test_set_writes_both_keys(self, tmp_path):
+        from src.core.config import update_llm_settings  # noqa: PLC0415
+
+        config_path = tmp_path / "settings.yaml"
+        config_path.write_text(
+            "llm:\n  primary_provider: claude-cli\n",
+            encoding="utf-8",
+        )
+        update_llm_settings(
+            "claude-cli",
+            fallback_provider=None,
+            allow_fallback=False,
+            small_provider="groq",
+            small_model="llama-3.3-70b-versatile",
+            small_tier_action="set",
+            config_path=config_path,
+        )
+        import yaml  # noqa: PLC0415
+
+        out = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert out["llm"]["small_provider"] == "groq"
+        assert out["llm"]["small_model"] == "llama-3.3-70b-versatile"
+
+    def test_set_with_empty_provider_writes_null(self, tmp_path):
+        """Disabling the small tier via the action='set' path lands an
+        explicit null so the YAML reflects writer intent."""
+        from src.core.config import update_llm_settings  # noqa: PLC0415
+
+        config_path = tmp_path / "settings.yaml"
+        config_path.write_text(
+            "llm:\n"
+            "  primary_provider: claude-cli\n"
+            "  small_provider: groq\n",
+            encoding="utf-8",
+        )
+        update_llm_settings(
+            "claude-cli",
+            fallback_provider=None,
+            allow_fallback=False,
+            small_provider="",
+            small_model="",
+            small_tier_action="set",
+            config_path=config_path,
+        )
+        import yaml  # noqa: PLC0415
+
+        out = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert out["llm"]["small_provider"] is None
+        assert out["llm"]["small_model"] is None
+
+    def test_clear_removes_keys(self, tmp_path):
+        from src.core.config import update_llm_settings  # noqa: PLC0415
+
+        config_path = tmp_path / "settings.yaml"
+        config_path.write_text(
+            "llm:\n"
+            "  primary_provider: claude-cli\n"
+            "  small_provider: groq\n"
+            "  small_model: x\n",
+            encoding="utf-8",
+        )
+        update_llm_settings(
+            "claude-cli",
+            fallback_provider=None,
+            allow_fallback=False,
+            small_tier_action="clear",
+            config_path=config_path,
+        )
+        import yaml  # noqa: PLC0415
+
+        out = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "small_provider" not in out["llm"]
+        assert "small_model" not in out["llm"]
+
+    def test_unknown_action_raises(self, tmp_path):
+        from src.core.config import update_llm_settings  # noqa: PLC0415
+
+        config_path = tmp_path / "settings.yaml"
+        config_path.write_text(
+            "llm:\n  primary_provider: claude-cli\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Unknown small_tier_action"):
+            update_llm_settings(
+                "claude-cli",
+                fallback_provider=None,
+                allow_fallback=False,
+                small_tier_action="kaboom",
+                config_path=config_path,
+            )
+
+
 class TestSettingsChain:
     def test_list_shape_is_honoured(self):
         settings = get_llm_settings(
@@ -290,3 +411,156 @@ class TestAttemptChainSideChannel:
 
         assert len(first) == 2
         assert len(second) == 1  # ContextVar reset between calls
+
+
+# ---------------------------------------------------------------------------
+# Phase 17.9.5 -- small-tier dispatch
+# ---------------------------------------------------------------------------
+
+
+def _small_tier_config(
+    *, primary: str = "claude-cli",
+    small_provider: str | None = None,
+    small_model: str | None = None,
+    fallback: list[str] | None = None,
+) -> dict:
+    llm: dict = {
+        "primary_provider": primary,
+        "fallback_providers": list(fallback or []),
+        "allow_fallback": bool(fallback),
+    }
+    if small_provider is not None:
+        llm["small_provider"] = small_provider
+    if small_model is not None:
+        llm["small_model"] = small_model
+    return {"llm": llm}
+
+
+class TestSmallTier:
+    def test_settings_normalize_small_provider_and_model(self):
+        with patch(
+            "src.utils.llm.load_config",
+            return_value=_small_tier_config(
+                primary="claude-cli",
+                small_provider="codex-cli",
+                small_model="o4-mini",
+            ),
+        ):
+            settings = get_llm_settings()
+        assert settings["small_provider"] == "codex-cli"
+        assert settings["small_model"] == "o4-mini"
+
+    def test_settings_default_when_unset(self):
+        with patch(
+            "src.utils.llm.load_config",
+            return_value=_small_tier_config(primary="claude-cli"),
+        ):
+            settings = get_llm_settings()
+        assert settings["small_provider"] is None
+        assert settings["small_model"] is None
+
+    def test_unknown_tier_raises(self):
+        with patch(
+            "src.utils.llm.load_config",
+            return_value=_small_tier_config(primary="claude-cli"),
+        ):
+            with pytest.raises(LLMError, match="Unknown LLM tier"):
+                generate_text("p", tier="huge")
+
+    def test_small_tier_routes_to_small_provider(self):
+        """When small_provider is set, tier='small' calls it first."""
+        with (
+            patch(
+                "src.utils.llm.load_config",
+                return_value=_small_tier_config(
+                    primary="claude-cli",
+                    small_provider="codex-cli",
+                ),
+            ),
+            patch("src.utils.llm._dispatch_via_registry_enabled", return_value=False),
+            patch("src.utils.llm.claude_generate", side_effect=AssertionError("not reached")),
+            patch("src.utils.llm.codex_generate", return_value="cheap answer") as cgen,
+        ):
+            assert generate_text("p", tier="small") == "cheap answer"
+            assert cgen.call_count == 1
+
+    def test_small_tier_falls_through_to_primary_when_unset(self):
+        """No small_provider configured -> tier='small' uses the primary chain."""
+        with (
+            patch(
+                "src.utils.llm.load_config",
+                return_value=_small_tier_config(primary="claude-cli"),
+            ),
+            patch("src.utils.llm._dispatch_via_registry_enabled", return_value=False),
+            patch("src.utils.llm.claude_generate", return_value="primary answer"),
+        ):
+            assert generate_text("p", tier="small") == "primary answer"
+
+    def test_small_model_threaded_through_dispatch(self):
+        """When small_model is set, the override is passed to _call_provider."""
+        recorded = {}
+
+        def fake_dispatch(provider, prompt, *, system, timeout, output_format, model=None):
+            recorded["provider"] = provider
+            recorded["model"] = model
+            return "ok"
+
+        with (
+            patch(
+                "src.utils.llm.load_config",
+                return_value=_small_tier_config(
+                    primary="claude-cli",
+                    small_provider="codex-cli",
+                    small_model="cheap-model-7b",
+                ),
+            ),
+            patch("src.utils.llm._call_provider", side_effect=fake_dispatch),
+        ):
+            generate_text("p", tier="small")
+        assert recorded["provider"] == "codex-cli"
+        assert recorded["model"] == "cheap-model-7b"
+
+    def test_primary_tier_does_not_thread_small_model(self):
+        """tier='primary' (default) must NOT inject the small_model override."""
+        recorded = {}
+
+        def fake_dispatch(provider, prompt, *, system, timeout, output_format, model=None):
+            recorded["provider"] = provider
+            recorded["model"] = model
+            return "ok"
+
+        with (
+            patch(
+                "src.utils.llm.load_config",
+                return_value=_small_tier_config(
+                    primary="claude-cli",
+                    small_provider="codex-cli",
+                    small_model="cheap-model-7b",
+                ),
+            ),
+            patch("src.utils.llm._call_provider", side_effect=fake_dispatch),
+        ):
+            generate_text("p")  # default tier
+        assert recorded["provider"] == "claude-cli"
+        assert recorded["model"] is None
+
+    def test_small_tier_chain_falls_back_to_primary_on_failure(self):
+        """small_provider failure transiently advances into the primary chain."""
+        with (
+            patch(
+                "src.utils.llm.load_config",
+                return_value=_small_tier_config(
+                    primary="claude-cli",
+                    small_provider="codex-cli",
+                ),
+            ),
+            patch("src.utils.llm._dispatch_via_registry_enabled", return_value=False),
+            patch(
+                "src.utils.llm.codex_generate",
+                side_effect=LLMError("codex CLI timed out after 60s"),
+            ),
+            patch("src.utils.llm.claude_generate", return_value="primary rescue"),
+        ):
+            assert generate_text("p", tier="small") == "primary rescue"
+            attempts = last_attempt_chain.get()
+            assert [a["provider"] for a in attempts] == ["codex-cli", "claude-cli"]
