@@ -4,6 +4,68 @@ All notable implementation changes to AutoApply are documented here, organized b
 
 ## [Unreleased]
 
+### Phase 17.9 — LLM Provider Expansion (2026-05-19)
+
+LLM hardening between Phase 17.8 (Document Library) and Phase 18
+(Worker Activation). Adds first-class support for more upstream
+providers, gives each provider a curated model catalog, lets users
+pick a model per provider from the UI, and introduces an optional
+cheap-model tier for extraction-style work.
+
+**17.9.1** — Extract `OpenAICompatibleProvider` from
+`src/providers/openai.py` so any vendor speaking `Bearer` + `/v1/chat/completions`
+is a ~10-line subclass. Add `ModelInfo` dataclass and
+`KNOWN_MODELS: tuple[ModelInfo, ...]` on `LLMProvider`. OpenAI,
+Anthropic, and Gemini ship curated catalogs for May 2026 (Anthropic
+and Gemini keep their bespoke `generate()` paths -- Messages API and
+v1beta REST aren't OpenAI-shaped).
+
+**17.9.2** — Add seven new OpenAI-compatible providers: DeepSeek,
+Moonshot/Kimi, Qwen (DashScope OpenAI-compat endpoint), xAI Grok,
+Groq, Mistral, and OpenRouter. Each ships a curated `KNOWN_MODELS`.
+OpenRouter seeds the 10 most popular routes; the rest are discoverable
+via the model catalog API in 17.9.4.
+
+**17.9.3** — `OllamaProvider` for local self-hosted models. Probes
+`/api/tags` (native Ollama API) and exposes `list_local_models()` for
+the 17.9.4 catalog. Adds an `allow_empty_key` class flag on
+`ApiKeyProvider`: when set, `connect()` / `get_api_key()` / the
+application + CLI layers all accept an empty secret. Credential row
+is still persisted (carries the custom `base_url` and the `verified_at`
+breadcrumb).
+
+**17.9.4** — Model catalog API + Connect dialog picker.
+`GET /api/providers/{id}/models` returns `KNOWN_MODELS` merged with
+the live runtime catalog where available (Ollama today). Connect
+dialog replaces the freeform model `<Input>` with a native `<select>`
+over the catalog, with a `Custom...` sentinel that swaps in a free-
+text input for ids shipping after our curated snapshot. Base URL
+moves into a collapsible "Advanced" panel so the default view stays
+a one-glance form. `allow_empty_key` is surfaced in `public_view()`
+so the dialog labels the key field "(optional)" and skips its own
+"key required" guard for Ollama-style providers.
+
+**17.9.5** — Small-model tier. `generate_text` / `generate_json` gain
+a `tier: "primary" | "small"` parameter. With `llm.small_provider` and
+/ or `llm.small_model` configured in settings.yaml, `tier="small"`
+routes via that cheaper path; the primary chain still serves as the
+safety net on transient failure. `LLMProvider.generate()` picks up an
+optional `model: str | None = None` keyword threaded through
+`_call_provider` -> `_dispatch_via_registry`. Cache fingerprint folds
+in the effective model so primary and small-tier requests don't
+collide on cached entries. Applied at two pure-extraction call sites:
+`src/intake/jd_parser.py` and `src/memory/resume_importer.py`.
+Creative paths (cover letter, resume rewrite, QA responder)
+intentionally stay on the primary tier.
+
+**17.9.6** — User-defined custom providers. `config/settings.yaml`
+`llm.custom_providers: [...]` synthesises an `OpenAICompatibleProvider`
+subclass per entry at registry-init time. Lets users wire in third-
+party OpenAI-compat proxies, private vLLM / LM Studio endpoints, or
+not-yet-bundled upstreams without code changes. Validation skips
+malformed entries with a `logger.warning` rather than crashing
+startup; builtin ids always win on collision.
+
 ### Roadmap Update: Task Queue + Materials Generation v2
 
 - Re-planned Phase 14 from a scheduler-only phase into **Task Queue +

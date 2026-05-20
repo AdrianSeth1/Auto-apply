@@ -468,12 +468,21 @@ class TestRegistryRegistersBuiltins:
 
         registry = ProviderRegistry()
         _register_builtins(registry)
-        # The three API-key providers plus the Codex OAuth wrapper
-        # (10.3) and the Claude CLI subprocess provider (10.4).
+        # Original three first-party REST providers (10.1-10.2),
+        # plus the Codex / Claude CLI subprocess providers (10.3-10.4),
+        # plus the Phase 17.9 OpenAI-compatible roster.
         assert set(registry.ids()) == {
             "openai",
             "anthropic",
             "gemini",
             "codex-cli",
             "claude-cli",
+            "deepseek",
+            "moonshot",
+            "qwen",
+            "xai",
+            "groq",
+            "mistral",
+            "openrouter",
+            "ollama",
         }

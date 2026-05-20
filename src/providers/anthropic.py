@@ -16,6 +16,7 @@ import httpx
 
 from src.providers.api_base import ApiKeyProvider
 from src.providers.base import (
+    ModelInfo,
     ProviderError,
     ProviderErrorKind,
     ProviderTestResult,
@@ -23,7 +24,7 @@ from src.providers.base import (
 )
 
 DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
-DEFAULT_MODEL = "claude-sonnet-4-5"
+DEFAULT_MODEL = "claude-sonnet-4-6"
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = 4096
 
@@ -31,10 +32,47 @@ DEFAULT_MAX_TOKENS = 4096
 class AnthropicProvider(ApiKeyProvider):
     id = "anthropic"
     display_name = "Anthropic"
-    description = "Anthropic Messages API (Claude family)"
+    description = "Anthropic Messages API (Claude 4.x family)"
     install_hint = "Get an API key from https://console.anthropic.com/settings/keys"
     api_key_env_var = "ANTHROPIC_API_KEY"
     default_model = DEFAULT_MODEL
+    api_key_pattern = r"^sk-ant-[A-Za-z0-9_-]{20,}$"
+    api_key_example = "sk-ant-..."
+
+    # Curated from platform.claude.com/docs/en/about-claude/models on
+    # 2026-05-19. Sonnet 4 and Opus 4 (sans .6/.7) were retired
+    # 2026-04-20; Haiku 3.5 was retired 2026-02-19. Long-context
+    # variants of Opus/Sonnet 4.6+ default to 1M tokens.
+    KNOWN_MODELS = (
+        ModelInfo(
+            id="claude-haiku-4-5",
+            display_name="Claude Haiku 4.5",
+            context_window=200_000,
+            max_output_tokens=8_192,
+            tags=("fast", "cheap"),
+        ),
+        ModelInfo(
+            id="claude-sonnet-4-6",
+            display_name="Claude Sonnet 4.6",
+            context_window=1_000_000,
+            max_output_tokens=8_192,
+            tags=("balanced",),
+        ),
+        ModelInfo(
+            id="claude-opus-4-6",
+            display_name="Claude Opus 4.6",
+            context_window=1_000_000,
+            max_output_tokens=8_192,
+            tags=("smart",),
+        ),
+        ModelInfo(
+            id="claude-opus-4-7",
+            display_name="Claude Opus 4.7",
+            context_window=1_000_000,
+            max_output_tokens=8_192,
+            tags=("smart", "flagship"),
+        ),
+    )
 
     def _base_url(self) -> str:
         creds = self.credentials()
@@ -100,9 +138,11 @@ class AnthropicProvider(ApiKeyProvider):
         system: str = "",
         timeout: int = 120,
         output_format: str = "text",  # noqa: ARG002 -- JSON is prompt-driven for REST providers
+        model: str | None = None,
     ) -> str:
         api_key = self.get_api_key()
-        model = self.get_model()
+        # Phase 17.9.5: per-call override for tiered dispatch.
+        model = (model or "").strip() or self.get_model()
         url = f"{self._base_url()}/messages"
         max_tokens = DEFAULT_MAX_TOKENS
         creds = self.credentials()

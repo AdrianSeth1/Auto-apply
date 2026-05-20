@@ -391,3 +391,214 @@ class TestNoLoginSubcommand:
             "No such command" in result.output
             or "no such command" in result.output.lower()
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 17.9.10 -- CLI ergonomics
+# ---------------------------------------------------------------------------
+
+
+class TestProviderListShowsModel:
+    def test_human_output_includes_model_when_set(
+        self, runner: CliRunner, isolated_registry: ProviderRegistry
+    ) -> None:
+        from src.providers.base import AuthType, ProviderCredentials  # noqa: PLC0415
+
+        isolated_registry.store.set(
+            ProviderCredentials(
+                provider_id="stub-api",
+                auth_type=AuthType.API_KEY,
+                secret={"api_key": "sk-test"},
+                metadata={"model": "stub-pro", "base_url": "https://x.example/v1"},
+            )
+        )
+        result = runner.invoke(cli, ["provider", "list"])
+        assert result.exit_code == 0, result.output
+        # The model + base_url should appear underneath the stub-api row.
+        assert "model=stub-pro" in result.output
+        assert "base_url=https://x.example/v1" in result.output
+
+    def test_human_output_omits_model_when_unset(
+        self, runner: CliRunner, isolated_registry: ProviderRegistry
+    ) -> None:
+        result = runner.invoke(cli, ["provider", "list"])
+        assert result.exit_code == 0
+        # No credentials saved -> no model line.
+        assert "model=" not in result.output
+
+
+class TestProviderSetModel:
+    def test_swaps_model_without_re_entering_key(
+        self, runner: CliRunner, isolated_registry: ProviderRegistry
+    ) -> None:
+        from src.providers.base import AuthType, ProviderCredentials  # noqa: PLC0415
+
+        isolated_registry.store.set(
+            ProviderCredentials(
+                provider_id="stub-api",
+                auth_type=AuthType.API_KEY,
+                secret={"api_key": "sk-original"},
+                metadata={"model": "old-model"},
+            )
+        )
+        result = runner.invoke(
+            cli, ["provider", "set-model", "stub-api", "new-model"]
+        )
+        assert result.exit_code == 0, result.output
+        creds = isolated_registry.store.get("stub-api")
+        assert creds is not None
+        assert creds.metadata["model"] == "new-model"
+        # The key MUST survive unchanged -- this is the whole point of
+        # the command (no re-prompt).
+        assert creds.secret["api_key"] == "sk-original"
+
+    def test_rejects_unconnected_provider(
+        self, runner: CliRunner, isolated_registry: ProviderRegistry
+    ) -> None:
+        result = runner.invoke(
+            cli, ["provider", "set-model", "stub-api", "anything"]
+        )
+        # No credentials yet -> exit 2 with a hint to run set-key first.
+        assert result.exit_code == 2
+        assert "set-key" in result.output
+
+    def test_json_envelope(
+        self, runner: CliRunner, isolated_registry: ProviderRegistry
+    ) -> None:
+        import json  # noqa: PLC0415
+
+        from src.providers.base import AuthType, ProviderCredentials  # noqa: PLC0415
+
+        isolated_registry.store.set(
+            ProviderCredentials(
+                provider_id="stub-api",
+                auth_type=AuthType.API_KEY,
+                secret={"api_key": "sk"},
+            )
+        )
+        result = runner.invoke(
+            cli,
+            ["provider", "set-model", "stub-api", "fancy-7b", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["data"]["ok"] is True
+        assert payload["data"]["model"] == "fancy-7b"
+
+
+class TestProviderUseWithModel:
+    def test_use_with_model_updates_both(
+        self, runner: CliRunner, isolated_registry: ProviderRegistry
+    ) -> None:
+        from src.providers.base import AuthType, ProviderCredentials  # noqa: PLC0415
+
+        isolated_registry.store.set(
+            ProviderCredentials(
+                provider_id="stub-api",
+                auth_type=AuthType.API_KEY,
+                secret={"api_key": "sk"},
+                metadata={"model": "old"},
+            )
+        )
+        result = runner.invoke(
+            cli, ["provider", "use", "stub-api", "--model", "brand-new"]
+        )
+        assert result.exit_code == 0, result.output
+        # Credential metadata updated.
+        creds = isolated_registry.store.get("stub-api")
+        assert creds.metadata["model"] == "brand-new"
+
+    def test_use_without_model_leaves_creds_alone(
+        self, runner: CliRunner, isolated_registry: ProviderRegistry
+    ) -> None:
+        from src.providers.base import AuthType, ProviderCredentials  # noqa: PLC0415
+
+        isolated_registry.store.set(
+            ProviderCredentials(
+                provider_id="stub-api",
+                auth_type=AuthType.API_KEY,
+                secret={"api_key": "sk"},
+                metadata={"model": "untouched"},
+            )
+        )
+        result = runner.invoke(cli, ["provider", "use", "stub-api"])
+        assert result.exit_code == 0, result.output
+        creds = isolated_registry.store.get("stub-api")
+        assert creds.metadata["model"] == "untouched"
+
+
+class TestProviderSmallTier:
+    def test_show_when_disabled(
+        self, runner: CliRunner, isolated_registry: ProviderRegistry
+    ) -> None:
+        result = runner.invoke(cli, ["provider", "small-tier", "show"])
+        assert result.exit_code == 0
+        assert "disabled" in result.output.lower()
+
+    def test_set_then_show(
+        self, runner: CliRunner, isolated_registry: ProviderRegistry
+    ) -> None:
+        set_result = runner.invoke(
+            cli,
+            [
+                "provider",
+                "small-tier",
+                "set",
+                "stub-api",
+                "--model",
+                "stub-pro",
+            ],
+        )
+        assert set_result.exit_code == 0, set_result.output
+
+        show_result = runner.invoke(cli, ["provider", "small-tier", "show"])
+        assert show_result.exit_code == 0, show_result.output
+        assert "stub-api" in show_result.output
+        assert "stub-pro" in show_result.output
+
+    def test_set_unknown_provider_rejected(
+        self, runner: CliRunner, isolated_registry: ProviderRegistry
+    ) -> None:
+        result = runner.invoke(
+            cli, ["provider", "small-tier", "set", "nope"]
+        )
+        assert result.exit_code == 2
+
+    def test_clear_disables(
+        self, runner: CliRunner, isolated_registry: ProviderRegistry
+    ) -> None:
+        runner.invoke(cli, ["provider", "small-tier", "set", "stub-api"])
+        clear_result = runner.invoke(cli, ["provider", "small-tier", "clear"])
+        assert clear_result.exit_code == 0, clear_result.output
+        show_result = runner.invoke(cli, ["provider", "small-tier", "show"])
+        assert "disabled" in show_result.output.lower()
+
+    def test_set_persists_to_sandbox_settings_yaml(
+        self,
+        runner: CliRunner,
+        isolated_registry: ProviderRegistry,
+        tmp_path: Path,
+    ) -> None:
+        """The CLI writes to the sandbox path, not the real settings.yaml."""
+        import yaml  # noqa: PLC0415
+
+        import src.cli.cmd_provider as cmd_provider  # noqa: PLC0415
+
+        # The isolated_registry fixture monkeypatched _SETTINGS_PATH;
+        # we just need to read it back.
+        runner.invoke(
+            cli,
+            [
+                "provider",
+                "small-tier",
+                "set",
+                "stub-api",
+                "--model",
+                "stub-pro",
+            ],
+        )
+        data = yaml.safe_load(
+            cmd_provider._SETTINGS_PATH.read_text(encoding="utf-8")
+        )
+        assert data["llm"]["small_provider"] == "stub-api"
+        assert data["llm"]["small_model"] == "stub-pro"

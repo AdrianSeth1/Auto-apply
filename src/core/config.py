@@ -100,6 +100,10 @@ def update_llm_settings(
     fallback_provider: str | None,
     allow_fallback: bool,
     config_path: Path | None = None,
+    *,
+    small_provider: str | None = None,
+    small_model: str | None = None,
+    small_tier_action: str = "preserve",
 ) -> dict[str, Any]:
     """Update the persisted LLM provider settings in config/settings.yaml.
 
@@ -108,6 +112,14 @@ def update_llm_settings(
     already migrated to the list form will not see fallback changes
     take effect (``get_llm_settings`` prefers the list when both
     exist).
+
+    Phase 17.9.9 added ``small_provider`` / ``small_model`` for the
+    cheap-model tier. Because legacy callers (cmd_init, the original
+    web settings PUT path) only know about the primary chain, the
+    small-tier knobs default to "preserve whatever is already in the
+    file". To actually write them, pass ``small_tier_action='set'``
+    (with the desired provider/model values) or ``'clear'`` (which
+    deletes both keys from disk).
     """
     config = load_raw_config(config_path)
     llm = config.setdefault("llm", {})
@@ -116,6 +128,21 @@ def update_llm_settings(
     llm["fallback_provider"] = fallback_provider
     llm["fallback_providers"] = [fallback_provider] if fallback_provider else []
     llm["allow_fallback"] = allow_fallback
+
+    if small_tier_action == "set":
+        # Empty / falsy values become explicit nulls so the YAML reflects
+        # the writer's intent (rather than silently leaving stale data).
+        llm["small_provider"] = small_provider or None
+        llm["small_model"] = small_model or None
+    elif small_tier_action == "clear":
+        llm.pop("small_provider", None)
+        llm.pop("small_model", None)
+    elif small_tier_action != "preserve":
+        raise ValueError(
+            f"Unknown small_tier_action {small_tier_action!r}. "
+            "Expected 'preserve', 'set', or 'clear'."
+        )
+
     save_config(config, config_path)
     return config
 

@@ -58,6 +58,23 @@ class ApiKeyProvider(LLMProvider):
     # Subclasses set these.
     api_key_env_var: str = ""
     default_model: str = ""
+    # Phase 17.9.3: some "API-key" providers don't actually require one.
+    # Ollama, a self-hosted vLLM, or an LM Studio endpoint typically
+    # serves without auth -- a credential record still needs to exist
+    # so we can persist a base_url override and a verified_at
+    # breadcrumb, but the secret may be empty. Setting this flag opts
+    # the provider into the keyless connect / generate paths in
+    # ``connect()`` / ``get_api_key()`` and the application + CLI
+    # layers so the user isn't forced to type a fake key.
+    allow_empty_key: bool = False
+    # Phase 17.9.13: soft client-side key format hints. The probe
+    # remains the canonical validator (formats drift -- OpenAI added
+    # `sk-proj-`, `sk-svcacct-` etc. after `sk-`); we surface these
+    # only so the UI can show "looks like a key for a different
+    # provider" before burning a network round-trip. Both are
+    # optional; an empty pattern disables the hint.
+    api_key_pattern: str = ""
+    api_key_example: str = ""
 
     def __init__(
         self,
@@ -76,9 +93,11 @@ class ApiKeyProvider(LLMProvider):
     def get_api_key(self) -> str:
         """Return the configured API key, falling back to env vars.
 
-        Raises :class:`ProviderError` if neither is set; callers (the
-        agent loop, the CLI test command) catch this and surface a
-        targeted error message rather than crashing.
+        Raises :class:`ProviderError` if neither is set, **unless**
+        :attr:`allow_empty_key` is True (Ollama / self-hosted servers
+        that typically run without auth) -- in that case we return the
+        empty string and the subclass's ``_headers`` is responsible
+        for omitting the Authorization header.
         """
         creds = self.credentials()
         if creds and creds.secret.get("api_key"):
@@ -87,6 +106,8 @@ class ApiKeyProvider(LLMProvider):
             env_value = os.environ.get(self.api_key_env_var)
             if env_value:
                 return env_value
+        if self.allow_empty_key:
+            return ""
         raise ProviderError(
             f"{self.display_name or self.id} is not connected. "
             f"Run `autoapply provider connect {self.id}` or set "
@@ -114,10 +135,17 @@ class ApiKeyProvider(LLMProvider):
         Mirrors the OAuth pattern -- never store an unverified
         credential. The probe uses :meth:`_probe_connection` directly
         so we don't have to first ``set`` then ``delete`` on failure.
+
+        When :attr:`allow_empty_key` is True (Ollama / self-hosted
+        servers without auth), an empty key is accepted -- the
+        credential row still gets persisted so we can record a custom
+        base_url and a verified_at breadcrumb.
         """
-        if not isinstance(api_key, str) or not api_key.strip():
-            raise ProviderError("API key must be a non-empty string.")
+        if not isinstance(api_key, str):
+            raise ProviderError("API key must be a string.")
         api_key = api_key.strip()
+        if not api_key and not self.allow_empty_key:
+            raise ProviderError("API key must be a non-empty string.")
         try:
             result = self._probe_connection(api_key, timeout=timeout)
         except Exception as exc:  # noqa: BLE001 -- network/HTTP boundary
@@ -175,6 +203,8 @@ class ApiKeyProvider(LLMProvider):
         *,
         system: str = "",
         timeout: int = 120,
+        output_format: str = "text",  # noqa: ARG002 -- subclass hook
+        model: str | None = None,  # noqa: ARG002 -- subclass hook
     ) -> str:
         """Default impl: subclasses override.
 
@@ -199,3 +229,176 @@ def _redact(message: str, secret: str) -> str:
     if not secret:
         return message
     return message.replace(secret, "***")
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible provider (Phase 17.9)
+# ---------------------------------------------------------------------------
+
+
+class OpenAICompatibleProvider(ApiKeyProvider):
+    """Base for providers speaking the OpenAI chat-completions REST shape.
+
+    Phase 17.9 extracts what was previously hard-coded in
+    :class:`src.providers.openai.OpenAIProvider` so DeepSeek, OpenRouter,
+    Moonshot, Qwen, xAI, Groq, Mistral, and the like can each be a
+    ~10-line subclass that only differs in id / display_name / base URL
+    / default model / KNOWN_MODELS.
+
+    Subclasses set:
+
+    * :attr:`default_base_url` -- the `/v1`-style root, no trailing slash.
+    * :attr:`api_key_env_var`  -- env var for fallback.
+    * :attr:`default_model`    -- fallback model id.
+    * :attr:`KNOWN_MODELS`     -- curated catalog (optional).
+    * :attr:`user_agent`       -- override only when an upstream demands it.
+
+    The probe hits ``GET {base}/models`` (universal across compatible
+    providers) and generation hits ``POST {base}/chat/completions``.
+    Auth header is ``Authorization: Bearer <key>`` -- providers that
+    deviate (e.g. Anthropic's ``x-api-key``) get their own class.
+    """
+
+    # Subclasses override.
+    default_base_url: str = ""
+    user_agent: str = "autoapply/0.7"
+
+    def _base_url(self) -> str:
+        creds = self.credentials()
+        if creds:
+            override = creds.metadata.get("base_url")
+            if isinstance(override, str) and override.strip():
+                return override.strip().rstrip("/")
+        return self.default_base_url.rstrip("/")
+
+    def _headers(self, api_key: str) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": self.user_agent,
+        }
+
+    def _probe_connection(
+        self, api_key: str, *, timeout: int
+    ) -> ProviderTestResult:
+        import time as _time  # local import keeps the module's top-level lean  # noqa: PLC0415
+
+        url = f"{self._base_url()}/models"
+        t0 = _time.monotonic()
+        with self._client(timeout) as client:
+            response = client.get(url, headers=self._headers(api_key))
+        latency = self._measure(t0)
+
+        if response.status_code == 401:
+            return ProviderTestResult(
+                ok=False,
+                detail=(
+                    f"{self.display_name or self.id} rejected the key (401). "
+                    "Check the value and try again."
+                ),
+                latency_ms=latency,
+            )
+        if response.status_code >= 400:
+            return ProviderTestResult(
+                ok=False,
+                detail=(
+                    f"{self.display_name or self.id} returned HTTP "
+                    f"{response.status_code}: {_safe_text(response)}"
+                ),
+                latency_ms=latency,
+            )
+
+        body: Any
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        models = body.get("data") if isinstance(body, dict) else None
+        return ProviderTestResult(
+            ok=True,
+            detail="OK",
+            latency_ms=latency,
+            model_count=len(models) if isinstance(models, list) else None,
+        )
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        system: str = "",
+        timeout: int = 120,
+        output_format: str = "text",  # noqa: ARG002 -- JSON is prompt-driven
+        model: str | None = None,
+    ) -> str:
+        # Late import: avoid pulling ProviderError / ProviderErrorKind at module
+        # load time and keep this module symmetrical with anthropic.py / gemini.py
+        # which import them locally too.
+        import httpx as _httpx  # noqa: PLC0415
+
+        from src.providers.base import (  # noqa: PLC0415
+            ProviderError,
+            ProviderErrorKind,
+            classify_http_status,
+        )
+
+        api_key = self.get_api_key()
+        # Phase 17.9.5: caller may override the model for tiered dispatch
+        # (e.g. "small" tier). Fall back to the configured model otherwise.
+        model = (model or "").strip() or self.get_model()
+        url = f"{self._base_url()}/chat/completions"
+        messages: list[dict[str, str]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        payload = {"model": model, "messages": messages}
+
+        try:
+            with self._client(timeout) as client:
+                response = client.post(
+                    url, headers=self._headers(api_key), json=payload
+                )
+        except _httpx.TimeoutException as exc:
+            raise ProviderError(
+                f"{self.display_name or self.id} generation timed out after {timeout}s",
+                kind=ProviderErrorKind.TIMEOUT,
+            ) from exc
+        except _httpx.HTTPError as exc:
+            raise ProviderError(
+                f"{self.display_name or self.id} network error: {exc}",
+                kind=ProviderErrorKind.NETWORK,
+            ) from exc
+
+        if response.status_code >= 400:
+            raise ProviderError(
+                f"{self.display_name or self.id} generation failed "
+                f"(HTTP {response.status_code}): {_safe_text(response)}",
+                kind=classify_http_status(response.status_code),
+            )
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise ProviderError(
+                f"{self.display_name or self.id} response was not JSON: {exc}",
+                kind=ProviderErrorKind.PARSE,
+            ) from exc
+
+        choices = body.get("choices") if isinstance(body, dict) else None
+        if not isinstance(choices, list) or not choices:
+            raise ProviderError(
+                f"{self.display_name or self.id} response missing 'choices': {body!r}",
+                kind=ProviderErrorKind.PARSE,
+            )
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, str):
+            raise ProviderError(
+                f"{self.display_name or self.id} response missing "
+                f"'choices[0].message.content': {body!r}",
+                kind=ProviderErrorKind.PARSE,
+            )
+        return content
+
+
+def _safe_text(response: httpx.Response, limit: int = 240) -> str:
+    text = (response.text or "").strip()
+    return text[:limit] + ("…" if len(text) > limit else "")

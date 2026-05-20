@@ -79,8 +79,10 @@ from src.application.profile import (
 from src.application.providers import (
     connect_api_key_provider,
     disconnect_provider,
+    list_provider_models,
     list_providers,
     test_provider_connection,
+    update_provider_model,
     use_provider_as_primary,
 )
 from src.application.regenerate_materials import regenerate_application_material
@@ -237,6 +239,13 @@ class LLMSettingsPayload(BaseModel):
     allow_fallback: bool = False
     cache_enabled: bool = True
     cache_ttl_hours: int = 24
+    # Phase 17.9.9: optional small-tier knobs. Both are nullable to
+    # represent "disabled". small_tier_action distinguishes "the client
+    # is not touching these" (preserve, default) from "set" and "clear",
+    # mirroring the same three-state contract on the writer below.
+    small_provider: str | None = None
+    small_model: str | None = None
+    small_tier_action: str = "preserve"
 
 
 class ProviderSetKeyPayload(BaseModel):
@@ -247,6 +256,13 @@ class ProviderSetKeyPayload(BaseModel):
 
 class ProviderUsePayload(BaseModel):
     fallback_provider: str | None = None
+
+
+class ProviderSetModelPayload(BaseModel):
+    """Phase 17.9.11: swap the model on an already-connected provider
+    without re-entering the API key."""
+
+    model: str | None = None
 
 
 class ProfileSavePayload(BaseModel):
@@ -996,12 +1012,23 @@ async def update_material_defaults(payload: MaterialDefaultsPayload) -> dict:
 
 @router.put("/settings/llm")
 async def update_settings(payload: LLMSettingsPayload) -> dict:
+    if payload.small_tier_action not in {"preserve", "set", "clear"}:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid small_tier_action {payload.small_tier_action!r}; "
+                "expected 'preserve', 'set', or 'clear'."
+            ),
+        )
     result = update_llm_settings_data(
         primary_provider=payload.primary_provider,
         fallback_provider=payload.fallback_provider,
         allow_fallback=payload.allow_fallback,
         cache_enabled=payload.cache_enabled,
         cache_ttl_hours=payload.cache_ttl_hours,
+        small_provider=payload.small_provider,
+        small_model=payload.small_model,
+        small_tier_action=payload.small_tier_action,
     )
     if not result["ok"]:
         raise HTTPException(status_code=500, detail=result["error"])
@@ -1027,6 +1054,20 @@ async def providers_list() -> dict:
     return list_providers()
 
 
+@router.get("/providers/{provider_id}/models")
+async def providers_models(provider_id: str) -> dict:
+    """Phase 17.9.4 model catalog for the Connect dialog picker.
+
+    Returns the curated KNOWN_MODELS for ``provider_id``, plus the
+    live runtime catalog for providers that have one (Ollama today).
+    Unknown ids 404.
+    """
+    result = list_provider_models(provider_id)
+    if not result["ok"] and result.get("error_code") == "unknown_provider":
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
 @router.post("/providers/{provider_id}/test")
 async def providers_test(provider_id: str) -> dict:
     result = test_provider_connection(provider_id)
@@ -1050,6 +1091,21 @@ async def providers_set_key(
         raise HTTPException(status_code=404, detail=result["error"])
     if code in {"wrong_auth_type", "empty_api_key"}:
         raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@router.put("/providers/{provider_id}/model")
+async def providers_set_model(
+    provider_id: str, payload: ProviderSetModelPayload
+) -> dict:
+    """Phase 17.9.11: change a provider's model without re-entering its key."""
+    result = update_provider_model(provider_id, model=payload.model)
+    if not result["ok"]:
+        code = result.get("error_code")
+        if code == "unknown_provider":
+            raise HTTPException(status_code=404, detail=result["error"])
+        if code == "not_connected":
+            raise HTTPException(status_code=409, detail=result["error"])
     return result
 
 
