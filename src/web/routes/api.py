@@ -400,25 +400,143 @@ async def manual_apply_target(payload: JobApplyPayload) -> dict:
 
 @router.post("/jobs/generate-material")
 async def generate_job_material(payload: JobMaterialPayload) -> dict:
-    result = await generate_material_for_job_usecase(
-        job_payload=payload.job,
-        material_type=payload.material_type,
-        use_llm=payload.use_llm,
-        template_id=payload.template_id,
-        profile_id=payload.profile_id,
-        strategy=payload.strategy,
-        source_document_id=payload.source_document_id,
-        patch_aggressiveness=payload.patch_aggressiveness,
-        patch_allow_reorder_sections=payload.patch_allow_reorder_sections,
-        patch_allow_add_remove_bullets=payload.patch_allow_add_remove_bullets,
-    )
-    if result["ok"]:
-        return result
+    """Phase 18.2: defaults to enqueue + return ``task_id``.
 
-    status_code = 400
-    if result["error_code"] == "material_generation_failed":
-        status_code = 500
-    raise HTTPException(status_code=status_code, detail=result["error"])
+    The browser tab can close mid-generation without losing work
+    (the worker keeps running) and ``GET /api/tasks/{task_id}``
+    streams progress + artifacts back via :class:`TaskRecord.result`.
+
+    The legacy synchronous path is preserved behind the
+    ``AUTOAPPLY_SYNC_MATERIALS`` env var for soak / local debugging;
+    Phase 18.6 retires that escape hatch.
+    """
+    import os
+
+    if os.environ.get("AUTOAPPLY_SYNC_MATERIALS") == "1":
+        result = await generate_material_for_job_usecase(
+            job_payload=payload.job,
+            material_type=payload.material_type,
+            use_llm=payload.use_llm,
+            template_id=payload.template_id,
+            profile_id=payload.profile_id,
+            strategy=payload.strategy,
+            source_document_id=payload.source_document_id,
+            patch_aggressiveness=payload.patch_aggressiveness,
+            patch_allow_reorder_sections=payload.patch_allow_reorder_sections,
+            patch_allow_add_remove_bullets=payload.patch_allow_add_remove_bullets,
+        )
+        if result["ok"]:
+            return result
+
+        status_code = 400
+        if result["error_code"] == "material_generation_failed":
+            status_code = 500
+        raise HTTPException(status_code=status_code, detail=result["error"])
+
+    return _enqueue_materials_generate_from_web(payload)
+
+
+def _enqueue_materials_generate_from_web(payload: "JobMaterialPayload") -> dict:
+    """Bridge the JobsView payload onto the Phase 14 enqueue contract.
+
+    The ``materials.generate`` task accepts either a stored
+    ``job_id`` (UUID) or an inline ``job`` dict; the JobsView path
+    has scraped search-result data that hasn't been persisted yet,
+    so we pass the dict through and let the task body skip the
+    JobPosting lookup. The audit row gets a deterministic identifier
+    from ``job.source_id`` (or a fresh UUID) so the operator can
+    still find the row in ``/tasks``.
+    """
+    from uuid import uuid4
+
+    from src.application.material_defaults import resolve_material_choice
+    from src.tasks.app import celery_app
+    from src.tasks.base import EnqueueSpec
+    from src.tasks.base import AutoApplyTask as _AutoApplyTask
+    from src.tasks.context import current_tenant_id
+
+    # Resolve overrides so the task body doesn't have to re-derive
+    # them. ``resolve_material_choice`` accepts ``None`` for missing
+    # overrides and falls back to the saved Settings default.
+    document_type = (
+        "cover_letter"
+        if payload.material_type.startswith("cover_letter")
+        else "resume"
+    )
+    try:
+        choice = resolve_material_choice(
+            document_type=document_type,
+            override_strategy=payload.strategy,
+            override_template_id=payload.template_id,
+            override_document_id=payload.source_document_id,
+            override_patch_aggressiveness=payload.patch_aggressiveness,
+            override_patch_allow_reorder_sections=payload.patch_allow_reorder_sections,
+            override_patch_allow_add_remove_bullets=payload.patch_allow_add_remove_bullets,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    job_id = str(payload.job.get("id") or payload.job.get("source_id") or uuid4())
+
+    task_payload: dict[str, Any] = {
+        "job_id": job_id,
+        "job": payload.job,
+        "profile_id": payload.profile_id,
+        "document_types": [
+            "cover_letter" if document_type == "cover_letter" else "resume"
+        ],
+    }
+    if document_type == "resume":
+        task_payload["resume_strategy"] = choice["strategy"]
+        task_payload["resume_template_id"] = choice["template_id"] or payload.template_id
+        task_payload["resume_source_document_id"] = choice["document_id"]
+        task_payload["resume_patch_aggressiveness"] = choice["patch_aggressiveness"]
+        task_payload["resume_patch_allow_reorder_sections"] = choice[
+            "patch_allow_reorder_sections"
+        ]
+        task_payload["resume_patch_allow_add_remove_bullets"] = choice[
+            "patch_allow_add_remove_bullets"
+        ]
+    else:
+        task_payload["cover_letter_strategy"] = choice["strategy"]
+        task_payload["cover_letter_template_id"] = (
+            choice["template_id"] or payload.template_id
+        )
+        task_payload["cover_letter_source_document_id"] = choice["document_id"]
+        task_payload["cover_letter_patch_aggressiveness"] = choice["patch_aggressiveness"]
+        task_payload["cover_letter_patch_allow_reorder_sections"] = choice[
+            "patch_allow_reorder_sections"
+        ]
+        task_payload["cover_letter_patch_allow_add_remove_bullets"] = choice[
+            "patch_allow_add_remove_bullets"
+        ]
+
+    tenant = current_tenant_id() or "default"
+    spec = EnqueueSpec(
+        kind="materials.generate",
+        queue="materials",
+        payload=task_payload,
+        tenant_id=tenant,
+        idempotency_key=f"materials.generate:{job_id}:{payload.material_type}",
+    )
+
+    from src.core.config import load_config
+    from src.core.database import get_session_factory
+
+    factory = get_session_factory(load_config())
+    with factory() as session:
+        task_id = _AutoApplyTask.enqueue(
+            celery_task=celery_app.tasks["materials.generate"],
+            session=session,
+            spec=spec,
+        )
+    return {
+        "ok": True,
+        "status": "queued",
+        "task_id": str(task_id),
+        "material_type": payload.material_type,
+        "poll_url": f"/api/tasks/{task_id}",
+    }
 
 
 @router.get("/templates")
@@ -814,12 +932,26 @@ async def submit_application(application_id: str) -> dict:
 async def regenerate_application_material_route(
     application_id: str, payload: RegenerateMaterialPayload
 ) -> dict:
+    """Phase 18.2: defaults to enqueue + return ``task_id``.
+
+    The synchronous path stays behind ``AUTOAPPLY_SYNC_MATERIALS=1``
+    (Phase 18.6 retires it). The async path enqueues
+    ``materials.generate`` against the application's ``job_id`` so
+    the task body re-uses the canonical generation pipeline + writes
+    artifacts onto the matching ReviewQueueEntry through the same
+    audit hooks every other generation uses.
+    """
+    import os
+
     try:
         from uuid import UUID
 
         application_uuid = UUID(application_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid application ID") from exc
+
+    if os.environ.get("AUTOAPPLY_SYNC_MATERIALS") != "1":
+        return _enqueue_regenerate_material(application_uuid, payload)
 
     try:
         result = await regenerate_application_material(
@@ -1358,3 +1490,113 @@ async def cache_clear_namespace_endpoint(
         )
         raise HTTPException(status_code=status, detail=result)
     return result
+
+
+def _enqueue_regenerate_material(
+    application_uuid: "Any", payload: "RegenerateMaterialPayload"
+) -> dict:
+    """Phase 18.2: enqueue ``materials.generate`` for an existing
+    application's job, returning ``{task_id, poll_url}`` so the SPA
+    can poll ``GET /api/tasks/{task_id}`` for the produced artifacts.
+
+    ``regenerate_application_material``'s logic (lookup the
+    Application, resolve the Job, pick the right
+    ``document_type`` from ``material_type``) is mirrored here at the
+    enqueue boundary; the post-completion writeback to
+    ``Application.resume_version`` / ``cover_letter_version`` is done
+    by the task body via the same code path
+    ``application.prepare`` uses.
+    """
+    from src.application.material_defaults import resolve_material_choice
+    from src.application.regenerate_materials import (
+        MATERIAL_TYPE_TO_DOCUMENT_TYPE,
+    )
+    from src.core.config import load_config
+    from src.core.database import get_session_factory
+    from src.core.models import Application
+    from src.tasks.app import celery_app
+    from src.tasks.base import AutoApplyTask as _AutoApplyTask
+    from src.tasks.base import EnqueueSpec
+    from src.tasks.context import current_tenant_id
+
+    document_type = MATERIAL_TYPE_TO_DOCUMENT_TYPE.get(payload.material_type)
+    if document_type is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported material_type {payload.material_type!r}.",
+        )
+
+    factory = get_session_factory(load_config())
+    with factory() as session:
+        app = session.get(Application, application_uuid)
+        if app is None:
+            raise HTTPException(status_code=404, detail="Application not found.")
+        job_id = str(app.job_id)
+
+    try:
+        choice = resolve_material_choice(
+            document_type=document_type,
+            override_strategy=payload.strategy,
+            override_template_id=payload.template_id,
+            override_document_id=payload.source_document_id,
+            override_patch_aggressiveness=payload.patch_aggressiveness,
+            override_patch_allow_reorder_sections=payload.patch_allow_reorder_sections,
+            override_patch_allow_add_remove_bullets=payload.patch_allow_add_remove_bullets,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    task_payload: dict[str, Any] = {
+        "job_id": job_id,
+        "application_id": str(application_uuid),
+        "document_types": [document_type],
+    }
+    if document_type == "resume":
+        task_payload["resume_strategy"] = choice["strategy"]
+        task_payload["resume_template_id"] = choice["template_id"] or payload.template_id
+        task_payload["resume_source_document_id"] = choice["document_id"]
+        task_payload["resume_patch_aggressiveness"] = choice["patch_aggressiveness"]
+        task_payload["resume_patch_allow_reorder_sections"] = choice[
+            "patch_allow_reorder_sections"
+        ]
+        task_payload["resume_patch_allow_add_remove_bullets"] = choice[
+            "patch_allow_add_remove_bullets"
+        ]
+    else:
+        task_payload["cover_letter_strategy"] = choice["strategy"]
+        task_payload["cover_letter_template_id"] = (
+            choice["template_id"] or payload.template_id
+        )
+        task_payload["cover_letter_source_document_id"] = choice["document_id"]
+        task_payload["cover_letter_patch_aggressiveness"] = choice["patch_aggressiveness"]
+        task_payload["cover_letter_patch_allow_reorder_sections"] = choice[
+            "patch_allow_reorder_sections"
+        ]
+        task_payload["cover_letter_patch_allow_add_remove_bullets"] = choice[
+            "patch_allow_add_remove_bullets"
+        ]
+
+    tenant = current_tenant_id() or "default"
+    spec = EnqueueSpec(
+        kind="materials.generate",
+        queue="materials",
+        payload=task_payload,
+        tenant_id=tenant,
+        idempotency_key=(
+            f"regenerate:{application_uuid}:{payload.material_type}"
+        ),
+    )
+    with factory() as session:
+        task_id = _AutoApplyTask.enqueue(
+            celery_task=celery_app.tasks["materials.generate"],
+            session=session,
+            spec=spec,
+        )
+    return {
+        "ok": True,
+        "status": "queued",
+        "task_id": str(task_id),
+        "material_type": payload.material_type,
+        "application_id": str(application_uuid),
+        "poll_url": f"/api/tasks/{task_id}",
+    }

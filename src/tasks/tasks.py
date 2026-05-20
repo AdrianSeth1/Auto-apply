@@ -68,6 +68,18 @@ class JobEnrichPayload(BaseModel):
 
 class MaterialsGeneratePayload(BaseModel):
     job_id: str
+    # Phase 18.2: optional inline job dict for callers (e.g. the
+    # JobsView "Generate" button) that have search-result data but
+    # haven't persisted a JobPosting yet. When present, the task body
+    # uses this payload directly and skips the JobPosting / JobSnapshot
+    # lookup. ``job_id`` is still required so the audit row carries a
+    # stable identifier.
+    job: dict[str, Any] | None = None
+    # Phase 18.2: when set, the regenerate flow asks the worker to
+    # write the produced artifact paths back onto the Application
+    # row so the kanban / outcome views see the new draft without
+    # the operator having to re-poll.
+    application_id: str | None = None
     profile_id: str | None = None
     template_id: str | None = None
     document_types: list[str] = Field(default_factory=lambda: ["resume", "cover_letter"])
@@ -412,47 +424,55 @@ def materials_generate(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
 
     tenant_id = current_tenant_id() or "default"
 
-    try:
-        job_uuid = UUID(args.job_id)
-    except ValueError:
-        return {
-            "task": "materials.generate",
-            "job_id": args.job_id,
-            "document_types": args.document_types,
-            "status": "invalid_job_id",
-        }
-
-    factory = get_session_factory()
+    # Phase 18.2: if the caller passed an inline ``job`` dict (the
+    # JobsView "Generate" button hands us scraped data that isn't
+    # persisted yet), use it verbatim. Otherwise fall through to the
+    # JobPosting + JobSnapshot lookup.
     job_payload: dict[str, Any] = {}
-    with factory() as session:
-        posting = session.get(JobPosting, job_uuid)
-        if posting is None:
+    job_uuid = None
+    if isinstance(args.job, dict) and args.job:
+        job_payload = dict(args.job)
+    else:
+        try:
+            job_uuid = UUID(args.job_id)
+        except ValueError:
             return {
                 "task": "materials.generate",
                 "job_id": args.job_id,
                 "document_types": args.document_types,
-                "status": "posting_not_found",
+                "status": "invalid_job_id",
             }
-        snapshot = (
-            session.get(JobSnapshot, posting.latest_snapshot_id)
-            if posting.latest_snapshot_id
-            else None
-        )
-        job_payload = {
-            "id": str(posting.id),
-            "source": posting.source,
-            "source_id": posting.source_id,
-            "company": posting.company,
-            "title": snapshot.title if snapshot else "",
-            "location": snapshot.location if snapshot else None,
-            "employment_type": snapshot.employment_type if snapshot else None,
-            "seniority": snapshot.seniority if snapshot else None,
-            "description": snapshot.description if snapshot else None,
-            "requirements": snapshot.requirements if snapshot else None,
-            "application_url": snapshot.application_url if snapshot else None,
-            "ats_type": posting.source,
-            "raw_data": snapshot.raw_data if snapshot else None,
-        }
+
+        factory = get_session_factory()
+        with factory() as session:
+            posting = session.get(JobPosting, job_uuid)
+            if posting is None:
+                return {
+                    "task": "materials.generate",
+                    "job_id": args.job_id,
+                    "document_types": args.document_types,
+                    "status": "posting_not_found",
+                }
+            snapshot = (
+                session.get(JobSnapshot, posting.latest_snapshot_id)
+                if posting.latest_snapshot_id
+                else None
+            )
+            job_payload = {
+                "id": str(posting.id),
+                "source": posting.source,
+                "source_id": posting.source_id,
+                "company": posting.company,
+                "title": snapshot.title if snapshot else "",
+                "location": snapshot.location if snapshot else None,
+                "employment_type": snapshot.employment_type if snapshot else None,
+                "seniority": snapshot.seniority if snapshot else None,
+                "description": snapshot.description if snapshot else None,
+                "requirements": snapshot.requirements if snapshot else None,
+                "application_url": snapshot.application_url if snapshot else None,
+                "ats_type": posting.source,
+                "raw_data": snapshot.raw_data if snapshot else None,
+            }
 
     if not job_payload.get("title"):
         return {
@@ -539,8 +559,14 @@ def materials_generate(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
         artifacts.get("resume", {}).get("path")
         or artifacts.get("resume_docx", {}).get("path")
     )
-    if artifacts:
+    cover_letter_path = (
+        artifacts.get("cover_letter", {}).get("path")
+        or artifacts.get("cover_letter_docx", {}).get("path")
+    )
+    application_updates: dict[str, str] = {}
+    if artifacts and job_uuid is not None:
         try:
+            factory = get_session_factory()
             with factory() as session, session.begin():
                 stmt = (
                     select(ReviewQueueEntry)
@@ -558,12 +584,41 @@ def materials_generate(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
                 "materials.generate: linking artifacts to review entry failed: %s", exc
             )
 
+    # Phase 18.2: when the regenerate flow named an application, write
+    # the new artifact paths back onto that row so the kanban + outcome
+    # views see the new draft. We keep this best-effort so a partial
+    # generation (resume succeeded, cover-letter failed) still updates
+    # what it can.
+    if args.application_id and artifacts:
+        try:
+            from src.core.models import Application  # noqa: PLC0415
+
+            app_uuid = UUID(args.application_id)
+            factory = get_session_factory()
+            with factory() as session, session.begin():
+                app_row = session.get(Application, app_uuid)
+                if app_row is not None:
+                    if resume_path:
+                        app_row.resume_version = resume_path
+                        application_updates["resume_version"] = resume_path
+                    if cover_letter_path:
+                        app_row.cover_letter_version = cover_letter_path
+                        application_updates["cover_letter_version"] = cover_letter_path
+        except (ValueError, Exception) as exc:  # noqa: BLE001
+            logger.warning(
+                "materials.generate: application writeback failed: %s", exc
+            )
+
     return {
         "task": "materials.generate",
         "job_id": args.job_id,
         "document_types": document_types,
         "artifacts": artifacts,
         "errors": errors,
+        "application_id": args.application_id,
+        "application_updates": application_updates,
+        "resume_path": resume_path,
+        "cover_letter_path": cover_letter_path,
         "status": "ok" if not errors else ("partial" if artifacts else "failed"),
     }
 

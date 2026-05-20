@@ -91,6 +91,11 @@ class TaskRowDTO(BaseModel):
     status: str
     attempts: int
     payload: dict[str, Any] | None
+    # Phase 18.2: structured worker return value (artifact paths,
+    # ids, error summaries) persisted by the postrun signal handler.
+    # ``None`` for tasks that haven't completed yet; populated for
+    # ``succeeded`` and ``waiting_human`` rows.
+    result: dict[str, Any] | None
     idempotency_key: str | None
     parent_task_id: str | None
     trace_id: str | None
@@ -115,6 +120,7 @@ class TaskRowDTO(BaseModel):
             status=row.status,
             attempts=row.attempts or 0,
             payload=row.payload,
+            result=row.result,
             idempotency_key=row.idempotency_key,
             parent_task_id=str(row.parent_task_id) if row.parent_task_id else None,
             trace_id=row.trace_id,
