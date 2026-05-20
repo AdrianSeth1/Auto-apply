@@ -84,3 +84,21 @@ cleanup:
   # How long quarantined files live before ``purge_quarantine``
   # permanently deletes them.
   quarantine_days: 7
+# Phase 18.5: process-wide LLM concurrency caps. ``llm.max_concurrent_global``
+# is the ceiling that every dispatch acquires; per-provider entries override
+# the cap for that provider. ``bullet_rewrites.max_concurrent_per_task`` caps
+# the asyncio.gather fan-out inside one ``rewrite_bullets`` call but the
+# global gate still bounds provider load across concurrent workers.
+parallelism:
+  llm:
+    max_concurrent_global: 10
+  bullet_rewrites:
+    max_concurrent_per_task: 5
+  # Per-provider overrides. Add an entry like:
+  #   provider:
+  #     openai:
+  #       max_concurrent: 6
+  #     anthropic:
+  #       max_concurrent: 4
+  # Missing entries inherit the global cap.
+  provider: {}

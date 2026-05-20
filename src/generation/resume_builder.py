@@ -647,33 +647,60 @@ def rewrite_bullets(
     for the patch_existing strategy. For regenerate the caller may
     leave ``mode`` at the default; aggressiveness is meaningful mainly
     when there's an original document the user wants to "preserve".
+
+    Phase 18.5: bullets within one ``rewrite_bullets`` call run
+    concurrently via :mod:`asyncio` capped by
+    ``parallelism.bullet_rewrites.max_concurrent_per_task``. Provider
+    abuse is bounded by the global / per-provider semaphores in
+    :mod:`src.utils.parallelism` so increasing the per-task cap does
+    NOT translate into unbounded LLM concurrency across workers.
     """
-    from src.utils.llm import LLMError
+    import asyncio  # noqa: PLC0415
+
+    return asyncio.run(
+        _rewrite_bullets_async(selected_bullets, jd_tags, mode=mode)
+    )
+
+
+async def _rewrite_bullets_async(
+    selected_bullets: dict[str, list[str]],
+    jd_tags: list[str],
+    *,
+    mode: str = "balanced",
+) -> dict[str, list[str]]:
+    """Phase 18.5 implementation behind :func:`rewrite_bullets`."""
+    import asyncio  # noqa: PLC0415
+
+    from src.utils.llm import LLMError  # noqa: PLC0415
+    from src.utils.parallelism import bullet_rewrite_cap  # noqa: PLC0415
 
     keywords_str = ", ".join(jd_tags[:15])
+    cap = max(1, bullet_rewrite_cap())
+    sem = asyncio.Semaphore(cap)
 
-    rewritten: dict[str, list[str]] = {}
-    for entity, bullets in selected_bullets.items():
-        new_bullets = []
-        for bullet in bullets:
+    async def _one(bullet: str) -> str:
+        async with sem:
             try:
-                rewrite = _rewrite_single_bullet(bullet, keywords_str, mode=mode)
+                rewrite = await asyncio.to_thread(
+                    _rewrite_single_bullet, bullet, keywords_str, mode=mode
+                )
                 new_text = rewrite.rewritten_bullet
-                # Fact-drift check: rewritten bullet should be similar length
                 if (
                     rewrite.changed_claims
                     or len(new_text) > len(bullet) * 2
                     or len(new_text) < len(bullet) * 0.3
                 ):
                     logger.warning("Rewrite drift detected for bullet, keeping original")
-                    new_bullets.append(bullet)
-                else:
-                    new_bullets.append(new_text)
-            except (LLMError, Exception) as e:
-                logger.debug("Rewrite failed for bullet: %s", e)
-                new_bullets.append(bullet)
-        rewritten[entity] = new_bullets
+                    return bullet
+                return new_text
+            except (LLMError, Exception) as exc:  # noqa: BLE001
+                logger.debug("Rewrite failed for bullet: %s", exc)
+                return bullet
 
+    rewritten: dict[str, list[str]] = {}
+    for entity, bullets in selected_bullets.items():
+        results = await asyncio.gather(*[_one(b) for b in bullets])
+        rewritten[entity] = list(results)
     return rewritten
 
 

@@ -487,68 +487,90 @@ def materials_generate(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
     artifacts: dict[str, dict[str, Any]] = {}
     errors: list[dict[str, str]] = []
 
-    for doc_type in document_types:
-        # Map abstract "resume" / "cover_letter" -> material_type the
-        # generator expects. Default to DOCX since every shipped
-        # template renders it.
+    def _resolve_overrides(doc_type: str) -> tuple[str, dict[str, Any]] | None:
         if doc_type.startswith("resume"):
-            material_type = "resume_docx"
-            strategy = args.resume_strategy
-            template_id = args.resume_template_id
-            source_document_id = args.resume_source_document_id
-            patch_aggr = args.resume_patch_aggressiveness
-            patch_reorder = args.resume_patch_allow_reorder_sections
-            patch_addremove = args.resume_patch_allow_add_remove_bullets
-        elif doc_type.startswith("cover_letter"):
-            material_type = "cover_letter_docx"
-            strategy = args.cover_letter_strategy
-            template_id = args.cover_letter_template_id
-            source_document_id = args.cover_letter_source_document_id
-            patch_aggr = args.cover_letter_patch_aggressiveness
-            patch_reorder = args.cover_letter_patch_allow_reorder_sections
-            patch_addremove = args.cover_letter_patch_allow_add_remove_bullets
-        else:
-            errors.append({"document_type": doc_type, "error": "unknown_document_type"})
-            continue
+            return "resume_docx", {
+                "strategy": args.resume_strategy,
+                "template_id": args.resume_template_id,
+                "source_document_id": args.resume_source_document_id,
+                "patch_aggressiveness": args.resume_patch_aggressiveness,
+                "patch_allow_reorder_sections": args.resume_patch_allow_reorder_sections,
+                "patch_allow_add_remove_bullets": args.resume_patch_allow_add_remove_bullets,
+            }
+        if doc_type.startswith("cover_letter"):
+            return "cover_letter_docx", {
+                "strategy": args.cover_letter_strategy,
+                "template_id": args.cover_letter_template_id,
+                "source_document_id": args.cover_letter_source_document_id,
+                "patch_aggressiveness": args.cover_letter_patch_aggressiveness,
+                "patch_allow_reorder_sections": args.cover_letter_patch_allow_reorder_sections,
+                "patch_allow_add_remove_bullets": args.cover_letter_patch_allow_add_remove_bullets,
+            }
+        return None
 
+    async def _generate_one(doc_type: str) -> tuple[str, dict[str, Any] | None, dict | None]:
+        resolved = _resolve_overrides(doc_type)
+        if resolved is None:
+            return doc_type, None, {
+                "document_type": doc_type,
+                "error": "unknown_document_type",
+            }
+        material_type, overrides = resolved
         try:
-            result = asyncio.run(
-                generate_material_for_job(
-                    job_payload=job_payload,
-                    material_type=material_type,
-                    use_llm=False,
-                    template_id=template_id,
-                    profile_id=args.profile_id,
-                    strategy=strategy,
-                    source_document_id=source_document_id,
-                    patch_aggressiveness=patch_aggr,
-                    patch_allow_reorder_sections=patch_reorder,
-                    patch_allow_add_remove_bullets=patch_addremove,
-                )
+            result = await generate_material_for_job(
+                job_payload=job_payload,
+                material_type=material_type,
+                use_llm=False,
+                template_id=overrides["template_id"],
+                profile_id=args.profile_id,
+                strategy=overrides["strategy"],
+                source_document_id=overrides["source_document_id"],
+                patch_aggressiveness=overrides["patch_aggressiveness"],
+                patch_allow_reorder_sections=overrides["patch_allow_reorder_sections"],
+                patch_allow_add_remove_bullets=overrides["patch_allow_add_remove_bullets"],
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("materials.generate: %s failed", material_type)
-            errors.append({"document_type": doc_type, "error": str(exc)})
-            continue
+            return doc_type, None, {"document_type": doc_type, "error": str(exc)}
 
         if not result.get("ok"):
-            errors.append(
-                {
-                    "document_type": doc_type,
-                    "error": result.get("error") or "generation_failed",
-                    "error_code": result.get("error_code") or "generation_failed",
-                }
-            )
-            continue
+            return doc_type, None, {
+                "document_type": doc_type,
+                "error": result.get("error") or "generation_failed",
+                "error_code": result.get("error_code") or "generation_failed",
+            }
         artifact = result.get("artifact") or {}
-        artifacts[doc_type] = {
-            "material_type": result.get("material_type"),
-            "path": artifact.get("path"),
-            "filename": artifact.get("filename"),
-            "artifacts": result.get("artifacts"),
-            "strategy": result.get("strategy"),
-            "strategy_notes": result.get("strategy_notes"),
-        }
+        return (
+            doc_type,
+            {
+                "material_type": result.get("material_type"),
+                "path": artifact.get("path"),
+                "filename": artifact.get("filename"),
+                "artifacts": result.get("artifacts"),
+                "strategy": result.get("strategy"),
+                "strategy_notes": result.get("strategy_notes"),
+            },
+            None,
+        )
+
+    # Phase 18.5: resume + cover-letter for a single job run
+    # concurrently via asyncio.gather. The two generators share the
+    # same job + profile data but produce independent artifacts, so
+    # the only contention is on the global / per-provider LLM gate
+    # in :mod:`src.utils.parallelism` (which is the whole point of
+    # running them in parallel -- the gate caps provider load while
+    # local concurrency cuts wall-clock).
+    async def _generate_all() -> None:
+        results = await asyncio.gather(
+            *[_generate_one(dt) for dt in document_types]
+        )
+        for doc_type, artifact_payload, error in results:
+            if error is not None:
+                errors.append(error)
+            if artifact_payload is not None:
+                artifacts[doc_type] = artifact_payload
+
+    asyncio.run(_generate_all())
 
     # Link the produced files onto any pending review-queue entry for
     # this posting so the kanban can preview them without re-running

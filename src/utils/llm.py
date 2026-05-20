@@ -382,6 +382,12 @@ def generate_text(
             )
             return cached_value
 
+    # Phase 18.5: every dispatch is funnelled through the global +
+    # per-provider rate-limit gate so concurrent task fan-out (e.g.
+    # asyncio.gather over bullet rewrites) can't multiply into
+    # provider abuse.
+    from src.utils.parallelism import llm_call_gate  # noqa: PLC0415
+
     for provider in providers:
         start = time.monotonic()
         attempt: dict[str, Any] = {
@@ -394,14 +400,15 @@ def generate_text(
         attempts.append(attempt)
         try:
             provider_model = model_override if provider == model_override_provider else None
-            result = _call_provider(
-                provider,
-                prompt,
-                system=system,
-                timeout=timeout,
-                output_format=output_format,
-                model=provider_model,
-            )
+            with llm_call_gate(provider):
+                result = _call_provider(
+                    provider,
+                    prompt,
+                    system=system,
+                    timeout=timeout,
+                    output_format=output_format,
+                    model=provider_model,
+                )
         except LLMError as exc:
             attempt["latency_ms"] = int((time.monotonic() - start) * 1000)
             kind = _attempt_kind(exc)

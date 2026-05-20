@@ -122,6 +122,41 @@ def parse_requirements(description: str, use_llm: bool = True) -> JobRequirement
     return _parse_with_regex(text)
 
 
+async def parse_requirements_batch(
+    descriptions: list[str | None],
+    *,
+    use_llm: bool = True,
+    max_concurrent: int | None = None,
+) -> list[JobRequirements]:
+    """Phase 18.5: parse N descriptions concurrently.
+
+    Order is preserved -- the i-th return matches the i-th input. The
+    per-batch concurrency cap defaults to the global LLM cap so a
+    huge search post-processing fan-out doesn't multiply provider
+    load. ``parse_requirements`` itself goes through the
+    ``llm_call_gate`` for global / per-provider throttling.
+    """
+    import asyncio
+
+    from src.utils.parallelism import global_cap
+
+    if not descriptions:
+        return []
+
+    cap = max(1, max_concurrent or global_cap())
+    sem = asyncio.Semaphore(cap)
+
+    async def _one(description: str | None) -> JobRequirements:
+        if not description or not description.strip():
+            return JobRequirements()
+        async with sem:
+            return await asyncio.to_thread(
+                parse_requirements, description, use_llm
+            )
+
+    return list(await asyncio.gather(*[_one(d) for d in descriptions]))
+
+
 def _parse_with_llm(text: str) -> JobRequirements:
     """Use the configured LLM to extract structured requirements.
 
