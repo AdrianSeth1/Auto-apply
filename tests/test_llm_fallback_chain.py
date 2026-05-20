@@ -76,6 +76,127 @@ class TestWritersSyncListAndScalar:
         assert out["llm"]["fallback_providers"] == []
 
 
+class TestUpdateLLMSettingsSmallTier:
+    """Phase 17.9.9: `update_llm_settings` accepts an optional small-tier
+    block via a three-state action (preserve / set / clear)."""
+
+    def test_preserve_is_default(self, tmp_path):
+        """Existing callers that don't pass small_tier_action keep
+        whatever is already in the file."""
+        from src.core.config import update_llm_settings  # noqa: PLC0415
+
+        config_path = tmp_path / "settings.yaml"
+        config_path.write_text(
+            "llm:\n"
+            "  primary_provider: claude-cli\n"
+            "  small_provider: groq\n"
+            "  small_model: llama-3.3-70b-versatile\n",
+            encoding="utf-8",
+        )
+        update_llm_settings(
+            "anthropic",
+            fallback_provider=None,
+            allow_fallback=False,
+            config_path=config_path,
+        )
+        import yaml  # noqa: PLC0415
+
+        out = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert out["llm"]["small_provider"] == "groq"
+        assert out["llm"]["small_model"] == "llama-3.3-70b-versatile"
+
+    def test_set_writes_both_keys(self, tmp_path):
+        from src.core.config import update_llm_settings  # noqa: PLC0415
+
+        config_path = tmp_path / "settings.yaml"
+        config_path.write_text(
+            "llm:\n  primary_provider: claude-cli\n",
+            encoding="utf-8",
+        )
+        update_llm_settings(
+            "claude-cli",
+            fallback_provider=None,
+            allow_fallback=False,
+            small_provider="groq",
+            small_model="llama-3.3-70b-versatile",
+            small_tier_action="set",
+            config_path=config_path,
+        )
+        import yaml  # noqa: PLC0415
+
+        out = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert out["llm"]["small_provider"] == "groq"
+        assert out["llm"]["small_model"] == "llama-3.3-70b-versatile"
+
+    def test_set_with_empty_provider_writes_null(self, tmp_path):
+        """Disabling the small tier via the action='set' path lands an
+        explicit null so the YAML reflects writer intent."""
+        from src.core.config import update_llm_settings  # noqa: PLC0415
+
+        config_path = tmp_path / "settings.yaml"
+        config_path.write_text(
+            "llm:\n"
+            "  primary_provider: claude-cli\n"
+            "  small_provider: groq\n",
+            encoding="utf-8",
+        )
+        update_llm_settings(
+            "claude-cli",
+            fallback_provider=None,
+            allow_fallback=False,
+            small_provider="",
+            small_model="",
+            small_tier_action="set",
+            config_path=config_path,
+        )
+        import yaml  # noqa: PLC0415
+
+        out = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert out["llm"]["small_provider"] is None
+        assert out["llm"]["small_model"] is None
+
+    def test_clear_removes_keys(self, tmp_path):
+        from src.core.config import update_llm_settings  # noqa: PLC0415
+
+        config_path = tmp_path / "settings.yaml"
+        config_path.write_text(
+            "llm:\n"
+            "  primary_provider: claude-cli\n"
+            "  small_provider: groq\n"
+            "  small_model: x\n",
+            encoding="utf-8",
+        )
+        update_llm_settings(
+            "claude-cli",
+            fallback_provider=None,
+            allow_fallback=False,
+            small_tier_action="clear",
+            config_path=config_path,
+        )
+        import yaml  # noqa: PLC0415
+
+        out = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "small_provider" not in out["llm"]
+        assert "small_model" not in out["llm"]
+
+    def test_unknown_action_raises(self, tmp_path):
+        from src.core.config import update_llm_settings  # noqa: PLC0415
+
+        config_path = tmp_path / "settings.yaml"
+        config_path.write_text(
+            "llm:\n  primary_provider: claude-cli\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Unknown small_tier_action"):
+            update_llm_settings(
+                "claude-cli",
+                fallback_provider=None,
+                allow_fallback=False,
+                small_tier_action="kaboom",
+                config_path=config_path,
+            )
+
+
 class TestSettingsChain:
     def test_list_shape_is_honoured(self):
         settings = get_llm_settings(

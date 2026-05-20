@@ -238,6 +238,13 @@ class LLMSettingsPayload(BaseModel):
     allow_fallback: bool = False
     cache_enabled: bool = True
     cache_ttl_hours: int = 24
+    # Phase 17.9.9: optional small-tier knobs. Both are nullable to
+    # represent "disabled". small_tier_action distinguishes "the client
+    # is not touching these" (preserve, default) from "set" and "clear",
+    # mirroring the same three-state contract on the writer below.
+    small_provider: str | None = None
+    small_model: str | None = None
+    small_tier_action: str = "preserve"
 
 
 class ProviderSetKeyPayload(BaseModel):
@@ -997,12 +1004,23 @@ async def update_material_defaults(payload: MaterialDefaultsPayload) -> dict:
 
 @router.put("/settings/llm")
 async def update_settings(payload: LLMSettingsPayload) -> dict:
+    if payload.small_tier_action not in {"preserve", "set", "clear"}:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid small_tier_action {payload.small_tier_action!r}; "
+                "expected 'preserve', 'set', or 'clear'."
+            ),
+        )
     result = update_llm_settings_data(
         primary_provider=payload.primary_provider,
         fallback_provider=payload.fallback_provider,
         allow_fallback=payload.allow_fallback,
         cache_enabled=payload.cache_enabled,
         cache_ttl_hours=payload.cache_ttl_hours,
+        small_provider=payload.small_provider,
+        small_model=payload.small_model,
+        small_tier_action=payload.small_tier_action,
     )
     if not result["ok"]:
         raise HTTPException(status_code=500, detail=result["error"])

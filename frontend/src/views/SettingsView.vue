@@ -149,7 +149,18 @@ const state = reactive({
     allow_fallback: false,
     cache_enabled: true,
     cache_ttl_hours: 24,
+    // Phase 17.9.9: small-tier knobs. "" means "disabled" -> serialised
+    // as small_tier_action='clear' on save so we delete the keys.
+    small_provider: "",
+    small_model: "",
   },
+  // Phase 17.9.9: model catalog cache keyed by provider id, populated
+  // when the user clicks the Small-model dropdown. We piggy-back on
+  // the existing GET /api/providers/{id}/models route (also used by
+  // the Connect dialog) so a switch between two configured providers
+  // doesn't refetch a list we've already seen this session.
+  smallTierModels: reactive({}),
+  smallTierModelsLoading: false,
   // Phase 17.8: per-document-type material strategy defaults.
   materialDefaults: {
     loading: true,
@@ -251,6 +262,10 @@ function syncForm() {
   state.form.allow_fallback = Boolean(state.data.llm.allow_fallback)
   state.form.cache_enabled = Boolean(state.data.search_cache?.enabled)
   state.form.cache_ttl_hours = state.data.search_cache?.ttl_hours ?? 24
+  // Phase 17.9.9: small-tier knobs. "" in the dropdown means
+  // "disabled" -> we'll send small_tier_action='clear' on save.
+  state.form.small_provider = state.data.llm.small_provider || ""
+  state.form.small_model = state.data.llm.small_model || ""
 }
 
 async function loadSettings() {
@@ -258,6 +273,12 @@ async function loadSettings() {
   try {
     state.data = await api.settings()
     syncForm()
+    // Phase 17.9.9: if the saved config already routes through a
+    // small_provider, preload its catalog so the model dropdown is
+    // ready the moment the user opens the section.
+    if (state.form.small_provider) {
+      void ensureSmallTierCatalog(state.form.small_provider)
+    }
   } catch (error) {
     state.error = error.message
   } finally {
@@ -441,12 +462,23 @@ async function persistSettings({ keepMessage = false } = {}) {
   state.error = ""
   if (!keepMessage) state.message = ""
   try {
+    // Phase 17.9.9: serialise the small-tier knobs. Empty provider is
+    // "disabled" and translates to small_tier_action='clear' so the
+    // backend removes the keys from settings.yaml rather than writing
+    // an explicit null (which would still be honoured but clutters
+    // the file).
+    const hasSmallTier = Boolean(state.form.small_provider)
     state.data = await api.updateSettings({
       primary_provider: state.form.primary_provider,
       fallback_provider: state.form.fallback_provider || null,
       allow_fallback: state.form.allow_fallback,
       cache_enabled: state.form.cache_enabled,
       cache_ttl_hours: Number(state.form.cache_ttl_hours) || 24,
+      small_provider: hasSmallTier ? state.form.small_provider : null,
+      small_model: hasSmallTier
+        ? state.form.small_model || null
+        : null,
+      small_tier_action: hasSmallTier ? "set" : "clear",
     })
     state.suspendAutosave = true
     syncForm()
@@ -589,6 +621,45 @@ async function submitConnect() {
   }
 }
 
+// Phase 17.9.9: model catalog for the Small-model tier's model picker.
+// Lazy-loaded the first time the user picks a small_provider; cached
+// for the session so changing providers back and forth is instant.
+async function ensureSmallTierCatalog(providerId) {
+  if (!providerId) return
+  if (state.smallTierModels[providerId]) return
+  state.smallTierModelsLoading = true
+  try {
+    const result = await api.providerModels(providerId)
+    if (result?.ok) {
+      state.smallTierModels[providerId] = {
+        models: result.models || [],
+        default_model: result.default_model || "",
+      }
+    }
+  } catch (_err) {
+    // Non-fatal -- the input falls back to a free-text field.
+  } finally {
+    state.smallTierModelsLoading = false
+  }
+}
+
+function onSmallProviderChange() {
+  // Switching providers invalidates whatever model id was selected
+  // because each provider has its own catalog. Default to that
+  // provider's default_model once the catalog lands; until then,
+  // wipe so the user doesn't accidentally submit a model from the
+  // previous provider.
+  state.form.small_model = ""
+  if (state.form.small_provider) {
+    ensureSmallTierCatalog(state.form.small_provider).then(() => {
+      const cached = state.smallTierModels[state.form.small_provider]
+      if (cached && !state.form.small_model) {
+        state.form.small_model = cached.default_model || ""
+      }
+    })
+  }
+}
+
 async function testProvider(provider) {
   const op = providerOp(provider.id)
   op.testing = true
@@ -678,6 +749,18 @@ async function clearLinkedInSession() {
 
 watch(
   () => [state.form.primary_provider, state.form.fallback_provider, state.form.allow_fallback],
+  (_, previous) => {
+    if (previous) {
+      void persistSettings({ keepMessage: true })
+    }
+  },
+)
+
+// Phase 17.9.9: small-tier knobs autosave too. Kept in their own watch
+// so existing primary/fallback callsites don't re-trigger on a small-
+// tier change (avoids double-saves when the user flips both fields).
+watch(
+  () => [state.form.small_provider, state.form.small_model],
   (_, previous) => {
     if (previous) {
       void persistSettings({ keepMessage: true })
@@ -814,6 +897,78 @@ function isPrimary(provider) {
             />
             <span>Auto fallback when the primary provider fails</span>
           </label>
+        </section>
+
+        <div class="border-t border-border"></div>
+
+        <!-- Sub-section: Small-model tier (Phase 17.9.9) -->
+        <section class="space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Small-model tier
+              <Badge variant="outline" class="ml-1 text-[10px] uppercase tracking-wide">
+                Optional
+              </Badge>
+            </h3>
+            <Badge v-if="state.form.small_provider" variant="default" class="text-[10px] uppercase tracking-wide">
+              Active
+            </Badge>
+            <Badge v-else variant="secondary" class="text-[10px] uppercase tracking-wide">
+              Disabled
+            </Badge>
+          </div>
+          <p class="text-xs text-muted-foreground">
+            Route extraction-style LLM calls (job-description parsing, resume import) through a cheaper model.
+            Creative paths (cover letter, resume rewrite) always stay on the primary tier. Pick "Disabled" to
+            send everything through the primary.
+          </p>
+          <div class="grid gap-3 md:grid-cols-2">
+            <label class="space-y-1.5">
+              <span class="text-xs font-medium text-muted-foreground">Provider</span>
+              <select
+                v-model="state.form.small_provider"
+                aria-label="Small-tier provider"
+                class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                @change="onSmallProviderChange"
+              >
+                <option value="">Disabled (use primary for everything)</option>
+                <option
+                  v-for="p in connectedProviders"
+                  :key="p.id"
+                  :value="p.id"
+                >
+                  {{ p.display_name }}
+                </option>
+              </select>
+            </label>
+            <label class="space-y-1.5">
+              <span class="text-xs font-medium text-muted-foreground">
+                Model
+                <span v-if="state.smallTierModelsLoading" class="ml-1 text-muted-foreground/70">loading…</span>
+              </span>
+              <select
+                v-if="state.form.small_provider && state.smallTierModels[state.form.small_provider]?.models?.length"
+                v-model="state.form.small_model"
+                aria-label="Small-tier model"
+                class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                <option value="">Provider default</option>
+                <option
+                  v-for="m in state.smallTierModels[state.form.small_provider].models"
+                  :key="m.id"
+                  :value="m.id"
+                >
+                  {{ m.display_name || m.id }}
+                </option>
+              </select>
+              <Input
+                v-else
+                v-model="state.form.small_model"
+                :disabled="!state.form.small_provider"
+                placeholder="Model id (or leave blank for provider default)"
+              />
+            </label>
+          </div>
         </section>
 
         <div class="border-t border-border"></div>

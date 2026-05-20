@@ -968,6 +968,60 @@ class TestSettingsApi:
         assert response.status_code == 200
         assert response.json()["message"] == "LLM settings updated successfully."
 
+    def test_settings_update_llm_forwards_small_tier(self, client):
+        """Phase 17.9.9: small_provider / small_model / small_tier_action
+        must reach update_llm_settings_data as keyword arguments."""
+        with patch(
+            "src.web.routes.api.update_llm_settings_data",
+            return_value={
+                "ok": True,
+                "status": "updated",
+                "message": "LLM settings updated successfully.",
+                "llm": {
+                    "primary_provider": "anthropic",
+                    "fallback_provider": None,
+                    "allow_fallback": False,
+                    "small_provider": "groq",
+                    "small_model": "llama-3.3-70b-versatile",
+                },
+                "search_cache": {"enabled": True, "ttl_hours": 24},
+                "available_providers": {},
+                "config_path": "config/settings.yaml",
+            },
+        ) as mocked:
+            response = client.put(
+                "/api/settings/llm",
+                json={
+                    "primary_provider": "anthropic",
+                    "fallback_provider": None,
+                    "allow_fallback": False,
+                    "cache_enabled": True,
+                    "cache_ttl_hours": 24,
+                    "small_provider": "groq",
+                    "small_model": "llama-3.3-70b-versatile",
+                    "small_tier_action": "set",
+                },
+            )
+        assert response.status_code == 200
+        kwargs = mocked.call_args.kwargs
+        assert kwargs["small_provider"] == "groq"
+        assert kwargs["small_model"] == "llama-3.3-70b-versatile"
+        assert kwargs["small_tier_action"] == "set"
+
+    def test_settings_update_llm_rejects_bad_small_tier_action(self, client):
+        response = client.put(
+            "/api/settings/llm",
+            json={
+                "primary_provider": "anthropic",
+                "fallback_provider": None,
+                "allow_fallback": False,
+                "cache_enabled": True,
+                "cache_ttl_hours": 24,
+                "small_tier_action": "kaboom",
+            },
+        )
+        assert response.status_code == 400
+
     def test_settings_clear_search_cache(self, client):
         with patch(
             "src.web.routes.api.clear_search_cache_data",
