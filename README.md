@@ -23,7 +23,7 @@ AutoApply is designed for users who want automation without losing control over 
 
 Core product development is complete through **Phase 17.9: LLM Provider Expansion** (layered on top of Phase 17.8: Material Strategy & Document Library).
 
-The current application includes the Job Index, task queue, plan-run automation, review queue, document library, material strategy defaults, multi-vendor provider management with per-provider model catalogs, a Settings model picker, custom OpenAI-compatible provider support, and an optional cheap-model tier, plus LinkedIn session management and the modern Vue web console. The next planned product hardening area is **Phase 18: Worker Activation, Reliability, Parallelism, Cleanup** (re-ordered 2026-05-19). Multi-tenancy & auth hardening, originally Phase 18, has been deferred to Phase 19 until the personal-version product is feature-complete.
+The current application includes the Job Index, task queue, plan-run automation, review queue, document library, material strategy defaults, multi-vendor provider management with per-provider model catalogs, a Settings model picker, custom OpenAI-compatible provider support, and an optional cheap-model tier, plus LinkedIn session management and the modern Vue web console. The roadmap from here is **Phase 18** (Worker Activation, Reliability, Parallelism, Cleanup) → **Phase 19** (Per-Posting Tag Cache & Filter Fast Path) → **Phase 20** (Custom Job Sources / Connectors) → **Phase 21** (Multi-tenancy & Auth Hardening, deferred until the personal-version product is feature-complete).
 
 Latest local verification in this workspace:
 

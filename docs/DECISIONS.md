@@ -182,7 +182,7 @@ This log captures key decisions, their rationale, and alternatives considered. E
 
 **Trade-off**: Adds an operational dependency. Local-only developers must run Redis (covered by `docker-compose up`); the credential surface gains `REDIS_URL`. Accepted because the cost is small relative to the architectural simplification it brings to Phases 12-18. Memory profile: < 100 MB through Phase 17 (cache entries are mostly JSON-serialized LLM responses with 7-day TTL).
 
-**Scope guards**: No Redis Cluster / Sentinel until a real availability requirement exists (Phase 18+, and only if a paid tier is launched). No Redis-as-source-of-truth ever -- Redis is purely derived state, must be reconstructible from Postgres.
+**Scope guards**: No Redis Cluster / Sentinel until a real availability requirement exists (Phase 21+, and only if a paid tier is launched). No Redis-as-source-of-truth ever -- Redis is purely derived state, must be reconstructible from Postgres.
 
 ---
 
@@ -205,11 +205,11 @@ This log captures key decisions, their rationale, and alternatives considered. E
 
 ## D020 — `tenant_id` on every new table from Phase 12 onward (2026-05-12)
 
-**Decision**: Every table created from Phase 12 forward carries a non-null `tenant_id` column (default value `"default"` until Phase 19 activates real multi-tenancy; this was originally Phase 18 before the 2026-05-19 roadmap reorder). Every new Redis key is prefixed `tenant:{id}:`. Every new background task accepts an explicit tenant context. No exceptions, including tables that "feel global" (e.g. `refresh_tasks`, `search_queries`).
+**Decision**: Every table created from Phase 12 forward carries a non-null `tenant_id` column (default value `"default"` until Phase 21 activates real multi-tenancy; this was originally Phase 18, then Phase 19, then Phase 20, deferred each time as new product work — LLM provider expansion, per-posting cache, custom job sources — landed ahead of it). Every new Redis key is prefixed `tenant:{id}:`. Every new background task accepts an explicit tenant context. No exceptions, including tables that "feel global" (e.g. `refresh_tasks`, `search_queries`).
 
-**Rationale**: Retrofitting multi-tenancy onto a populated single-tenant schema is a known nightmare: every query gets a `WHERE tenant_id = ?` audit, every Redis key gets a rename migration, every cached result gets invalidated. Doing it pre-emptively from Phase 12 -- when the new tables are still empty in production -- adds one column and ~zero developer friction. Phase 19 then becomes "fill in the middleware and RLS policies" rather than "rewrite the schema".
+**Rationale**: Retrofitting multi-tenancy onto a populated single-tenant schema is a known nightmare: every query gets a `WHERE tenant_id = ?` audit, every Redis key gets a rename migration, every cached result gets invalidated. Doing it pre-emptively from Phase 12 -- when the new tables are still empty in production -- adds one column and ~zero developer friction. Phase 21 then becomes "fill in the middleware and RLS policies" rather than "rewrite the schema". The discipline still applies to the new tables introduced in Phases 19-20 (`job_posting_scores`, `job_sources`, `scraper_templates`).
 
-**Trade-off**: Every Phase 12-18 PR carries an extra `tenant_id` column and a `default` literal in seed data. Accepted as cheap insurance.
+**Trade-off**: Every Phase 12-20 PR carries an extra `tenant_id` column and a `default` literal in seed data. Accepted as cheap insurance.
 
 **Enforcement**: Phase 11.3 docs sync notes this rule; subsequent code review treats a missing `tenant_id` on a new table as a P1 blocker.
 
@@ -320,20 +320,20 @@ This log captures key decisions, their rationale, and alternatives considered. E
 
 **Rationale (a)**:
 
-1. **D020's "tenant_id from day one" promise was only kept for Phase 12-13 tables.** Phase 11 and earlier tables (`jobs`, `applications`, `applicant_profile`, etc.) ship today without the column. If Phase 14-17 builds new code on these tables under the existing single-tenant assumption, Phase 18 either has to rewrite the new code or fail to ever truly enforce tenancy. Doing the retrofit now — when the legacy tables hold one developer's data, not production user data — is a 0.3-week migration. Doing it at Phase 18 is days of careful production-data backfill.
+1. **D020's "tenant_id from day one" promise was only kept for Phase 12-13 tables.** Phase 11 and earlier tables (`jobs`, `applications`, `applicant_profile`, etc.) ship today without the column. If Phase 14-17 builds new code on these tables under the existing single-tenant assumption, the eventual multi-tenancy phase (now Phase 21, originally Phase 18) either has to rewrite the new code or fail to ever truly enforce tenancy. Doing the retrofit now — when the legacy tables hold one developer's data, not production user data — is a 0.3-week migration. Doing it at activation time is days of careful production-data backfill.
 2. **Schema enforcement beats code discipline.** D020 said "review treats a missing `tenant_id` on a new table as a P1 blocker." That works for new tables. It does not work for "a new query path that touches a legacy table without filtering by tenant" — reviewers will miss those. With the column physically present and the new-code convention to require explicit tenant context, schema is what enforces the rule.
-3. **It is a no-op for existing behavior.** Default value `'default'`, no NOT-NULL violations on backfill, no query path needs to change. The full test suite must pass unchanged after the migration. This is a deliberately small commitment, not a Phase 18 preview.
+3. **It is a no-op for existing behavior.** Default value `'default'`, no NOT-NULL violations on backfill, no query path needs to change. The full test suite must pass unchanged after the migration. This is a deliberately small commitment, not a multi-tenancy-phase preview.
 
 **Rationale (b)**:
 
 1. **File-backed JSON in `data/agent_gate/` is single-process by design.** Phase 14 introduces a Celery worker pool. Two workers reading/writing the same gate JSON file is a race condition waiting to happen. The Phase 17 review queue (D023, Phase 17.2) is a separate table; without consolidation we end up with two gate-like backends.
 2. **"Needs human" should not block a worker.** The old file-backed gate parks a Python thread waiting for approval. In a Celery pool, that thread is one of N concurrent slots — parking it deadlocks the worker. The DB-backed gate transitions task state and *releases* the worker; approval enqueues a fresh `resume` task that runs on whichever worker is next idle.
-3. **Audit + tenant + trace integration come for free.** The DB-backed gate joins to the Phase 14 audit table on `task_id` and to the trace store via `trace_id`. Phase 18 tenant filtering applies via the same `tenant_id` column the audit table uses. Phase 17's review queue can be thought of as a specialization of the gate queue (specifically, the `application.submit` gate items) — they share schema.
+3. **Audit + tenant + trace integration come for free.** The DB-backed gate joins to the Phase 14 audit table on `task_id` and to the trace store via `trace_id`. The eventual multi-tenancy phase (Phase 21) tenant filtering applies via the same `tenant_id` column the audit table uses. Phase 17's review queue can be thought of as a specialization of the gate queue (specifically, the `application.submit` gate items) — they share schema.
 
 **Trade-offs**:
 - Phase 13.9 adds one alembic migration to ship before Phase 14 PRs open. Cost: one focused session, plus a manual `alembic upgrade` on the developer's working DB. Accepted.
 - Phase 14.4 has a one-release compat layer keeping the old file-backed gate readable. After that release, `src/agent/gate/queue.py` is deleted and any external integrations (none today) must migrate. Accepted.
-- The "default tenant" fallback persists from Phase 13.9 through Phase 18.2. During this window a misconfigured client can read other tenants' data (because the legacy query paths are not filtered). This is the same exposure as today's single-tenant deployment — no regression — but the doc must call it out so it does not surprise anyone running a multi-tenant pilot before Phase 18 lands.
+- The "default tenant" fallback persists from Phase 13.9 through the eventual multi-tenancy phase's auth-middleware sub-phase (Phase 21.2, originally Phase 18.2). During this window a misconfigured client can read other tenants' data (because the legacy query paths are not filtered). This is the same exposure as today's single-tenant deployment — no regression — but the doc must call it out so it does not surprise anyone running a multi-tenant pilot before the auth middleware lands.
 
 **Enforcement**:
 - Phase 13.9 verification: `alembic upgrade head` is idempotent, full test suite passes unchanged, every table reachable from `Base.metadata` has a `tenant_id` column.

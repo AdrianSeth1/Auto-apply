@@ -30,7 +30,7 @@ reinvent it (see D026).
 exists, so Phase 15 is not "build LaTeX from scratch" — it is "add the template
 package spec + manifest + adapter convention on top of an existing engine."
 
-The 2026-05-19 refresh records Phase 17.9 as complete: the provider layer now covers OpenAI, Anthropic, Gemini, DeepSeek, Moonshot/Kimi, Qwen, xAI Grok, Groq, Mistral, OpenRouter, Ollama, Claude CLI, Codex CLI, and user-defined OpenAI-compatible providers. Phase 18 is now worker activation / reliability / parallelism / cleanup; multi-tenancy and auth hardening moved to Phase 19.
+The 2026-05-19 refresh records Phase 17.9 as complete: the provider layer now covers OpenAI, Anthropic, Gemini, DeepSeek, Moonshot/Kimi, Qwen, xAI Grok, Groq, Mistral, OpenRouter, Ollama, Claude CLI, Codex CLI, and user-defined OpenAI-compatible providers. The same refresh inserted **Phase 19** (Per-Posting Tag Cache & Filter Fast Path — reinstating the 2026-05-16 cache plan) and **Phase 20** (Custom Job Sources / Connectors) between Phase 18 (worker activation / reliability / parallelism / cleanup) and the multi-tenancy work, which now lands as **Phase 21**.
 
 ---
 
@@ -250,9 +250,10 @@ refresh_tasks       -- priority queue of pending scrapes
 Plus a new `applications.job_snapshot_id` FK that pins every
 generated artifact to the exact JD content it was produced against.
 Every Phase-12+ table carries a `tenant_id` column (default `"default"`
-until Phase 19). Phase 13.9 backfills the same column onto every legacy
-table (`jobs`, `applications`, `applicant_profile`, `bullet_pool`,
-`story_bank`, `qa_bank`, etc.) — see D020 / D026.
+until Phase 21 — originally 18, deferred to 19, 20, then 21 as new
+product work landed ahead). Phase 13.9 backfills the same column onto
+every legacy table (`jobs`, `applications`, `applicant_profile`,
+`bullet_pool`, `story_bank`, `qa_bank`, etc.) — see D020 / D026.
 
 ## 6. Layered Architecture
 
@@ -340,10 +341,13 @@ baseline (post-Phase-10): **680 passed, 1 skipped** (`pytest -q`),
 
 See `docs/CHANGELOG.md` for the per-sub-phase shipping log.
 
-## 8. Roadmap (Phase 11 → 19) — v3.2, refreshed 2026-05-19
+## 8. Roadmap (Phase 11 → 21) — v3.3, refreshed 2026-05-19
 
 v3 corrected four issues from v1/v2 (preserved below); v3.1 further calibrates
-v3 in four places (see the top-of-file version note). v3.2 records Phase 17.9 and the Phase 18/19 reorder.
+v3 in four places (see the top-of-file version note). v3.2 recorded Phase 17.9
+and the Phase 18/19 reorder. v3.3 inserted the per-posting cache and custom-
+sources phases between Phase 18 and the multi-tenancy work; multi-tenancy is
+now Phase 21.
 
 The v2/v3 re-plan reflects four corrections to the v1 draft:
 
@@ -365,7 +369,7 @@ phase (**Phase 13: Job Index & Freshness Engine**) because the
 problem is content versioning + freshness state machines + audit
 binding, not key-value eviction. (See D019.)
 
-Multi-tenancy & auth hardening still closes the commercial-ready core, but it is now **Phase 19**. **Phase 18** is worker activation, reliability, parallelism, and cleanup so the personal-version product is solid before hosted multi-user work resumes. Every Phase 12-17 table is still built with `tenant_id` from day one. (See D020.)
+Multi-tenancy & auth hardening still closes the commercial-ready core, but it is now **Phase 21** after a three-step deferral: original Phase 18 → 19 → 20 → 21. **Phase 18** is worker activation, reliability, parallelism, and cleanup so the personal-version product is solid before any further product work. **Phase 19** then reinstates the per-posting tag cache & filter fast-path that was scoped on 2026-05-16 and displaced twice. **Phase 20** opens the system to user-added company careers sites (ATS-first, LLM-templates for the long tail). Every Phase 12+ table — including the new Phase 19-20 tables — is still built with `tenant_id` from day one. (See D020 / D026.)
 
 ### Phase 11: Reliability & Cleanup (~1 week)
 Tighten the provider layer; ship the migration tool needed for users
@@ -434,7 +438,9 @@ Job Intelligence Database.
   backfills existing rows; ORM models add the field. Existing query paths
   are not forced to filter (preserving today's global-read behavior), but
   every new Phase-14 code path must thread an explicit tenant context. The
-  "default tenant" fallback is replaced by Phase 19 auth middleware + RLS.
+  "default tenant" fallback is replaced by the eventual Phase 21 auth
+  middleware + RLS (originally Phase 19, deferred twice through
+  19→20→21).
 
 ### Phase 14: Task Queue + Scheduled Work (~2.5 weeks, Celery-based) — **Complete**
 
@@ -736,8 +742,8 @@ Hardens the Phase 10 provider abstraction before worker activation. The goal was
 
 ### Phase 18: Worker Activation, Reliability, Parallelism, Cleanup (~2.5–3 weeks)
 
-> **Re-ordering (2026-05-19)**: this used to be Phase 19, after
-> Multi-Tenancy. We moved it forward because:
+> **Re-ordering (2026-05-19, refreshed)**: this used to be Phase 19,
+> after Multi-Tenancy. We moved it forward because:
 > (a) the personal-version product is the active priority; multi-
 >     tenancy/commercialization is paused until the single-user
 >     product is rock-solid;
@@ -746,8 +752,11 @@ Hardens the Phase 10 provider abstraction before worker activation. The goal was
 > (c) the worker activation work in 18.1 is a prerequisite for
 >     reliability / parallelism / scalability across all subsequent
 >     phases, multi-tenancy included.
-> Multi-tenancy & auth hardening is now Phase 19, deferred until the
-> personal version is feature-complete.
+> Two further product phases now sit between Phase 18 and the multi-
+> tenancy work: **Phase 19** (Per-Posting Tag Cache & Filter Fast Path)
+> and **Phase 20** (Custom Job Sources / Connectors). Multi-tenancy &
+> auth hardening is now **Phase 21**, deferred until the personal
+> version is feature-complete.
 
 A **fix-focused phase**, not a feature phase. Phase 14 shipped the
 Celery scaffold (queues, base task, audit table, reliability config,
@@ -894,22 +903,162 @@ today, independent of MQ status). 18.1 next (unblocks 18.2, 18.3 and
 fixes the lost-work-on-tab-close problem). 18.2 and 18.3 then ship
 in parallel because they touch disjoint files.
 
-Open questions deferred to Phase 20+:
+Open questions deferred to later phases:
 - Persistent task progress UI (real-time SSE streaming, not poll-based).
   Phase 18 only does poll.
 - Cross-tenant DLQ surfacing for the future ops dashboard.
 - Anti-bot session pooling — would let LinkedIn detail-page parallelism
   become safe by routing through N independent sessions. Out of scope
-  here.
+  here (overlaps with Phase 20 Tier 2 risks).
 
-### Phase 19: Multi-Tenancy & Auth Hardening (~2.5 weeks, deferred)
+### Phase 19: Per-Posting Tag Cache & Filter Fast Path (~2 weeks)
 
-> **Re-ordering (2026-05-19)**: this used to be Phase 18, the next
-> milestone after Phase 17.8. We pushed it after the worker /
-> cleanup phase because the personal-version product is the active
-> focus and multi-tenancy/commercialization is paused until the
-> single-user version is solid. The schema-level `tenant_id` ground-
-> work from Phase 13.9 remains valid; activating it can wait.
+> **History**: this was previously planned as Phase 19 in May 2026
+> ("Per-Posting Tag Cache & Filter Fast Path"), then displaced first
+> by the 17.9 LLM-provider expansion and then by the worker/multi-
+> tenancy reshuffle. It is now re-instated as Phase 19 ahead of the
+> Custom Sources work because the cache value compounds once multiple
+> sources start surfacing the same posting.
+
+Moves the search cache granularity from "result set" down to "single
+posting". Today's `search_results` TTL short-circuit keeps a whole
+result set alive for an hour; that means a profile edit during the
+TTL window silently hides postings we already paid to fetch, and a
+new posting from upstream is invisible until the TTL expires. Phase
+19 inverts the model: searches always re-fetch, but each posting's
+**objective attributes** are computed once (A1) and each posting's
+**per-profile score** is cached and reused across searches (A2).
+
+**Sub-phases:**
+
+- **19.1** Schema migration. `job_postings` gains `tags JSONB`,
+  `tagger_version INT`, `tags_status TEXT` (`pending` / `computing`
+  / `ready` / `failed`), `tags_computed_at TIMESTAMPTZ`. New
+  `job_posting_scores` table (FK `posting_id` + FK `snapshot_id` +
+  `profile_id` + `profile_version` + `score_breakdown JSONB` +
+  `verdict TEXT` + `computed_at`; `UNIQUE (snapshot_id,
+  profile_version)`). Both new columns/table carry `tenant_id` from
+  day one (D026).
+- **19.2** `src/jobs/tagger.py` — pure-function rules over
+  `work_mode` / `level` / `sponsorship_signal` / `intern_eligible` /
+  `posting_age_bucket` / `clearance_required` / `usa_only`. Module-
+  level `TAGGER_VERSION` constant; bumping it queues a full retag.
+- **19.3** `posting.tag` Celery task kind + `enrich.on_content_changed`
+  listener auto-enqueue on snapshot content-hash change.
+- **19.4** `job_posting_scores` write-through: the Filter Agent
+  (Phase 16) writes its computed verdict back keyed by
+  `(snapshot_id, profile_version)`; read path checks the table
+  before invoking the agent.
+- **19.5** `cached_search` refactor: drop TTL short-circuit; keep
+  `search_results` rows (for "removed since" diff + pagination);
+  keep the distributed lock (still want to prevent concurrent
+  same-source scrapes).
+- **19.6** Filter fast-path (`src/filter/fast_path.py`): A1 hard
+  rules reject up-front, A2 cached score reused on hit, otherwise
+  enqueue real Filter Agent. Plan-run picker + Jobs view both route
+  through it.
+- **19.7** Frontend: tag chips on each posting in JobsView, spinner
+  while `tags_status='pending'`, manual `POST /api/jobs/postings/{id}/retag`
+  button. ReviewQueueView surfaces `(cached score · profile vXYZ)`
+  so users can tell when a verdict came from cache.
+- **19.8** Docs sweep: README / PROJECT_MANAGEMENT / CHANGELOG;
+  a new Decision entry capturing the A1+A2 split and the
+  `profile_version = sha256(canonical_json(profile))[:12]` derivation.
+
+**Behavior change to call out**: searches no longer short-circuit on
+TTL — every search hits the upstream. Justified because the cost was
+masking new postings; the per-posting cache keeps the *analysis* hot
+path cheap rather than the *fetch* hot path.
+
+**`TAGGER_VERSION` bumps are expensive** on a large index. Retag
+enqueues are paginated background work; the UI shows a "tagging in
+progress" banner during the drain. Acceptable as long as it stays a
+rare event.
+
+### Phase 20: Custom Job Sources (Connectors) (~3 weeks)
+
+> **History**: surfaced as an explicit roadmap item on 2026-05-19
+> after the Phase 19 cache plan was reinstated. The two layers
+> (ATS-first, LLM-templates second) were settled by an architecture
+> review the same day.
+
+Lets users add company careers sites (Nvidia, Microsoft, Stripe, etc.)
+on top of the LinkedIn / built-in ATS intake the product ships with
+today. Two tiers, sequenced so Tier 1 can ship to users without
+waiting on Tier 2 stability.
+
+**Tier 1 — ATS connector framework + multi-source search (~1.5 weeks):**
+
+- **20.1** Source data model: new `job_sources` table (id,
+  display_name, kind, url, ats_type, owner_tenant_id, status,
+  last_health, ...) + alembic migration. `Connector` ABC with
+  `fetch_jobs(source_config) -> list[RawJob]` in
+  `src/intake/connectors/`. `tenant_id` from day one (D026).
+- **20.2** ATS fingerprint detector (`src/intake/ats_detect.py`):
+  follow redirects + DOM-sniff to identify which ATS backs a careers
+  URL. Initial coverage: Greenhouse, Lever, Workday, Ashby, iCIMS,
+  Smartrecruiters, Eightfold. Unknown → connector parks in `draft`
+  until Tier 2 infers a template.
+- **20.3** Existing LinkedIn / Greenhouse / Lever / Workday adapters
+  rewrap as registered Connectors. Search dispatch goes through the
+  new registry rather than hard-coded `source` strings.
+- **20.4** Add-source UX: `POST /api/sources` runs the detector +
+  one verification fetch, persists on success. New "Sources" page
+  in the Web UI (same shape as the Phase 17.9 provider list:
+  Connected vs Available, health badges, manual probe / disconnect).
+- **20.5** Multi-source search: `SearchPayload.sources: list[str]`,
+  Celery group fan-out per source, merge + dedupe by
+  `(source_id, source_source_id)`. Plan-run form gains a source
+  multi-select; plans persist `source_ids` so Beat reads it each
+  tick. The Phase 19 per-posting cache means repeated postings
+  across sources skip re-scoring entirely.
+
+**Tier 2 — LLM-assisted scraper templates for the long tail (~1.5 weeks):**
+
+- **20.6** Template schema + executor: `scraper_templates` table
+  (`selector_recipe: jsonb`, `playwright_steps: jsonb`, `health: jsonb`).
+  Playwright-driven Connector that executes a template against a
+  URL and yields `RawJob`. Steps cover login walls, pagination,
+  infinite scroll.
+- **20.7** LLM template inference. When ATS detection fails, fetch
+  the page via Playwright (HTML + screenshot), prompt the LLM via
+  `generate_json(tier="small")` to emit a candidate recipe. Cached
+  on the template row; user reviews + edits in a JSON editor with
+  a "Test on this page" preview before activation.
+- **20.8** Template self-heal: per-source health probe (extends the
+  Phase 11.4 `src/providers/health.py` pattern) watches consecutive
+  failure counts. Threshold breach queues an LLM re-inference; if
+  the new recipe materially diverges, the source flips to
+  `needs_review` rather than auto-applying.
+
+**Risks to plan around:**
+
+- **Anti-bot** (Cloudflare / Akamai JS challenges). Tier 1 only
+  commits to ATS-backed sites which don't gate on bot challenges;
+  Tier 2 documents the limitation rather than promising universal
+  coverage. Residential-proxy escape hatch may follow in a 20.x
+  point release.
+- **Login walls** — out of scope for Tier 2 v1. Reuse the LinkedIn
+  session pattern (per-source `storage_state`) when needed.
+- **LLM cost** — HTML inputs run 20k+ tokens. Aggressive caching +
+  default `tier="small"` routing + per-source token budgets to cap
+  runaway templates.
+- **Maintenance burden** — scraper templates rot. The self-heal
+  loop is essential; without it Tier 2 becomes a graveyard.
+- **Legal / ToS** — users are responsible for ToS compliance with
+  each careers site they add. AutoApply does not bundle a default
+  list of company URLs; users opt in by adding their own.
+
+### Phase 21: Multi-Tenancy & Auth Hardening (~2.5 weeks, deferred)
+
+> **Re-ordering history**: originally Phase 18, deferred to Phase 19
+> on 2026-05-19 (worker / cleanup ate Phase 18); deferred again to
+> Phase 20 when the Per-Posting Tag Cache plan was reinstated as the
+> new Phase 19; deferred a third time to Phase 21 when Custom Job
+> Sources slotted in as the new Phase 20. The schema-level
+> `tenant_id` groundwork from Phase 13.9 plus the same discipline
+> applied to all new Phase 19-20 tables (`job_posting_scores`,
+> `job_sources`, `scraper_templates`) keeps activation cheap.
 
 Activates the commercial-readiness work seeded across 12-17. SaaS
 business layer (billing, sign-up flow, marketing site) is NOT in
@@ -917,32 +1066,34 @@ scope — this phase only makes the existing system safe to host for
 multiple isolated users.
 
 **Honest scope**: Phase 13.9 already lands the schema-level `tenant_id`
-column on every table, so the "add column + backfill" portion is genuinely
-"activate existing work." But the following sub-phases are **net-new
-construction**, not retrofit: 19.2 auth middleware (`src/web/` has no
-auth layer today), 19.4 Redis namespace refactor (keys today are
-`{version}:{namespace}:{key}` with no tenant prefix — every wrapper
-needs to change), and 19.7 credential store (`src/providers/store.py`
-is a single global JSON file today; needs per-tenant directory split +
-keyring entry renaming). 19.1 / 19.3 / 19.5 / 19.6 are the only true
-"activations."
+column on every table, and Phases 19-20 keep the discipline (D026)
+on every new table they add (`job_posting_scores`, `job_sources`,
+`scraper_templates`). So the "add column + backfill" portion is
+genuinely "activate existing work." The following sub-phases are
+**net-new construction**, not retrofit: 21.2 auth middleware
+(`src/web/` has no auth layer today), 21.4 Redis namespace refactor
+(keys today are `{version}:{namespace}:{key}` with no tenant prefix
+— every wrapper needs to change), and 21.7 credential store
+(`src/providers/store.py` is a single global JSON file today; needs
+per-tenant directory split + keyring entry renaming). 21.1 / 21.3 /
+21.5 / 21.6 are the only true "activations."
 
-- **19.1** `tenants` + `users` tables; bind the `tenant_id='default'`
+- **21.1** `tenants` + `users` tables; bind the `tenant_id='default'`
   rows that 13.9 left behind to real tenants.
-- **19.2** **Build from scratch** the FastAPI auth middleware —
+- **21.2** **Build from scratch** the FastAPI auth middleware —
   session/token parsing, `current_tenant_id` injected into a
   `ContextVar`; ORM sessions auto-filter via SQLAlchemy events; Celery
   task headers carry tenant context (14.3 reserves the hook).
-- **19.3** Postgres Row-Level Security policies — DB-level backstop
+- **21.3** Postgres Row-Level Security policies — DB-level backstop
   that catches any ORM bypass.
-- **19.4** **Refactor** Redis key naming — every namespace now prefixed
+- **21.4** **Refactor** Redis key naming — every namespace now prefixed
   `tenant:{id}:`; `src/cache/base.py` key construction requires an
   explicit tenant context (raises rather than falling back to default).
-- **19.5** Per-tenant quotas (LLM tokens, scrape rate, storage).
+- **21.5** Per-tenant quotas (LLM tokens, scrape rate, storage).
   Exceeding returns 429.
-- **19.6** Audit log table — `audit_events` (submission, settings
+- **21.6** Audit log table — `audit_events` (submission, settings
   change, credential operation, manual schedule trigger). Append-only.
-- **19.7** **Refactor** credential store — `src/providers/store.py`
+- **21.7** **Refactor** credential store — `src/providers/store.py`
   moves from one global JSON file to
   `data/tenants/{id}/credentials/`; keyring entries get tenant prefixes;
   migrate existing `data/providers/credentials.json` into the `default`
@@ -967,17 +1118,25 @@ the roadmap.
 | 17.8 | Material Strategy & Document Library | 1w | Done |
 | 17.9 | LLM Provider Expansion | 0.5w | Done |
 | **18** | **Worker Activation, Reliability, Parallelism, Cleanup** | **2.5–3w** | **Next** |
-| 19 | Multi-Tenancy & Auth Hardening | 2.5w | Deferred (post personal-version maturity) |
+| 19 | Per-Posting Tag Cache & Filter Fast Path | 2w | Planned |
+| 20 | Custom Job Sources (Connectors) — ATS detection + LLM templates | 3w | Planned |
+| 21 | Multi-Tenancy & Auth Hardening | 2.5w | Deferred (post personal-version maturity) |
 
 The personal-version product (single user, local-first, no auth) is
 feature-complete through Phase 17.9. Phase 18 hardens it (real
-workers, retention, parallelism); Phase 19 then activates the
-multi-tenancy plumbing that Phases 12-17 left dormant. Phase 18 was
-scoped after a Phase-18-prep audit found the task bodies were stubs,
-no cleanup policy existed, and parallelism opportunities were
-unexplored. Phase 19 was originally the next milestone (Multi-Tenancy
-& Auth) and grew 0.5w over v3 to honestly reflect that auth
-middleware / Redis namespace / credential store are net-new builds.
+workers, retention, parallelism); Phase 19 swaps the search-cache
+model so per-posting work doesn't repeat across searches; Phase 20
+opens the system to user-added company careers sites; Phase 21
+finally activates the multi-tenancy plumbing that Phases 12-20 have
+been carrying dormant. Phase 18 was scoped after a Phase-18-prep
+audit found the task bodies were stubs, no cleanup policy existed,
+and parallelism opportunities were unexplored. Phase 19 reinstates
+the 2026-05-16 cache plan that was displaced twice during the
+17.9/18/19 reshuffles. Phase 20 captures the "let me add Nvidia"
+class of user request behind a tiered architecture. Phase 21 has
+been deferred four times now (18→19→20→21) — each deferral leaves
+the schema-level `tenant_id` discipline in place so activation cost
+stays bounded.
 
 ## 9. Cross-cutting Quality Bars
 
@@ -993,8 +1152,8 @@ Enforced from Phase 11 onward:
   updated at the end of every Phase, not in a batch later.
 - **Multi-tenancy hygiene** (Phase 12+) — every new table carries
   `tenant_id`; every new Redis key is prefixed; every new background
-  task accepts a tenant context. No exceptions, or Phase 19 turns
-  into a rewrite.
+  task accepts a tenant context. No exceptions, or the eventual
+  multi-tenancy phase (Phase 21) turns into a rewrite.
 
 ## 10. Verification Checklist (per-phase smoke)
 
@@ -1047,6 +1206,6 @@ Enforced from Phase 11 onward:
 - **Auto-submit safety.** `--auto-submit` exists in `apply`, but
   still routes through the HITL gate. We have not yet seen the eval
   data that would justify removing the gate even per-vendor.
-- **No SaaS business layer.** Phase 19 is multi-tenant hosting
+- **No SaaS business layer.** Phase 21 is multi-tenant hosting
   infra, not billing / signup / marketing. That work is out of
   scope until / unless a commercial license customer signs.

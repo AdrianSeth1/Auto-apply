@@ -20,7 +20,7 @@
 (c) HITL gate 后端从单进程文件 JSON 迁到 Celery 任务态 / Postgres 持久化层，避免 Phase 14 多 worker 与 Phase 17 review queue 各自再造（并入 14.x，见 D026）；
 (d) Phase 15.3 LaTeX 范围澄清：`src/documents/latex_engine.py` 已存在，Phase 15 不是"从零搭 LaTeX"，而是"加模板包规范 + manifest + adapter"。
 
-2026-05-19 这次刷新记录 Phase 17.9 已完成：provider 层现在覆盖 OpenAI、Anthropic、Gemini、DeepSeek、Moonshot/Kimi、Qwen、xAI Grok、Groq、Mistral、OpenRouter、Ollama、Claude CLI、Codex CLI，以及用户自定义的 OpenAI-compatible provider。Phase 18 现在是 worker 激活 / 可靠性 / 并行 / 清理；多租户与 Auth 加固后移到 Phase 19。
+2026-05-19 这次刷新记录 Phase 17.9 已完成：provider 层现在覆盖 OpenAI、Anthropic、Gemini、DeepSeek、Moonshot/Kimi、Qwen、xAI Grok、Groq、Mistral、OpenRouter、Ollama、Claude CLI、Codex CLI，以及用户自定义的 OpenAI-compatible provider。同次刷新在 Phase 18（worker 激活 / 可靠性 / 并行 / 清理）和多租户工作之间插入了 **Phase 19**（Per-Posting Tag Cache & Filter Fast Path，重启 2026-05-16 的缓存计划）和 **Phase 20**（用户自定义 Job Sources / Connectors）。多租户与 Auth 加固后移为 **Phase 21**。
 
 ---
 
@@ -224,7 +224,7 @@ refresh_tasks       -- 待抓取的优先级队列
 ```
 
 再加 `applications.job_snapshot_id` 外键，把每个生成产物钉到具体
-JD 版本上。Phase 12+ 所有新表都带 `tenant_id`（Phase 19 之前默认 `"default"`），
+JD 版本上。Phase 12+ 所有新表都带 `tenant_id`（在多租户激活之前默认 `"default"` —— 原定 Phase 18，依次顺延到 19、20，目前为 Phase 21），
 Phase 13.9 还会给所有遗留表（`jobs`、`applications`、`applicant_profile`、
 `bullet_pool`、`story_bank`、`qa_bank` 等）回填同样的列，见 D020 / D026。
 
@@ -300,10 +300,12 @@ platform / company 维度的拆分。CSV export 默认排除 `error_log`。
 
 每个子阶段的发布记录见 `docs/CHANGELOG.md`。
 
-## 8. 路线图（Phase 11 → 19） —— v3.2，2026-05-19 刷新
+## 8. 路线图（Phase 11 → 21） —— v3.3，2026-05-19 刷新
 
 v3 在 v1/v2 上修正了四个问题（保留如下）；v3.1 又对 v3 做了四处校准（见本节
-开头版本说明）。v3.2 记录 Phase 17.9，并同步 Phase 18/19 的重排。
+开头版本说明）。v3.2 记录 Phase 17.9，并同步 Phase 18/19 的重排。v3.3 进一步
+在 Phase 18 和多租户工作之间插入了 Per-Posting Tag Cache（Phase 19）和
+Custom Job Sources（Phase 20），多租户后移为 Phase 21。
 
 v2/v3 重规划修正了 v1 草案的四个问题：
 
@@ -321,9 +323,14 @@ v2/v3 重规划修正了 v1 草案的四个问题：
 Freshness Engine**），因为这个问题本质是内容版本化 + freshness 状态机 +
 审计绑定，不是 KV 过期。（见 D019。）
 
-多租户与 Auth 加固仍然是商业化就绪核心的收尾，但现在后移为 **Phase 19**。
-**Phase 18** 改为 worker 激活、可靠性、并行和清理，先把个人版产品打牢。
-Phase 12-17 所有表仍然从第一天起就带 `tenant_id`。（见 D020。）
+多租户与 Auth 加固仍然是商业化就绪核心的收尾，但经过三次顺延（原 Phase 18
+→ 19 → 20 → 21）现在落在 **Phase 21**。**Phase 18** 是 worker 激活、可靠性、
+并行和清理，先把个人版产品打牢。**Phase 19** 重启 2026-05-16 那份"被两次
+顺延的"per-posting tag cache & filter fast-path 计划，把搜索缓存从结果集级
+下沉到单个 posting。**Phase 20** 是用户自定义 Job Sources（Connectors）——
+ATS 先发（Greenhouse / Lever / Workday / Ashby / iCIMS / Smartrecruiters /
+Eightfold），LLM 模板生成兜底长尾。Phase 12+ 所有表（包括新的 Phase 19-20
+表）仍然从第一天起就带 `tenant_id`。（见 D020 / D026。）
 
 ### Phase 11: 可靠性 & 收尾（~1 周）
 加固 Phase 10 引入的 provider 层；交付老用户升级所需的 migrate 工具。
@@ -601,13 +608,15 @@ Phase 12（缓存）+ Phase 9 / 15（agent）串成 "睡一觉，醒来看 revie
 
 ### Phase 18: Worker 激活 / 可靠性 / 并行 / 垃圾清理（~2.5–3 周）
 
-> **重新排序（2026-05-19）**：这一阶段原本是 Phase 19，排在多租户之后。我们
-> 把它提到前面了，因为：
+> **重新排序（2026-05-19，再次刷新）**：这一阶段原本是 Phase 19，排在多租户
+> 之后。我们把它提到前面了，因为：
 > (a) 个人版产品是当前主线；多租户/商业化要等到单用户版本足够稳定再说；
 > (b) `data/output/` 的孤儿文件正在累积，清理债现在就在影响日常使用；
 > (c) 18.1 的 worker 激活是后续所有 phase（包括多租户）的可靠性/并行/可扩展
 >     性前提。
-> 多租户 & Auth 加固现在是 Phase 19，等个人版功能/质量收尾后再做。
+> 现在 Phase 18 之后还有两个产品阶段：**Phase 19**（Per-Posting Tag Cache &
+> Filter Fast Path）和 **Phase 20**（用户自定义 Job Sources / Connectors）。
+> 多租户 & Auth 加固后移为 **Phase 21**，等个人版功能/质量完整后再做。
 
 一个**修复型 phase**，不是 feature phase。Phase 14 落地了 Celery 骨架（队列、
 基类、审计表、可靠性配置、Beat 调度）；Phase 17 在它上面铺了 per-plan 策略 +
@@ -716,44 +725,156 @@ review loop；项目 memory 在 2026 年 5 月中旬如实总结了一句话："
 18.2、18.3，并修掉"关 tab 丢工作"那个问题）。18.2 和 18.3 之后并行推（动的
 是不同文件）。
 
-延后到 Phase 20+ 的未决问题：
+延后到后续 phase 的未决问题：
 - 持久任务进度 UI（实时 SSE 流式，不是轮询）。Phase 18 只做 polling。
 - 给未来 ops dashboard 用的跨租户 DLQ surfacing。
 - 反爬 session pool —— 路由到 N 个独立 session 就能让 LinkedIn 详情页并行
-  变安全。本阶段不做。
+  变安全。本阶段不做（和 Phase 20 Tier 2 的风险有重叠）。
 
-### Phase 19: 多租户 & Auth 加固（~2.5 周，已推迟）
+### Phase 19: Per-Posting Tag Cache & Filter Fast Path（~2 周）
 
-> **重新排序（2026-05-19）**：本阶段原本是 Phase 18，是 Phase 17.8 之后的下一
-> 个里程碑。我们把它推到 worker / cleanup phase 之后，因为个人版产品是当前
-> 主线，多租户/商业化要等单用户版本足够稳定再做。Phase 13.9 已经打下的
-> `tenant_id` schema 基础仍然有效，激活可以等。
+> **历史**：这份计划最早是 2026-05-16 排上的 Phase 19（"Per-Posting Tag
+> Cache & Filter Fast Path"），先后被 17.9 LLM Provider Expansion 和 18/19
+> 多租户重排挤掉过两次。这次刷新把它放回 Phase 19，排在 Custom Sources 之
+> 前，因为多个 source 同时返回同一个 posting 时缓存价值会被放大。
 
-激活 Phase 12-17 散布的商业化就绪工作。SaaS 业务层（计费、注册流、营销页）
+把搜索缓存的颗粒度从"结果集"下沉到"单个 posting"。当前的 `search_results`
+TTL 短路会让一个结果集在 1 小时内整体生效 —— 这意味着 profile 编辑在 TTL
+窗口内会悄悄隐藏我们已经付费抓回来的 posting，而上游新出的 posting 在 TTL
+过期之前都看不到。Phase 19 反过来：搜索每次都重新拉，但每个 posting 的
+**客观属性**只算一次（A1），每个 posting 的**按 profile 评分**缓存复用
+（A2）。
+
+**子阶段：**
+
+- **19.1** Schema migration。`job_postings` 加 `tags JSONB`、
+  `tagger_version INT`、`tags_status TEXT`（`pending` / `computing` /
+  `ready` / `failed`）、`tags_computed_at TIMESTAMPTZ`。新表
+  `job_posting_scores`（FK `posting_id` + FK `snapshot_id` + `profile_id` +
+  `profile_version` + `score_breakdown JSONB` + `verdict TEXT` +
+  `computed_at`；`UNIQUE (snapshot_id, profile_version)`）。新列 / 新表
+  从第一天起就带 `tenant_id`（D026）。
+- **19.2** `src/jobs/tagger.py` —— 纯函数规则：`work_mode` / `level` /
+  `sponsorship_signal` / `intern_eligible` / `posting_age_bucket` /
+  `clearance_required` / `usa_only`。模块级 `TAGGER_VERSION` 常量，bump
+  时触发全库 retag。
+- **19.3** 新增 `posting.tag` Celery task kind + `enrich.on_content_changed`
+  监听器自动 enqueue，每次 snapshot content-hash 变化都打一次新标。
+- **19.4** `job_posting_scores` write-through：Phase 16 的 Filter Agent
+  把算出的 verdict 按 `(snapshot_id, profile_version)` 写回；读路径先查
+  表再决定是否调 agent。
+- **19.5** `cached_search` 重构：去掉 TTL 短路，保留 `search_results` 行
+  （供"消失对比"和分页用），保留分布式锁（防同 source 并发刮取）。
+- **19.6** Filter fast-path（`src/filter/fast_path.py`）：A1 硬规则先 reject，
+  A2 缓存 score 命中就复用，未命中再 enqueue 真 Filter Agent。Plan-run
+  picker 和 Jobs view 都走这条路径。
+- **19.7** 前端：JobsView 给每条 posting 加 tag chip，`tags_status='pending'`
+  时显示 spinner，加手动 `POST /api/jobs/postings/{id}/retag` 按钮；
+  ReviewQueueView 上标 `(cached score · profile vXYZ)`，让用户分得清这次
+  verdict 是缓存的还是新算的。
+- **19.8** 文档：README / PROJECT_MANAGEMENT / CHANGELOG；新加一条
+  Decision 记录 A1+A2 拆分和 `profile_version = sha256(canonical_json(profile))[:12]`
+  的派生。
+
+**需要明示的行为变化**：搜索不再用 TTL 短路了，每次搜索都打上游。这个改变
+有合理性 —— 之前那个 TTL 在掩盖新 posting；per-posting 缓存把*分析*热路径
+留住，不再把*抓取*热路径留住。
+
+**`TAGGER_VERSION` 提升在大库上代价不低。** Retag enqueue 走分页后台任务，
+UI 期间显示"正在打标"的 banner。只要 bump 是罕见事件就 OK。
+
+### Phase 20: 用户自定义 Job Sources / Connectors（~3 周）
+
+> **历史**：2026-05-19 在 Phase 19 重启之后，紧接着的架构 review 把这块明确
+> 列为下一个产品 phase，并在同一天敲定了"ATS 先发、LLM 模板兜底"的两层结构。
+
+让用户能在 LinkedIn 和内置 ATS intake 之外，添加公司自家的招聘站（Nvidia、
+Microsoft、Stripe 等）。两层结构，先做 Tier 1 让产品先跑通，Tier 2 在
+feature flag 后面单独迭代。
+
+**Tier 1 —— ATS connector 框架 + 多源搜索（~1.5 周）：**
+
+- **20.1** Source 数据模型：新增 `job_sources` 表（id、display_name、kind、
+  url、ats_type、owner_tenant_id、status、last_health 等）+ alembic
+  migration。`Connector` ABC 提供统一 `fetch_jobs(source_config) -> list[RawJob]`
+  接口，放在 `src/intake/connectors/`。`tenant_id` 从第一天起（D026）。
+- **20.2** ATS 指纹检测器（`src/intake/ats_detect.py`）：跟随重定向 + DOM
+  fingerprint 识别 careers URL 背后的 ATS。首发覆盖：Greenhouse、Lever、
+  Workday、Ashby、iCIMS、Smartrecruiters、Eightfold。识别失败 → connector
+  停在 `draft` 直到 Tier 2 推断模板。
+- **20.3** 把现有 LinkedIn / Greenhouse / Lever / Workday adapter rewrap 成
+  注册 Connector，搜索分发走 registry 而不是硬编码 `source` 字符串。
+- **20.4** Add-source UX：`POST /api/sources` 跑一次检测 + 一次验证 fetch，
+  成功才持久化。新增 "Sources" 页面（同 17.9 provider 列表的形状：Connected
+  vs Available、健康徽章、手动 probe / disconnect）。
+- **20.5** 多源搜索：`SearchPayload.sources: list[str]`，Celery group 按
+  source 并发 fan-out，按 `(source_id, source_source_id)` merge + dedupe。
+  Plan-run 表单加 source 多选；plan 持久化 `source_ids`，Beat 每次读它。
+  Phase 19 的 per-posting 缓存意味着重复 posting 不会被重新评分。
+
+**Tier 2 —— LLM 辅助 scraper 模板（~1.5 周）：**
+
+- **20.6** 模板 schema + executor：`scraper_templates` 表（`selector_recipe: jsonb`、
+  `playwright_steps: jsonb`、`health: jsonb`）。Playwright 驱动的 Connector
+  按模板执行 URL 返回 `RawJob`。步骤覆盖登录墙、翻页、无限滚动。
+- **20.7** LLM 模板推断：ATS 检测失败时，Playwright 把页面（HTML +
+  截图）抓回来，走 `generate_json(tier="small")` 让 LLM 产出候选 recipe。
+  缓存在模板行上，用户用 JSON 编辑器 review + 微调，配 "在此页面测试"
+  preview 按钮再 activate。
+- **20.8** 模板 self-heal：每个 source 健康探测（沿用 Phase 11.4
+  `src/providers/health.py` 的模式）数连续失败次数，过阈值就 queue 一次
+  LLM 重新推断；新 recipe 跟旧的差异过大就把 source 标 `needs_review`
+  而不是自动跑。
+
+**风险预案：**
+
+- **反爬**（Cloudflare / Akamai JS challenge）。Tier 1 只承诺 ATS 背后的
+  站点（这些都不上 bot challenge）；Tier 2 不承诺通杀，必要时挂住宅代理。
+- **登录墙** —— Tier 2 v1 不做自动登录，沿用 LinkedIn session 那套
+  per-source storage_state 即可。
+- **LLM 成本** —— HTML 输入动辄 20k+ token。激进缓存 + 默认 `tier="small"` +
+  per-source token budget，防失控模板烧账单。
+- **维护负担** —— 模板会腐烂，self-heal 循环是必要的，没它 Tier 2 会变成
+  墓地。
+- **法律 / ToS** —— 用户对添加的每个 careers 站点的 ToS 自负。AutoApply
+  不打包默认公司列表，全靠用户主动添加。
+
+### Phase 21: 多租户 & Auth 加固（~2.5 周，已推迟）
+
+> **重新排序历史**：原本是 Phase 18（17.8 之后的下一步）；2026-05-19 重排
+> 推到 Phase 19；同次刷新插入了 Per-Posting Tag Cache 后又推到 Phase 20；
+> 同次插入 Custom Sources 后又推到 Phase 21。Phase 13.9 打下的 schema
+> `tenant_id` 基础以及 Phase 19-20 新增表（`job_posting_scores`、
+> `job_sources`、`scraper_templates`）继续保持的 `tenant_id` 纪律，
+> 让激活成本一直保持在可控范围。
+
+激活 Phase 12-20 散布的商业化就绪工作。SaaS 业务层（计费、注册流、营销页）
 **不在范围内** —— 本阶段只让现有系统能安全托管多个隔离用户。
 
-**诚实的范围说明**：13.9 已经把 schema 层的 `tenant_id` 列补齐了，所以
-"加列 + backfill" 的部分确实不是重写。但下面这几块**实质是新建**，不是
-"激活已有工作"：19.2 auth middleware（`src/web/` 目前完全没有 auth 层）、
-19.4 Redis namespace 重构（现在 key 是 `{version}:{namespace}:{key}`，没有
-tenant 前缀，需要全局改 wrapper）、19.7 凭据存储（`src/providers/store.py`
-目前是单文件全局 JSON，需要按租户切目录 + keyring entry 重命名）。
-真正"激活"的只有 19.1 / 19.3 / 19.5 / 19.6。
+**诚实的范围说明**：13.9 已经把 schema 层的 `tenant_id` 列补齐了，Phase
+19-20 的新表（`job_posting_scores`、`job_sources`、`scraper_templates`）
+也继续保持这一纪律，所以"加列 + backfill"的部分确实不是重写。但下面这几
+块**实质是新建**，不是"激活已有工作"：21.2 auth middleware（`src/web/`
+目前完全没有 auth 层）、21.4 Redis namespace 重构（现在 key 是
+`{version}:{namespace}:{key}`，没有 tenant 前缀，需要全局改 wrapper）、
+21.7 凭据存储（`src/providers/store.py` 目前是单文件全局 JSON，需要按
+租户切目录 + keyring entry 重命名）。真正"激活"的只有 21.1 / 21.3 /
+21.5 / 21.6。
 
-- **19.1** `tenants` + `users` 表；把 13.9 留下的 `tenant_id='default'` 行接到
+- **21.1** `tenants` + `users` 表；把 13.9 留下的 `tenant_id='default'` 行接到
   真实租户上。
-- **19.2** **从零做** FastAPI auth middleware —— session/token 解析、
+- **21.2** **从零做** FastAPI auth middleware —— session/token 解析、
   `current_tenant_id` 注入到 `ContextVar`；ORM session 通过 SQLAlchemy event
   自动在 query 上拼 `tenant_id = :current_tenant`；Celery task headers 自动带
   租户上下文（14.3 已经预留接口）。
-- **19.3** Postgres Row-Level Security policy —— DB 层兜底，防 ORM 漏过滤。
-- **19.4** **重构** Redis key 命名 —— 所有 namespace 前面加 `tenant:{id}:` 前缀；
+- **21.3** Postgres Row-Level Security policy —— DB 层兜底，防 ORM 漏过滤。
+- **21.4** **重构** Redis key 命名 —— 所有 namespace 前面加 `tenant:{id}:` 前缀；
   `src/cache/base.py` 的 key 构造改为强制注入租户上下文（无上下文则抛错而不是
   fall back 到 default）。
-- **19.5** 按租户的配额（LLM token、scrape 速率、存储）。超限返回 429。
-- **19.6** Audit log 表 —— `audit_events`（提交、设置变更、凭据操作、手动调度
+- **21.5** 按租户的配额（LLM token、scrape 速率、存储）。超限返回 429。
+- **21.6** Audit log 表 —— `audit_events`（提交、设置变更、凭据操作、手动调度
   触发）。append-only。
-- **19.7** **重构** 凭据存储 —— `src/providers/store.py` 从单文件全局 JSON 切到
+- **21.7** **重构** 凭据存储 —— `src/providers/store.py` 从单文件全局 JSON 切到
   `data/tenants/{id}/credentials/`，keyring entry 命名加租户前缀；migrate 现有
   `data/providers/credentials.json` 到 `default` 租户。
 
@@ -775,14 +896,19 @@ tenant 前缀，需要全局改 wrapper）、19.7 凭据存储（`src/providers/
 | 17.8 | Material Strategy & Document Library | 1 周 | 已完成 |
 | 17.9 | LLM Provider Expansion | 0.5 周 | 已完成 |
 | **18** | **Worker 激活 / 可靠性 / 并行 / 垃圾清理** | **2.5–3 周** | **下一步** |
-| 19 | 多租户 & Auth 加固 | 2.5 周 | 已推迟（等个人版成熟后再做） |
+| 19 | Per-Posting Tag Cache & Filter Fast Path | 2 周 | 已规划 |
+| 20 | 用户自定义 Job Sources（Connectors）—— ATS 检测 + LLM 模板 | 3 周 | 已规划 |
+| 21 | 多租户 & Auth 加固 | 2.5 周 | 已推迟（等个人版成熟后再做） |
 
 个人版产品到 Phase 17.9 已 feature-complete。Phase 18 把它做硬（真 worker、
-retention、并行）；Phase 19 再激活 Phase 12-17 留下的多租户底座。Phase 18 是在
-Phase 17 收尾 / Phase 18 准备阶段做完一次 worker 系统审计之后才确定的 —— 那次
-审计发现 task body 都是 stub、没有 cleanup 策略、并行机会从未被探索过。
-Phase 19 原本是下一个里程碑（多租户 & Auth），比 v3 多 0.5 周用来承认 auth
-middleware / Redis namespace / 凭据存储是新建而非"激活"。
+retention、并行）；Phase 19 把搜索缓存模型换掉，让多 source 下不会重复评分；
+Phase 20 把"用户自定义公司招聘站"这个能力打通；Phase 21 才激活 Phase 12-20
+一路留着的多租户底座。Phase 18 是在 Phase 17 收尾时做完一次 worker 系统
+审计之后确定的 —— 那次审计发现 task body 都是 stub、没有 cleanup 策略、
+并行机会从未被探索过。Phase 19 重启了 2026-05-16 排上但被 17.9/18 重排
+挤掉两次的缓存计划。Phase 20 承接"我就要 Nvidia"那类用户诉求，做成两层
+架构。Phase 21 已经被推迟了四次（18 → 19 → 20 → 21）—— 每次推迟都让
+schema 层的 `tenant_id` 纪律继续保持，最终激活成本可控。
 
 ## 9. 横切质量基线
 
@@ -797,7 +923,8 @@ Phase 11 起强制执行：
 - **文档同步** —— `docs/PROJECT_MANAGEMENT.md` + `docs/CHANGELOG.md` 在每个
   Phase 收尾时更新，不要攒一批。
 - **多租户卫生**（Phase 12+） —— 每张新表带 `tenant_id`；每个新 Redis key
-  带前缀；每个新后台任务接收 tenant 上下文。零例外，否则 Phase 19 变成重写。
+  带前缀；每个新后台任务接收 tenant 上下文。零例外，否则最终的多租户阶段
+  （现 Phase 21）会变成重写。
 
 ## 10. 验收清单（按 Phase 的 smoke）
 
@@ -843,5 +970,5 @@ Phase 11 起强制执行：
   —— 数据层允许但没有 advisory lock，会引发重复提交。
 - **Auto-submit 安全性。** `apply` 里有 `--auto-submit`，但仍走 HITL gate。
   我们还没看到能让我们按 vendor 摘掉 gate 的 eval 数据。
-- **没有 SaaS 业务层。** Phase 19 是多租户托管基础设施，不是计费 / 注册 /
+- **没有 SaaS 业务层。** Phase 21 是多租户托管基础设施，不是计费 / 注册 /
   营销。除非有商业 license 客户签约，否则这部分都在范围外。

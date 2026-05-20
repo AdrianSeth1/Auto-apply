@@ -212,8 +212,9 @@ existing HITL gate/review item rather than retrying.
 * Unreviewed autonomous submission.
 * Agents owning task queue state, database writes, Redis keys, or global
   scheduling.
-* Hosted multi-tenant identity and policy enforcement; that is Phase 18
-  product hardening rather than an agent-harness responsibility.
+* Hosted multi-tenant identity and policy enforcement; that is Phase 21
+  product hardening (originally Phase 18) rather than an agent-harness
+  responsibility.
 
 See `docs/PROJECT_MANAGEMENT.md` for the current roadmap and
 verification baseline. See `docs/PHASE_HISTORY.md` for shipped phase
