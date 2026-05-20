@@ -22,6 +22,18 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from src.application.schedule_control import (
+    ScheduleEntryNotFound,
+    dispatch_schedule_entry,
+    run_schedule_entry_now,
+)
+from src.application.task_control import (
+    TaskControlError,
+    cancel_task_record,
+    list_task_records,
+    require_task_for_tenant,
+    retry_task_record,
+)
 from src.application.automation_plans import (
     delete_automation_plan_data,
     get_automation_plan,
@@ -32,7 +44,7 @@ from src.application.automation_plans import (
 from src.core.config import load_config
 from src.core.database import get_engine
 from src.core.models import GateRequest, TaskRecord
-from src.tasks import celery_app, gate
+from src.tasks import gate
 from src.tasks.beat import SCHEDULE_DISPLAY, TASK_KIND_DISPLAY, get_schedule
 from src.tasks.context import tenant_header_name
 
@@ -223,17 +235,13 @@ def list_tasks(
 ) -> TaskListDTO:
     if limit < 1 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be 1..500")
-    stmt = (
-        select(TaskRecord)
-        .where(TaskRecord.tenant_id == tenant)
-        .order_by(TaskRecord.created_at.desc())
-        .limit(limit)
+    rows = list_task_records(
+        session,
+        tenant_id=tenant,
+        limit=limit,
+        status=status,
+        kind=kind,
     )
-    if status:
-        stmt = stmt.where(TaskRecord.status == status)
-    if kind:
-        stmt = stmt.where(TaskRecord.kind == kind)
-    rows = list(session.execute(stmt).scalars())
     return TaskListDTO(
         items=[TaskRowDTO.from_row(r) for r in rows], total=len(rows)
     )
@@ -245,8 +253,8 @@ def get_task(
     tenant: str = Depends(get_tenant),
     session: Session = Depends(get_session),
 ) -> TaskRowDTO:
-    row = _resolve_task(session, task_id)
-    if row is None or row.tenant_id != tenant:
+    row = require_task_for_tenant(session, task_id, tenant_id=tenant)
+    if row is None:
         raise HTTPException(status_code=404, detail="task not found")
     return TaskRowDTO.from_row(row)
 
@@ -257,28 +265,18 @@ def cancel_task(
     tenant: str = Depends(get_tenant),
     session: Session = Depends(get_session),
 ) -> TaskRowDTO:
-    row = _resolve_task(session, task_id)
-    if row is None or row.tenant_id != tenant:
+    row = require_task_for_tenant(session, task_id, tenant_id=tenant)
+    if row is None:
         raise HTTPException(status_code=404, detail="task not found")
-    if row.status != "queued":
+    try:
+        cancel_task_record(row)
+    except TaskControlError as exc:
         raise HTTPException(
             status_code=409,
-            detail=f"only queued tasks may be cancelled; got {row.status}",
-        )
-    # P1 codex fix: revoke the broker message FIRST so a worker
-    # cannot still claim it. ``terminate=False`` is correct here --
-    # we only cancel queued (not running) tasks; ``terminate=True``
-    # would SIGKILL a running task, which is not what the operator
-    # asked for. If the revoke broadcast races a worker that already
-    # picked the message up, the prerun handler's status-guard
-    # (Phase 14.2) refuses to flip ``cancelled`` back to ``running``.
-    if row.celery_task_id:
-        try:
-            celery_app.control.revoke(row.celery_task_id, terminate=False)
-        except Exception:  # noqa: BLE001 -- audit must win even if broker is flaky
-            pass
-    row.status = "cancelled"
+            detail=str(exc),
+        ) from exc
     session.commit()
+    session.refresh(row)
     return TaskRowDTO.from_row(row)
 
 
@@ -288,26 +286,17 @@ def retry_task(
     tenant: str = Depends(get_tenant),
     session: Session = Depends(get_session),
 ) -> dict[str, str]:
-    row = _resolve_task(session, task_id)
-    if row is None or row.tenant_id != tenant:
+    row = require_task_for_tenant(session, task_id, tenant_id=tenant)
+    if row is None:
         raise HTTPException(status_code=404, detail="task not found")
-    if row.status not in {"failed", "cancelled"}:
+    try:
+        result = retry_task_record(row)
+    except TaskControlError as exc:
         raise HTTPException(
             status_code=409,
-            detail=f"only failed/cancelled tasks may be retried; got {row.status}",
-        )
-    # The ``before_task_publish`` audit handler (Phase 14.2) creates a
-    # fresh ``TaskRecord`` for this new attempt because we deliberately
-    # do NOT set ``x-autoapply-audit-ok``. The previous row stays as
-    # historical record; the new dispatch shows up in ``/api/tasks``
-    # under its own row.
-    celery_app.send_task(
-        row.kind,
-        kwargs=row.payload or {},
-        queue=row.queue,
-        headers={tenant_header_name(): row.tenant_id},
-    )
-    return {"retried": str(row.id), "kind": row.kind}
+            detail=str(exc),
+        ) from exc
+    return {"retried": result["retried"], "kind": result["kind"]}
 
 
 # ---- /api/schedule -----------------------------------------------------
@@ -367,36 +356,19 @@ def automation_plan_run_now(plan_id: str, tenant: str = Depends(get_tenant)) -> 
     plan = get_automation_plan(plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail=f"no such automation plan: {plan_id}")
-    entry = schedule_entry_for_plan(plan)
-    task_name = str(entry["task"])
-    queue = str(entry.get("options", {}).get("queue", "maintenance"))
-    celery_app.send_task(
-        task_name,
-        kwargs=entry.get("kwargs") or {},
-        queue=queue,
-        headers={tenant_header_name(): tenant},
-    )
-    return {"enqueued": task_name, "queue": queue}
+    return dispatch_schedule_entry(schedule_entry_for_plan(plan), tenant_id=tenant)
 
 
 @router.post("/api/schedule/{name}/run-now")
 def schedule_run_now(
     name: str, tenant: str = Depends(get_tenant)
 ) -> dict[str, str]:
-    schedule = get_schedule()
-    meta = SCHEDULE_DISPLAY.get(name, {})
-    if name not in schedule or not bool(meta.get("user_facing", False)):
-        raise HTTPException(status_code=404, detail=f"no such schedule entry: {name}")
-    entry = schedule[name]
-    task_name = str(entry["task"])
-    queue = str(entry.get("options", {}).get("queue", "maintenance"))
-    celery_app.send_task(
-        task_name,
-        kwargs=entry.get("kwargs") or {},
-        queue=queue,
-        headers={tenant_header_name(): tenant},
-    )
-    return {"enqueued": task_name, "queue": queue}
+    try:
+        return run_schedule_entry_now(name, tenant_id=tenant, user_facing_only=True)
+    except ScheduleEntryNotFound as exc:
+        raise HTTPException(
+            status_code=404, detail=f"no such schedule entry: {name}"
+        ) from exc
 
 
 # ---- /api/gate ---------------------------------------------------------
@@ -477,15 +449,6 @@ def reject_gate(
 
 
 # ---- helpers -----------------------------------------------------------
-
-
-def _resolve_task(session: Session, ident: str) -> TaskRecord | None:
-    try:
-        uid = uuid.UUID(ident)
-    except ValueError:
-        stmt = select(TaskRecord).where(TaskRecord.celery_task_id == ident).limit(1)
-        return session.execute(stmt).scalar_one_or_none()
-    return session.get(TaskRecord, uid)
 
 
 def _resolve_gate(session: Session, ident: str) -> GateRequest | None:

@@ -358,3 +358,101 @@ This log captures key decisions, their rationale, and alternatives considered. E
 **Enforcement**:
 - `src/documents/user_documents.py:ingest` is the single write path; it always sets `origin`, dedupes on `(tenant_id, document_type, checksum)`, and stores under `data/user_documents/<tenant>/<document_type>/`. Generated artifacts call this with `origin='generated_promoted'` only via the explicit promote endpoint.
 - `src/generation/materials_router.py` continues to consume `SourceResume` for its internal `patch_existing` mode; `user_documents.to_source_resume_view()` is the adapter when a UserDocument drives that mode from a user-initiated request.
+
+---
+
+## D028 — `data/output/` is cache; user assets are protected by references (2026-05-20)
+
+**Decision**: Phase 18 cleanup is an automatic artifact-lifecycle system, not a manual dry-run-only scanner. Scheduled cleanup may move files out of `data/output/`, but only after building a database-derived protected-path set and classifying each candidate. Protected user assets are never removed by normal automatic cleanup. Eligible temp, failed, orphaned, screenshot, and soft-deleted application artifacts are moved into `data/quarantine/<run_id>/` first, then permanently purged only after the configured quarantine window.
+
+**Rationale**:
+
+1. **The file leak is already a production problem for the local product.** Generated resumes, cover letters, screenshots, temp files, and failed patch outputs accumulate indefinitely. Making cleanup manual-only would leave the product in a state where normal use slowly degrades the workspace.
+2. **Avoiding deletion is not the same as protecting user data.** The correct protection boundary is explicit ownership and live references: document-library files, source resumes, templates, current application artifacts, review/gate/task references, and task results form the protected set. Everything else is cache or intermediate output and needs a lifecycle.
+3. **Quarantine gives both automation and recoverability.** Moving a candidate out of `data/output/` solves the clutter immediately while preserving a restore window. A direct permanent delete would be harder to trust; a dry-run-only system would not solve the problem.
+4. **Auditable cleanup is operable cleanup.** Every run must explain what happened: path, category, action, reason, size, mtime, protected-match status, bytes reclaimed, and restore/purge state. Operators need to answer "why did this disappear?" without reading logs.
+
+**Policy commitments**:
+
+- Build the protected set from Postgres before each run: application material references, `user_documents.storage_path`, `source_resumes.storage_path`, review/gate/task payload paths, `TaskRecord.result` artifact paths, template packages, profile/source-resume originals, and any future durable artifact table.
+- Classify candidates before action: `protected` (never delete), `tmp` / `.part` / half-written files, `failed_artifact`, `orphan_output`, `screenshot`, `soft_deleted_app_artifact`, and task/trace retention rows.
+- Scheduled cleanup is enabled in Phase 18, but safe-by-construction: move eligible files to quarantine, cap deletes per run, write cleanup reports, and purge quarantine only after `cleanup.quarantine_days`.
+- Manual CLI uses the same engine as the scheduler: `autoapply cleanup scan`, `autoapply cleanup clean`, `autoapply cleanup restore <run_id> <path>`, and `autoapply cleanup purge-quarantine`.
+
+**Trade-offs**:
+
+- Quarantine temporarily uses extra disk instead of immediately reclaiming all bytes. Accepted because it gives a recovery window while removing clutter from active output directories.
+- Reference scanning must stay current as new artifact tables land. Accepted; missing a new durable reference is a P1 review blocker for any phase that writes files.
+
+**Enforcement**:
+
+- Cleanup tests seed protected and orphan paths, run the scheduler path and CLI path through the same engine, and assert protected files survive while eligible files move to quarantine with a cleanup item row.
+- Permanent purge tests assert files cannot be purged before the quarantine window and that restore clears/updates the cleanup item state.
+
+---
+
+## D029 — Phase 19 A1 tags bind to snapshots; A2 scores bind to profile and scorer versions (2026-05-20)
+
+**Decision**: Phase 19 keeps the product behavior that every search hits upstream after the result-set TTL short-circuit is removed. The caching boundary is analysis, not fetch. A1 objective tags are stored on `job_snapshots` because tags describe a specific JD version. A2 score cache rows are keyed by tenant, snapshot, profile, profile version, and scorer version so rule/prompt/agent changes cannot reuse stale verdicts. Pending or failed tags never cause automatic rejection; they fall back to the slower scoring path.
+
+**Rationale**:
+
+1. **JD content is versioned by snapshot.** Work mode, level, sponsorship wording, clearance requirements, and location constraints can change while the posting identity remains stable. Snapshot-level tags preserve "why did we judge this JD this way at that time?"
+2. **Objective tags and subjective scores are different caches.** A1 tags are profile-independent facts about the JD. A2 verdicts depend on the user's profile plus scorer behavior. Mixing them would make tags non-reusable and make cache invalidation ambiguous.
+3. **Scorer behavior changes need explicit invalidation.** A profile hash alone is insufficient. A hard-rule change, prompt change, or agent behavior change must cold-start score cache reads via `scorer_version` (and optionally `agent_version` / `model_id` for deeper audit).
+4. **Fresh search is a product choice for now.** The old TTL hid new postings. Until real LinkedIn rate-limit or cookie-failure evidence appears, Phase 19 intentionally fetches upstream on every search and keeps only the analysis hot path cached.
+
+**Policy commitments**:
+
+- `job_snapshots` carries `tags`, `tagger_version`, `tags_status`, and `tags_computed_at`. `job_postings` may carry denormalized latest tags for UI speed, but snapshot tags are the source of truth.
+- `job_posting_scores` unique key includes at least `(tenant_id, snapshot_id, profile_id, profile_version, scorer_version)`.
+- `src/jobs/tagger.py` must not read profile data and must not emit subjective labels such as `good_match`, `worth_applying`, or `high_priority`.
+- `posting.tag_backfill` processes stale tagger versions in batches and lets the UI show progress while fast-path falls back to slow scoring.
+- Phase 19 avoids repeated scoring for the same snapshot + profile/scorer version. Cross-source canonical dedupe is explicitly out of scope.
+
+**Trade-offs**:
+
+- Snapshot-level tags duplicate data when many snapshots are similar. Accepted because correctness and auditability matter more than a small JSONB storage cost.
+- Every-search upstream fetching may become too aggressive later. Accepted for the current observed environment; a future source-aware degradation phase can be justified by real rate-limit/cookie-failure data.
+
+**Enforcement**:
+
+- Tests assert tagger functions are profile-independent and that pending/failed tags do not reject jobs.
+- Score-cache tests assert changing `profile_version` or `scorer_version` misses cache while identical keys reuse the cached verdict.
+- Backfill tests assert `TAGGER_VERSION` bumps enqueue paginated retag work rather than scanning the full table in one transaction.
+
+---
+
+## D030 — Custom job sources are URL-guarded connectors; LLM templates are constrained DSL (2026-05-20)
+
+**Decision**: Phase 20 user-added job sources must pass a URL safety boundary before any network fetch or Playwright navigation. The product model separates connector capability definitions from user-configured `JobSource` instances. Tier 1 ATS connectors and bounded multi-source search are the required deliverable. Tier 2 LLM-assisted scraper templates are feature-gated off by default and may only generate a constrained selector/step DSL, never arbitrary Playwright code.
+
+**Rationale**:
+
+1. **User URLs are an SSRF surface.** A local-first app still must not let `POST /api/sources` fetch `localhost`, private IPs, cloud metadata IPs, `file://`, or arbitrary redirected targets. Source fetch must not become an internal network probe.
+2. **Connectors and sources are different concepts.** Greenhouse/Lever/Workday are reusable capabilities. Nvidia careers or Stripe careers are tenant-owned configured instances. Mixing those concerns makes state, health, and future multi-tenancy harder.
+3. **Long-tail scraper templates are high risk.** They rot, cost tokens, and can mis-extract data. They should not block the ATS connector baseline and must be explicitly enabled.
+4. **LLMs should fill configuration, not write browser programs.** A constrained DSL lets us validate selectors, cap pages, lock domains, preview results, and block dangerous actions. Arbitrary Playwright code from an LLM is not acceptable.
+5. **Multi-source search must degrade partially.** One bad source should update its health and return a partial result, not fail the whole search or stall all other sources.
+
+**Policy commitments**:
+
+- URL guard allows only `http://` and `https://`; rejects localhost, private ranges, metadata IPs, unsupported schemes, oversized responses, excessive redirects, and unsafe redirected targets.
+- Playwright template execution is domain-locked and forbids arbitrary JS evaluation, form submit, file upload, download, and cross-domain navigation.
+- `job_sources` represents user-configured instances with `tenant_id`, `connector_kind`, `status`, `health_status`, probe timestamps, and last error. No ambiguous `owner_tenant_id` field.
+- Source states are explicit: `draft`, `probing`, `active`, `degraded`, `needs_review`, `disabled`, `deleted`. Only `active` participates in normal search.
+- Multi-source search has bounded fan-out, per-source interval/timeout/page/job budgets, and partial-failure behavior.
+- LLM template inference is behind `custom_sources.llm_templates.enabled=false` by default. Activation requires user preview/confirmation of extracted jobs and field selectors.
+- Per-source session state lives under `data/sources/{tenant_id}/{source_id}/storage_state.json`, not in `job_sources` JSONB.
+
+**Trade-offs**:
+
+- The URL guard will reject some legitimate local/private career portals. Accepted; a future explicit allowlist can be designed if a real need appears.
+- The constrained DSL cannot handle every arbitrary website. Accepted; universal scraping is not the Phase 20 promise.
+- Partial results mean the UI must explain source-level failures. Accepted because it keeps useful results flowing.
+
+**Enforcement**:
+
+- Tests cover blocked localhost/private/metadata URLs, redirect revalidation, response-size/timeout failures, and Playwright domain lock violations.
+- Connector fixtures cover ATS detection, `fetch_jobs`, RawJob normalization, dedupe key, source health, and partial failure without live websites.
+- Template tests assert LLM output validates against the DSL, preview is required before activation, and dangerous steps are rejected.

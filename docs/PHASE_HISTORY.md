@@ -33,7 +33,7 @@ This file is the compact archive of shipped AutoApply phases. It preserves proje
 
 The current baseline is a local-first automation product with a web console, durable Postgres records, Redis/Celery background execution, explicit review before submit, user-curated document library, and multi-vendor provider-agnostic LLM support.
 
-The next planned milestone is **Phase 18: Worker Activation, Reliability, Parallelism, Cleanup** (re-ordered 2026-05-19). Multi-tenancy & auth hardening, originally Phase 18, has been deferred to Phase 19 until the personal-version product is feature-complete.
+The next planned milestone is **Phase 18: Worker Activation, Reliability, Parallelism, Cleanup** (re-ordered 2026-05-19, refined 2026-05-20 to include full worker-stub closeout, durable task results/DLQ, and automatic artifact cleanup with quarantine/audit). Multi-tenancy & auth hardening, originally Phase 18, has been deferred to Phase 21 until the personal-version product is feature-complete.
 
 ## Detail Pointers
 

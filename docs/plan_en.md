@@ -15,7 +15,7 @@ To reduce duplication, use the following source-of-truth split:
 | User-facing setup | `docs/DEPLOYMENT.md` |
 | This file | Strategy, historical roadmap context, long-form planning notes |
 
-Last refreshed: **2026-05-19 (Phase 17.9 documentation sync)**. Current operating status, verification, and next roadmap live in `docs/PROJECT_MANAGEMENT.md`. This plan keeps the long-form rationale. v3.1 calibrated the roadmap in four places:
+Last refreshed: **2026-05-20 (Phase 18/19/20 scope refinement)**. Current operating status, verification, and next roadmap live in `docs/PROJECT_MANAGEMENT.md`. This plan keeps the long-form rationale. v3.1 calibrated the roadmap in four places:
 (a) Phase 14 task queue switches to Celery (the original "self-built task model +
 queue transport + worker runtime" plan is dropped; see D025). APScheduler is
 retired in favor of Celery Beat for cron triggers.
@@ -30,7 +30,7 @@ reinvent it (see D026).
 exists, so Phase 15 is not "build LaTeX from scratch" — it is "add the template
 package spec + manifest + adapter convention on top of an existing engine."
 
-The 2026-05-19 refresh records Phase 17.9 as complete: the provider layer now covers OpenAI, Anthropic, Gemini, DeepSeek, Moonshot/Kimi, Qwen, xAI Grok, Groq, Mistral, OpenRouter, Ollama, Claude CLI, Codex CLI, and user-defined OpenAI-compatible providers. The same refresh inserted **Phase 19** (Per-Posting Tag Cache & Filter Fast Path — reinstating the 2026-05-16 cache plan) and **Phase 20** (Custom Job Sources / Connectors) between Phase 18 (worker activation / reliability / parallelism / cleanup) and the multi-tenancy work, which now lands as **Phase 21**.
+The 2026-05-19 refresh records Phase 17.9 as complete: the provider layer now covers OpenAI, Anthropic, Gemini, DeepSeek, Moonshot/Kimi, Qwen, xAI Grok, Groq, Mistral, OpenRouter, Ollama, Claude CLI, Codex CLI, and user-defined OpenAI-compatible providers. The same refresh inserted **Phase 19** (Per-Posting Tag Cache & Filter Fast Path — reinstating the 2026-05-16 cache plan) and **Phase 20** (Custom Job Sources / Connectors) between Phase 18 (worker activation / reliability / parallelism / cleanup) and the multi-tenancy work, which now lands as **Phase 21**. The 2026-05-20 refinement tightens Phase 18: all worker stubs must close out, task results and DLQ state must be durable, parallelism needs global/provider limits, sync fallback is short-lived debug only, and cleanup must be automatic quarantine + audit. It also tightens Phase 19: searches still hit upstream every time, but A1 tags bind to JD snapshots, A2 score cache keys include profile/scorer versions, and pending/failed tags fall back to the slow path instead of rejecting. Phase 20 also gains URL safety boundaries, a source state machine, multi-source rate limits / partial failure, a constrained template DSL, and a feature-gated LLM-template tier.
 
 ---
 
@@ -369,7 +369,7 @@ phase (**Phase 13: Job Index & Freshness Engine**) because the
 problem is content versioning + freshness state machines + audit
 binding, not key-value eviction. (See D019.)
 
-Multi-tenancy & auth hardening still closes the commercial-ready core, but it is now **Phase 21** after a three-step deferral: original Phase 18 → 19 → 20 → 21. **Phase 18** is worker activation, reliability, parallelism, and cleanup so the personal-version product is solid before any further product work. **Phase 19** then reinstates the per-posting tag cache & filter fast-path that was scoped on 2026-05-16 and displaced twice. **Phase 20** opens the system to user-added company careers sites (ATS-first, LLM-templates for the long tail). Every Phase 12+ table — including the new Phase 19-20 tables — is still built with `tenant_id` from day one. (See D020 / D026.)
+Multi-tenancy & auth hardening still closes the commercial-ready core, but it is now **Phase 21** after a three-step deferral: original Phase 18 → 19 → 20 → 21. **Phase 18** is worker activation, reliability, parallelism, and cleanup so the personal-version product is solid before any further product work. **Phase 19** then reinstates the per-posting tag cache & filter fast-path that was scoped on 2026-05-16 and displaced twice. **Phase 20** opens the system to user-added company careers sites with URL safety first, ATS connectors as the baseline, and feature-gated LLM template DSL for the long tail. Every Phase 12+ table — including the new Phase 19-20 tables — is still built with `tenant_id` from day one. (See D020 / D026.)
 
 ### Phase 11: Reliability & Cleanup (~1 week)
 Tighten the provider layer; ship the migration tool needed for users
@@ -766,46 +766,64 @@ mid-May 2026 as "the bones of MQ are there, the body isn't." This
 phase fills the body in, and pays down the cleanup debt that has
 been accumulating since Phase 15.
 
-Four pillars, mapped one-to-one to the failure modes surfaced during
+Six pillars, mapped one-to-one to the failure modes surfaced during
 the late-Phase-17 / Phase-18-prep sweep:
 
-1. **The work isn't on the queue.** `materials.generate`,
-   `application.prepare/fill/submit`, `maintenance.cache_eviction`,
-   `maintenance.gate_expire_sweep` — every task body is a stub that
-   logs "queued" and returns `"scheduled"`. The actual generation
-   runs synchronously inside the FastAPI request handler, so closing
-   a browser tab mid-LLM-call loses the work and worker horizontal
-   scaling is impossible.
+1. **The work isn't on the queue, and stubs are not closed out.**
+   `materials.generate`, `application.prepare/fill/submit`, `jobs.enrich`,
+   `maintenance.status_sync`, `maintenance.jd_health_check`,
+   `maintenance.linkedin_cookie_refresh`, `maintenance.cache_eviction`,
+   and `maintenance.gate_expire_sweep` still include bodies that only
+   log "queued" / "tick" and return `"scheduled"` / `"stubbed"`.
+   Actual generation still runs synchronously in FastAPI, so closing a
+   browser tab mid-LLM-call loses the work. Phase 19's content-change
+   tag trigger would also be blocked if `jobs.enrich` remains stubbed.
 2. **MQ reliability is configured but unexercised.** `task_acks_late=
    True`, `task_reject_on_worker_lost=True`, `worker_prefetch_
    multiplier=1`, idempotency-key short-circuit, `TaskRecord` audit
-   row state machine — all of it sits unverified because (1).
-3. **Parallelism is left on the table.** Bullet rewrites run serially
+   row state machine — all of it sits unverified because (1). Durable
+   task `result`, DLQ status, and last-attempt metadata are also not
+   modeled yet.
+3. **Async APIs need a result contract, not only a task id.** Polling
+   `GET /api/tasks/{task_id}` must return generated artifacts,
+   application updates, and error summaries, not only `succeeded` /
+   `failed`; otherwise the UX moves from "sync request hangs" to
+   "async task succeeded but the user cannot find the files."
+4. **Parallelism is left on the table, and local gather is not enough.** Bullet rewrites run serially
    inside `rewrite_bullets` (one LLM call per bullet); resume +
    cover-letter generation are sequential inside one request; JD
-   parsing for N search results runs one-LLM-at-a-time. LinkedIn
-   detail-page enrichment is **correctly** serial (anti-bot) and
-   stays that way.
-4. **No garbage collection.** `data/output/` only grows; failed
+   parsing for N search results runs one-LLM-at-a-time. But local
+   `asyncio.gather(max=5)` alone is unsafe because multiple workers ×
+   multiple tasks can multiply into provider abuse. We need global and
+   provider-level concurrency gates. LinkedIn detail-page enrichment is
+   **correctly** serial (anti-bot) and stays that way.
+5. **No automatic garbage collection.** `data/output/` only grows; failed
    patches leave half-written `patched_resume_<uuid>.docx`; screenshot
    directories accumulate every form-fill attempt; `TaskRecord` has
    no retention policy; `delete_document` is the only path that
-   removes a file from disk.
+   removes a file from disk. Manual dry-run is not enough; Phase 18
+   must ship daily automatic cleanup.
+6. **The synchronous fallback can become a permanent fork.**
+   `AUTOAPPLY_SYNC_MATERIALS=1` is useful for soak/debug, but it cannot
+   remain a formal second execution path with separate state updates,
+   audit, and artifact writeback.
 
-**Honest scope**: 18.1 is net-new code (real task bodies, async API
-contract). 18.2 is "exercise + add DLQ + manual-retry UI" on top of
-infrastructure that already exists. 18.3 is mostly `asyncio.gather`
-+ rate-limit threading. 18.4 is net-new (no cleanup logic exists
-today outside `delete_document` + the profile-import `_upload_*`
-tmpfile unlink). The four are bundled into one phase because they
-share a single audience (the worker + operator), but they're
-internally sequential: 18.4 (cleanup) is independent and ships
-first to stop the bleed; 18.1 (activation) unblocks 18.2 and 18.3.
+**Honest scope**: 18.1 is net-new code (close every registered/scheduled
+stub). 18.2 is async API contract + `TaskRecord.result`. 18.3 exercises
+the existing reliability foundation and adds a durable DLQ model +
+manual-retry UI. 18.4 is a new automatic cleanup system, not just a
+dry-run scanner. 18.5 is `asyncio.gather` / `to_thread` plus global and
+provider-level rate-limit threading. 18.6 retires the sync fallback as
+a product path. They share one audience (worker + operator), but are
+sequenced: 18.4 is independent and ships first to stop the bleed;
+18.1/18.2 unblock 18.3 and 18.5; 18.6 closes after the async path soaks.
 
 Sub-phases:
 
-- **18.1 Worker activation** — fill the stub task bodies with the
-  real call chain. Concretely:
+- **18.1 Worker stub closeout** — fill every registered / Beat-scheduled /
+  UI-triggered stub task body with a real call chain; by the end of
+  Phase 18, `src/tasks/tasks.py` should not contain fake-success tasks.
+  Concretely:
   - `materials.generate` invokes `generate_material_for_job` end-to-end
     using the `MaterialsGeneratePayload` already shaped in Phase 17.8.
     Writes the resulting artifact paths back onto the `Application`
@@ -815,37 +833,97 @@ Sub-phases:
     bodies — `application.submit` keeps the pre-submit gate (Phase
     17) wiring; HITL transitions still use the `waiting_human` audit
     state (no `time.sleep` in workers).
+  - `jobs.enrich` calls the real `enrich_posting` / content-hash refresh
+    chain so Phase 19's `posting.tag` on-content-changed trigger has a
+    reliable upstream.
+  - `maintenance.gate_expire_sweep` expires old gates;
+    `maintenance.jd_health_check` drives freshness decay;
+    `maintenance.cache_eviction` becomes the artifact-cleanup entry;
+    `maintenance.linkedin_cookie_refresh` at least probes session health
+    and records failures in task/UI state; `maintenance.status_sync`, if
+    not implemented, returns explicit `not_implemented` and is removed
+    from Beat/UI success surfaces.
+
+- **18.2 Async API + task result** — long-running routes enqueue and
+  return durable task ids, and polling can retrieve the produced artifacts.
   - Async REST surface: `POST /api/jobs/generate-material` and
     `POST /api/applications/{id}/regenerate-material` switch to
     "enqueue + return `task_id`", with `GET /api/tasks/{task_id}`
     polling endpoint backed by `TaskRecord`. SPA gets a generic
     "long-running operation" hook so existing views can swap in
     progress polling without per-view boilerplate.
-  - The existing synchronous endpoints are retained behind a feature
-    flag (`AUTOAPPLY_SYNC_MATERIALS=1`) for a one-week soak; default
-    is async.
+  - Add `result JSONB` (or equivalent durable storage) to `tasks` /
+    `TaskRecord`. Successful workers write structured output such as
+    `application_id`, `resume_path`, `cover_letter_path`, promoted
+    document id, and trace id; `GET /api/tasks/{task_id}` returns it.
+  - Failures keep short summaries in `last_error`; full diagnostics stay
+    in the trace store.
   - **Tests**: end-to-end test that fires `materials.generate` via
     `apply_async` against an in-process Celery worker (`task_always_
     eager=True` is **not** used — we need the real broker contract).
 
-- **18.2 Resilience exercise + DLQ + manual retry** —
+- **18.3 Resilience exercise + DLQ + manual retry** —
   - Add a `tests/test_worker_resilience.py` suite that kills a
     worker mid-task (`os.kill(pid, SIGTERM)` on a subprocess Celery
     worker) and asserts the task is requeued exactly once with the
     same `idempotency_key`. Same for poison-message handling.
-  - Dead-letter queue: tasks that exhaust `max_retries=3` move to
-    a per-kind DLQ (`materials.generate.dlq`, etc.) instead of being
-    silently absorbed by the audit row's `failed` state. DLQ entries
-    surface in the Tasks UI with a "Retry from DLQ" button that
-    creates a fresh task with the same payload + a new idempotency
-    key (so the original failure stays auditable).
-  - `TaskRecord` lifecycle hooks already exist; this phase verifies
-    them end-to-end and adds the missing `last_attempted_at` /
-    `dlq_reason` fields if the audit rows don't already capture them.
+  - Dead-letter queue: Postgres is the source of truth. Add a durable
+    `dead_lettered` state plus `last_attempted_at`, `dlq_reason`, and
+    `dead_lettered_at` fields (or an equivalent `task_dead_letters`
+    table, but it must be queryable through `/api/tasks`). Tasks that
+    exhaust `max_retries=3` enter `dead_lettered` instead of being
+    silently absorbed by `failed`.
+  - Redis per-kind DLQs may exist as broker mechanics, but UI / audit /
+    retry do not depend on Redis retention. "Retry from DLQ" creates a
+    fresh task with the original payload + a new idempotency key, while
+    preserving the original failure row.
   - SPA `/tasks` view grows a "Stuck / failed" tab that lists DLQ
     entries with payload preview + retry / discard actions.
 
-- **18.3 Strategic parallelism** —
+- **18.4 Automatic artifact cleanup + quarantine + manual tools** —
+  - `docs/DECISIONS.md` gets D028: "`data/output/` is a cache, not a
+    vault; user assets are protected by a reference index." Review
+    artifact categories, retention, quarantine, and restore semantics
+    before implementation.
+  - New `src/maintenance/artifacts.py` builds a DB-derived protected-path
+    set before every cleanup run: `Application.resume_version` /
+    `cover_letter_version`, `user_documents.storage_path`,
+    `source_resumes.storage_path`, review/gate/task payload artifact
+    paths, `TaskRecord.result` artifact paths, template packages,
+    profile/source-resume originals, and any other durable user asset.
+    Protected paths are never removed by normal automatic cleanup.
+  - Classification rules: `protected` is never deleted; `tmp` / `.part` /
+    half-written files are eligible after 24h; `failed_artifact` after
+    24-72h; `orphan_output` after `cleanup.output_retention_days=30`;
+    soft-deleted application artifacts after
+    `cleanup.soft_deleted_retention_days=14`; screenshots keep the latest
+    5 per application; succeeded task rows archive after 30 days, failed
+    rows after 90, and `waiting_human` never expires.
+  - Daily automatic task: `maintenance.cache_eviction` (or alias
+    `maintenance.artifact_cleanup`) runs scan -> protected-set check ->
+    candidate classification -> move to `data/quarantine/<run_id>/...` ->
+    cleanup report -> permanent purge only after
+    `cleanup.quarantine_days=7`. This must actually move orphans out of
+    `data/output`; it is not just dry-run.
+  - Add `cleanup_runs` / `cleanup_items` audit tables (or equivalent
+    durable reports) with run id, mode, action, reason, path, size, mtime,
+    bytes reclaimed, quarantined/deleted/error counts, and restore status.
+  - CLI: `autoapply cleanup scan`, `autoapply cleanup clean`,
+    `autoapply cleanup restore <run_id> <path>`, and
+    `autoapply cleanup purge-quarantine`. Manual tools share the exact
+    same rules as the scheduled task.
+  - Atomic-write helper: a `with atomic_write(target_path) as tmp`
+    context manager that writes to `target_path.with_suffix(
+    target_path.suffix + ".tmp")` and renames on success, unlinks
+    on exception. Applied to every `generate_*` / `patch_*` /
+    `_copy_library_document_to_output` call site so crashes can't
+    leave half-written DOCX/PDF on disk.
+  - `Application` delete API + UI — `DELETE /api/applications/{id}`
+    soft-deletes by default; `cascade=true` only moves eligible linked
+    artifacts into quarantine. Permanent deletion still waits for the
+    quarantine window.
+
+- **18.5 Strategic parallelism + global/provider limits** —
   - `rewrite_bullets` rewritten as `asyncio.gather` of
     `_rewrite_single_bullet`, capped at 5 concurrent LLM calls
     (provider-rate-limit dependent). Expected: ~30s → ~6s for a
@@ -862,46 +940,25 @@ Sub-phases:
     page fetches. The current serial + random-delay loop in
     `enrich_with_details` is the anti-bot contract and must not
     change inside this phase.
-  - Each parallel hot-spot lands behind a config flag
-    (`parallelism.bullet_rewrites.max_concurrent=5`) so an operator
-    can dial it down if a provider rate-limits.
+  - Config is layered: `parallelism.bullet_rewrites.max_concurrent_per_task=5`,
+    `parallelism.llm.max_concurrent_global=10`, and
+    `parallelism.provider.<id>.max_concurrent=N`. Every LLM call passes
+    through the shared limiter; provider 429s trigger provider-aware
+    backoff instead of task-local retry storms.
 
-- **18.4 Cleanup policy + scheduled garbage collection** —
-  - `docs/DECISIONS.md` gets a new entry (likely D026):
-    "data/output/ is a cache, not a vault" — explicit retention
-    rules per artifact category. Reviewed before writing code.
-  - Atomic-write helper: a `with atomic_write(target_path) as tmp`
-    context manager that writes to `target_path.with_suffix(
-    target_path.suffix + ".tmp")` and renames on success, unlinks
-    on exception. Applied to every `generate_*` / `patch_*` /
-    `_copy_library_document_to_output` call site so crashes can't
-    leave half-written DOCX/PDF on disk.
-  - `maintenance.cache_eviction` task body — actually walks
-    `data/output/` once a day, deletes files older than
-    `cleanup.output_retention_days=30` that are NOT referenced by
-    any `Application.resume_version` / `cover_letter_version` /
-    `user_documents.storage_path`. Dry-run mode flag lands a
-    `cleanup_report` audit row before deletion is enabled.
-  - Screenshot rotation: per-application directory keeps only the
-    latest 5 screenshots; older ones go in a `data/output/screenshots/
-    archive/` tarball nightly.
-  - `TaskRecord` retention: succeeded rows older than 30 days collapse
-    into a `tasks_archive` summary table (per-tenant, per-kind,
-    per-day counts + last error sample). Failed rows kept for 90.
-    HITL `waiting_human` rows never expire.
-  - `Application` delete API + UI — `DELETE /api/applications/{id}`
-    with a `cascade=true` option to unlink the on-disk artifacts.
-    Soft-delete (sets `Application.deleted_at`) by default;
-    cascade removal cleans the files only after the row's audit
-    history is summarised into the archive table.
-  - Orphan scanner CLI: `autoapply cleanup scan` prints what
-    `cache_eviction` would delete; `--apply` actually deletes. Lets
-    operators audit before the scheduled task runs.
+- **18.6 Sync fallback retirement** —
+  - Existing synchronous endpoints stay behind
+    `AUTOAPPLY_SYNC_MATERIALS=1` only for short soak / local debugging;
+    default is async.
+  - UI does not expose the sync path. After Phase 18 acceptance, delete
+    the fallback or mark it dev-only so materials generation does not
+    maintain two state machines.
 
-Sequencing rationale: 18.4 ships first (the orphans are accumulating
-today, independent of MQ status). 18.1 next (unblocks 18.2, 18.3 and
-fixes the lost-work-on-tab-close problem). 18.2 and 18.3 then ship
-in parallel because they touch disjoint files.
+Sequencing rationale: 18.4 ships first (orphans are accumulating today,
+independent of MQ status, and automatic quarantine immediately stops the
+bleed). 18.1/18.2 next (unblocks 18.3, 18.5 and fixes the lost-work-on-
+tab-close problem). 18.3 and 18.5 then ship in parallel because they
+touch disjoint files. 18.6 closes after the async path soaks.
 
 Open questions deferred to later phases:
 - Persistent task progress UI (real-time SSE streaming, not poll-based).
@@ -921,61 +978,100 @@ Open questions deferred to later phases:
 > sources start surfacing the same posting.
 
 Moves the search cache granularity from "result set" down to "single
-posting". Today's `search_results` TTL short-circuit keeps a whole
+JD snapshot / posting analysis result". Today's `search_results` TTL short-circuit keeps a whole
 result set alive for an hour; that means a profile edit during the
 TTL window silently hides postings we already paid to fetch, and a
 new posting from upstream is invisible until the TTL expires. Phase
 19 inverts the model: searches always re-fetch, but each posting's
-**objective attributes** are computed once (A1) and each posting's
-**per-profile score** is cached and reused across searches (A2).
+**objective attributes** are computed once per JD snapshot (A1) and each
+snapshot's **per-profile / per-scorer-version score** is cached and reused
+across searches (A2). Always hitting upstream is intentional in Phase 19:
+we are solving the "new postings hidden by TTL" problem first and will add
+source-aware degradation only if real LinkedIn rate-limit / cookie-failure
+evidence appears.
 
 **Sub-phases:**
 
-- **19.1** Schema migration. `job_postings` gains `tags JSONB`,
-  `tagger_version INT`, `tags_status TEXT` (`pending` / `computing`
-  / `ready` / `failed`), `tags_computed_at TIMESTAMPTZ`. New
-  `job_posting_scores` table (FK `posting_id` + FK `snapshot_id` +
-  `profile_id` + `profile_version` + `score_breakdown JSONB` +
-  `verdict TEXT` + `computed_at`; `UNIQUE (snapshot_id,
-  profile_version)`). Both new columns/table carry `tenant_id` from
-  day one (D026).
-- **19.2** `src/jobs/tagger.py` — pure-function rules over
+- **19.1** Schema migration. A1 tags live on `job_snapshots`, not only
+  `job_postings`: `tags JSONB DEFAULT '{}'`, `tagger_version INT DEFAULT 0`,
+  `tags_status TEXT` (`pending` / `computing` / `ready` / `failed`), and
+  `tags_computed_at TIMESTAMPTZ`. `job_postings` may keep denormalized latest
+  tags for JobsView speed, but historical explanation and fast-path decisions
+  read snapshot-level tags. New `job_posting_scores` table carries
+  `tenant_id`, FK `posting_id`, FK `snapshot_id`, `profile_id`,
+  `profile_version`, `scorer_version`, optional `agent_version` / `model_id`,
+  `score_breakdown JSONB`, `verdict TEXT`, and `computed_at`. Unique key is at
+  least `UNIQUE (tenant_id, snapshot_id, profile_id, profile_version,
+  scorer_version)` so scorer/agent upgrades cannot reuse stale verdicts.
+  Indexes cover `(tenant_id, snapshot_id, profile_id, profile_version,
+  scorer_version)`, `(tenant_id, profile_id, computed_at)`, and
+  `(tenant_id, verdict, computed_at)`. Both new columns/table carry
+  `tenant_id` from day one (D026).
+- **19.2** `src/jobs/tagger.py` — pure-function rules over JD snapshots only,
+  with no profile access:
   `work_mode` / `level` / `sponsorship_signal` / `intern_eligible` /
   `posting_age_bucket` / `clearance_required` / `usa_only`. Module-
-  level `TAGGER_VERSION` constant; bumping it queues a full retag.
+  level `TAGGER_VERSION` constant. A1 only describes objective job attributes;
+  subjective labels such as `good_match`, `worth_applying`, or `high_priority`
+  belong to A2 score, not tags.
 - **19.3** `posting.tag` Celery task kind + `enrich.on_content_changed`
-  listener auto-enqueue on snapshot content-hash change.
+  listener auto-enqueue on snapshot content-hash change. Add paginated
+  `posting.tag_backfill`: process 100/500 snapshots per batch where
+  `tagger_version < TAGGER_VERSION`; show a "tagging in progress" UI banner;
+  fall back to the slow path while backfill drains instead of blocking search.
 - **19.4** `job_posting_scores` write-through: the Filter Agent
   (Phase 16) writes its computed verdict back keyed by
-  `(snapshot_id, profile_version)`; read path checks the table
-  before invoking the agent.
+  `(tenant_id, snapshot_id, profile_id, profile_version, scorer_version)`.
+  Read path reuses only rows matching the current `profile_version` and current
+  `scorer_version`; rule / agent / prompt upgrades naturally cold-start. Old
+  rows stay queryable for audit, but the UI does not scan stale versions by default.
 - **19.5** `cached_search` refactor: drop TTL short-circuit; keep
   `search_results` rows (for "removed since" diff + pagination);
   keep the distributed lock (still want to prevent concurrent
-  same-source scrapes).
+  same-source scrapes). Behavior is explicit: every search hits upstream. If
+  real LinkedIn rate-limit / cookie-failure evidence appears later, a separate
+  phase can add source-aware degradation.
 - **19.6** Filter fast-path (`src/filter/fast_path.py`): A1 hard
   rules reject up-front, A2 cached score reused on hit, otherwise
-  enqueue real Filter Agent. Plan-run picker + Jobs view both route
-  through it.
+  enqueue real Filter Agent. Fallback is explicit: `tags_status in
+  ('pending', 'computing')` shows the posting with `Tagging...` but does not
+  reject via tags; `tags_status='failed'` uses normal scoring / manual retag,
+  never default reject. Plan-run picker + Jobs view both route through it.
 - **19.7** Frontend: tag chips on each posting in JobsView, spinner
   while `tags_status='pending'`, manual `POST /api/jobs/postings/{id}/retag`
-  button. ReviewQueueView surfaces `(cached score · profile vXYZ)`
+  button. ReviewQueueView surfaces `(cached score · profile vXYZ · scorer sABC)`
   so users can tell when a verdict came from cache.
 - **19.8** Docs sweep: README / PROJECT_MANAGEMENT / CHANGELOG;
-  a new Decision entry capturing the A1+A2 split and the
-  `profile_version = sha256(canonical_json(profile))[:12]` derivation.
+  a new Decision entry capturing the A1+A2 split, snapshot-level tags,
+  `profile_version = sha256(canonical_json(profile))[:12]`, the `scorer_version`
+  cache key, and the fact that Phase 19 does not promise cross-source canonical
+  dedupe.
 
 **Behavior change to call out**: searches no longer short-circuit on
 TTL — every search hits the upstream. Justified because the cost was
 masking new postings; the per-posting cache keeps the *analysis* hot
 path cheap rather than the *fetch* hot path.
 
+**Boundary**: Phase 19 avoids repeated scoring for the same snapshot + same
+profile/scorer version. If LinkedIn, Greenhouse, and a company site produce
+different `job_posting` / `job_snapshot` rows for the same real-world job,
+Phase 19 does not promise score reuse across them. We may add a
+`canonical_fingerprint` (company + title + normalized location + application_url)
+as a Phase 20+ stepping stone, but full cross-source canonical dedupe is out of
+scope here.
+
 **`TAGGER_VERSION` bumps are expensive** on a large index. Retag
 enqueues are paginated background work; the UI shows a "tagging in
-progress" banner during the drain. Acceptable as long as it stays a
-rare event.
+progress" banner during the drain; until it finishes, fast-path falls back to
+the slow path and must not mis-reject. Acceptable as long as it stays a rare
+event.
 
-### Phase 20: Custom Job Sources (Connectors) (~3 weeks)
+**Score cache is growth-oriented.** Old `profile_version` / `scorer_version`
+rows remain useful for audit, but hot queries only hit the current versions.
+Very old score rows can be archived into a cold table or compressed summary so
+the hot table does not grow forever.
+
+### Phase 20: Custom Job Sources (Connectors) (~3-3.5 weeks)
 
 > **History**: surfaced as an explicit roadmap item on 2026-05-19
 > after the Phase 19 cache plan was reinstated. The two layers
@@ -984,52 +1080,105 @@ rare event.
 
 Lets users add company careers sites (Nvidia, Microsoft, Stripe, etc.)
 on top of the LinkedIn / built-in ATS intake the product ships with
-today. Two tiers, sequenced so Tier 1 can ship to users without
-waiting on Tier 2 stability.
+today. The goal is not "LLM scrapes every site"; it is safe, maintainable
+user-specified sources: URL safety first, ATS connectors as the baseline, and
+LLM templates behind a feature flag for the long tail.
 
-**Tier 1 — ATS connector framework + multi-source search (~1.5 weeks):**
+**Scope principle**: Tier 1 (URL safety + ATS detection + connector registry +
+multi-source search) is the required Phase 20 deliverable. Tier 2 (LLM scraper
+templates) defaults off via `custom_sources.llm_templates.enabled=false` and may
+stabilize as 20.x / a later phase; it must not block Tier 1 shipping.
 
-- **20.1** Source data model: new `job_sources` table (id,
-  display_name, kind, url, ats_type, owner_tenant_id, status,
-  last_health, ...) + alembic migration. `Connector` ABC with
-  `fetch_jobs(source_config) -> list[RawJob]` in
-  `src/intake/connectors/`. `tenant_id` from day one (D026).
+**20.0 — Source URL Safety (ship first; block SSRF / internal probing):**
+
+- Before `POST /api/sources` performs any fetch or Playwright navigation, run a
+  URL guard: allow only `http://` / `https://`; reject `file://`, `ftp://`,
+  `data:`, localhost, `127.0.0.1`, `0.0.0.0`, private IP ranges, and metadata
+  IPs such as `169.254.169.254`.
+- Redirects are capped at 5 hops and every hop is revalidated. Limit response
+  size, total timeout, DNS results, and content types. Return human-readable
+  failure reasons to the UI.
+- Playwright domain lock: template execution may visit only the same registered
+  domain or recognized ATS domains. Forbid arbitrary cross-domain navigation,
+  downloads, file uploads, form submits, and arbitrary JS evaluation.
+
+**Tier 1 — ATS connector framework + multi-source search (~1.5-2 weeks):**
+
+- **20.1** Source / Connector data model. Distinguish `Connector` (capability
+  definition, e.g. Greenhouse, Lever, Workday, LinkedIn, TemplateConnector) from
+  `JobSource` (user-configured instance, e.g. Nvidia careers). New
+  `job_sources` table: `id`, `tenant_id`, `display_name`, `url`,
+  `connector_kind`, `ats_type`, `status`, `health_status`, `last_probe_at`,
+  `last_error`, `created_by`, `created_at`, `updated_at`. Do not keep an
+  ambiguous `owner_tenant_id`; `tenant_id` is the isolation field (D026).
 - **20.2** ATS fingerprint detector (`src/intake/ats_detect.py`):
-  follow redirects + DOM-sniff to identify which ATS backs a careers
+  after the 20.0 URL guard, follow redirects + DOM-sniff to identify which ATS backs a careers
   URL. Initial coverage: Greenhouse, Lever, Workday, Ashby, iCIMS,
   Smartrecruiters, Eightfold. Unknown → connector parks in `draft`
   until Tier 2 infers a template.
 - **20.3** Existing LinkedIn / Greenhouse / Lever / Workday adapters
   rewrap as registered Connectors. Search dispatch goes through the
-  new registry rather than hard-coded `source` strings.
-- **20.4** Add-source UX: `POST /api/sources` runs the detector +
-  one verification fetch, persists on success. New "Sources" page
-  in the Web UI (same shape as the Phase 17.9 provider list:
-  Connected vs Available, health badges, manual probe / disconnect).
+  new registry rather than hard-coded `source` strings. `Connector` ABC exposes
+  `fetch_jobs(source_config) -> list[RawJob]`; fixtures cover detect / fetch /
+  normalize / dedupe key.
+- **20.4** Add-source UX + state machine: `POST /api/sources` runs safety,
+  detection, and verification fetch; success moves the source to `active`.
+  New "Sources" page mirrors the Phase 17.9 provider list: Connected vs
+  Available, health badges, manual probe / disable / disconnect / clear session.
+  States: `draft`, `probing`, `active`, `degraded`, `needs_review`, `disabled`,
+  `deleted`. Only `active` participates in normal search; `degraded` gets
+  low-frequency retries; `needs_review` does not auto-run; `disabled` / `deleted`
+  never run.
 - **20.5** Multi-source search: `SearchPayload.sources: list[str]`,
-  Celery group fan-out per source, merge + dedupe by
-  `(source_id, source_source_id)`. Plan-run form gains a source
-  multi-select; plans persist `source_ids` so Beat reads it each
-  tick. The Phase 19 per-posting cache means repeated postings
-  across sources skip re-scoring entirely.
+  Celery fan-out per source, but not unlimited parallelism. Config:
+  `sources.max_concurrent_per_search=5`,
+  `sources.per_source_min_interval_minutes=10`, `sources.timeout_seconds=30`,
+  `sources.max_pages_per_source=3`, `sources.max_jobs_per_source=100`. A slow or
+  failing source returns a partial result and updates source health; it does not
+  fail the whole search. Plan-run form gains source multi-select; plans persist
+  `source_ids` so Beat reads it each tick.
+- **20.5b** Minimal cross-source dedupe boundary: Phase 20 does not implement a
+  full `canonical_job_id` merge, but adds `canonical_fingerprint`
+  (`normalized_company` + `normalized_title` + `normalized_location` +
+  `canonical_application_url`) so the UI can mark `possible duplicate`.
+  Scoring still follows Phase 19 snapshot cache; true canonical merge is later.
+
+**Source session / credential isolation:**
+
+- Sources that need login state use per-source `storage_state`:
+  `data/sources/{tenant_id}/{source_id}/storage_state.json`. Cookies do not live
+  in `job_sources` JSONB. UI can clear a session. Source deletion quarantines /
+  removes session state. Phase 21 can later connect this to the tenant credential
+  store.
 
 **Tier 2 — LLM-assisted scraper templates for the long tail (~1.5 weeks):**
 
 - **20.6** Template schema + executor: `scraper_templates` table
-  (`selector_recipe: jsonb`, `playwright_steps: jsonb`, `health: jsonb`).
-  Playwright-driven Connector that executes a template against a
-  URL and yields `RawJob`. Steps cover login walls, pagination,
-  infinite scroll.
-- **20.7** LLM template inference. When ATS detection fails, fetch
-  the page via Playwright (HTML + screenshot), prompt the LLM via
-  `generate_json(tier="small")` to emit a candidate recipe. Cached
-  on the template row; user reviews + edits in a JSON editor with
-  a "Test on this page" preview before activation.
+  (`selector_recipe: jsonb`, `allowed_steps: jsonb`, `health: jsonb`). Templates
+  are constrained DSL, not arbitrary Playwright code: `start_url`,
+  `job_card_selector`, `title_selector`, `company_selector`, `location_selector`,
+  `application_url_selector`, `next_page_selector`, `max_pages`. Allowed steps:
+  `goto`, `wait_for_selector`, `click_next`, `scroll`, `extract`. Forbidden:
+  arbitrary JS, form submit, file upload, download, and cross-domain navigation.
+- **20.7** LLM template inference. Default feature flag off. When ATS detection
+  fails, fetch the page via Playwright (HTML + screenshot), prompt the LLM via
+  `generate_json(tier="small")` to emit a DSL candidate, not a browser script.
+  Candidate templates require preview before activation: show the first 5-10
+  extracted jobs, source page links, and the selector used for every field. Only
+  explicit user Activate makes it `active`; otherwise it remains `needs_review`.
 - **20.8** Template self-heal: per-source health probe (extends the
   Phase 11.4 `src/providers/health.py` pattern) watches consecutive
   failure counts. Threshold breach queues an LLM re-inference; if
   the new recipe materially diverges, the source flips to
   `needs_review` rather than auto-applying.
+
+**Testing requirements:**
+
+- `tests/fixtures/connectors/{greenhouse,lever,workday,ashby,icims,...}/` stores
+  HTML / JSON fixtures; CI must not depend on live websites.
+- Cover ATS detect, `fetch_jobs`, RawJob normalization, dedupe key, source health,
+  partial failure, URL guard, redirect guard, template DSL executor, and bad
+  selector preview.
 
 **Risks to plan around:**
 
@@ -1038,13 +1187,16 @@ waiting on Tier 2 stability.
   Tier 2 documents the limitation rather than promising universal
   coverage. Residential-proxy escape hatch may follow in a 20.x
   point release.
-- **Login walls** — out of scope for Tier 2 v1. Reuse the LinkedIn
-  session pattern (per-source `storage_state`) when needed.
+- **Login walls** — Tier 2 v1 does not automate login. Users may authenticate
+  manually and store a per-source `storage_state`; UI can clear it anytime.
 - **LLM cost** — HTML inputs run 20k+ tokens. Aggressive caching +
   default `tier="small"` routing + per-source token budgets to cap
   runaway templates.
 - **Maintenance burden** — scraper templates rot. The self-heal
   loop is essential; without it Tier 2 becomes a graveyard.
+- **Security** — user URLs, redirects, Playwright, and LLM-generated selectors
+  all go through 20.0 guards and the constrained DSL. Any fetch path bypassing
+  the URL guard is P1.
 - **Legal / ToS** — users are responsible for ToS compliance with
   each careers site they add. AutoApply does not bundle a default
   list of company URLs; users opt in by adding their own.
@@ -1119,13 +1271,14 @@ the roadmap.
 | 17.9 | LLM Provider Expansion | 0.5w | Done |
 | **18** | **Worker Activation, Reliability, Parallelism, Cleanup** | **2.5–3w** | **Next** |
 | 19 | Per-Posting Tag Cache & Filter Fast Path | 2w | Planned |
-| 20 | Custom Job Sources (Connectors) — ATS detection + LLM templates | 3w | Planned |
+| 20 | Custom Job Sources (Connectors) — URL safety + ATS detection + multi-source search + template DSL | 3-3.5w | Planned |
 | 21 | Multi-Tenancy & Auth Hardening | 2.5w | Deferred (post personal-version maturity) |
 
 The personal-version product (single user, local-first, no auth) is
 feature-complete through Phase 17.9. Phase 18 hardens it (real
 workers, retention, parallelism); Phase 19 swaps the search-cache
-model so per-posting work doesn't repeat across searches; Phase 20
+model so the same snapshot + same profile/scorer version does not repeat
+across searches; Phase 20
 opens the system to user-added company careers sites; Phase 21
 finally activates the multi-tenancy plumbing that Phases 12-20 have
 been carrying dormant. Phase 18 was scoped after a Phase-18-prep
@@ -1180,7 +1333,7 @@ Enforced from Phase 11 onward:
 | 17 | Schedule custom batch tasks that produce N pre-tailored applications in review queue, each approvable in < 30s |
 | 17.8 | Upload a trusted resume to the document library → set it as a default material source → regenerate a paused review entry with that source → promote the output back to the library |
 | 17.9 | Connect/test every built-in provider class that has credentials available; Settings model picker lists curated/live catalogs; `tier="small"` routes extraction calls through the configured small provider |
-| 18 | Enqueue real `materials.generate` and `application.*` tasks through Celery workers; worker loss requeues safely; DLQ/manual retry works; cleanup dry-run reports orphaned artifacts before deletion |
+| 18 | All registered worker stubs are closed out; async material/API routes return `task_id` and expose `TaskRecord.result`; worker loss requeues safely; `dead_lettered` / manual retry works; daily cleanup moves orphaned artifacts into quarantine with scan / restore / purge and auditable cleanup reports |
 | 19 | Two tenants seeded with overlapping email / LinkedIn cookies → cannot read each other's jobs / snapshots / applications / credentials / Redis keys (verified by direct SQL and direct Redis CLI); quota exhaustion returns 429 |
 
 ## 11. Risk & Open Questions

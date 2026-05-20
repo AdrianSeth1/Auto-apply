@@ -4,6 +4,24 @@ All notable implementation changes to AutoApply are documented here, organized b
 
 ## [Unreleased]
 
+### Documentation Sync (2026-05-20)
+
+- Refined the Phase 18 roadmap across project docs: all registered worker
+  stubs must be closed out, async material APIs need durable task results,
+  DLQ state must be Postgres-backed, parallel LLM work needs global/provider
+  limits, sync material fallback is short-lived only, and cleanup is now an
+  automatic quarantine/audit system rather than dry-run-only.
+- Refined the Phase 19 roadmap: searches still hit upstream every time, but
+  A1 tags now bind to `job_snapshots`, A2 score cache keys include
+  `profile_version` and `scorer_version`, tag backfill is paginated, pending /
+  failed tags fall back to slow scoring, and cross-source canonical dedupe is
+  explicitly out of scope.
+- Refined the Phase 20 roadmap: user-added sources now start with URL/SSRF
+  guards, connectors are separated from source instances, source state is
+  explicit, multi-source search is bounded with partial failures, source
+  sessions are isolated, and LLM scraper templates are feature-gated constrained
+  DSL rather than arbitrary Playwright code.
+
 ### Documentation Sync (2026-05-19)
 
 - Refreshed README-adjacent project docs for the Phase 17.9 baseline:
@@ -106,9 +124,10 @@ startup; builtin ids always win on collision.
   already exists, so Phase 15 is "template package spec + manifest +
   adapter conventions on top of an existing engine," not "build LaTeX
   from scratch."
-- **Phase 18** plan call-out: 18.2 auth middleware, 18.4 Redis
-  namespace refactor, and 18.7 credential store are honestly net-new
-  construction rather than "activate existing work."
+- **Then-current multi-tenancy plan call-out**: the auth middleware,
+  Redis namespace refactor, and credential store work (now Phase 21 after
+  the later roadmap reorder) are honestly net-new construction rather than
+  "activate existing work."
 
 ### Phase 13.9: `tenant_id` retrofit migration
 
