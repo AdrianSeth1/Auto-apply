@@ -110,6 +110,29 @@ router = APIRouter(prefix="/api", tags=["api"])
 MAX_TEMPLATE_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
+_SYNC_DEPRECATION_LOGGED: set[str] = set()
+
+
+def _warn_sync_materials_deprecated(route: str) -> None:
+    """Phase 18.6: emit a one-time deprecation log per route when
+    ``AUTOAPPLY_SYNC_MATERIALS=1`` brings back the synchronous
+    materials path. The flag is a short soak / debug escape hatch;
+    the warning makes it obvious in logs so the operator doesn't
+    forget to flip it off."""
+    import logging
+
+    if route in _SYNC_DEPRECATION_LOGGED:
+        return
+    _SYNC_DEPRECATION_LOGGED.add(route)
+    logging.getLogger("autoapply.web.routes.api").warning(
+        "AUTOAPPLY_SYNC_MATERIALS=1 is set: %s is using the legacy "
+        "synchronous path. This escape hatch is dev-only and slated "
+        "for removal -- unset the env var to take the async (task_id) "
+        "path the UI ships with.",
+        route,
+    )
+
+
 class JobSearchPayload(BaseModel):
     source: str = "ats"
     keyword: str = ""
@@ -413,6 +436,7 @@ async def generate_job_material(payload: JobMaterialPayload) -> dict:
     import os
 
     if os.environ.get("AUTOAPPLY_SYNC_MATERIALS") == "1":
+        _warn_sync_materials_deprecated("generate-material")
         result = await generate_material_for_job_usecase(
             job_payload=payload.job,
             material_type=payload.material_type,
@@ -952,6 +976,7 @@ async def regenerate_application_material_route(
 
     if os.environ.get("AUTOAPPLY_SYNC_MATERIALS") != "1":
         return _enqueue_regenerate_material(application_uuid, payload)
+    _warn_sync_materials_deprecated("regenerate-material")
 
     try:
         result = await regenerate_application_material(
