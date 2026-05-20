@@ -268,9 +268,16 @@ def build_protected_paths(
     ):
         _add(materials_path)
 
-    # Task / gate result payloads can reference artifact paths in the
-    # ``result`` / ``payload`` JSONB columns. We walk them defensively.
+    # Task input payloads and produced results both can reference
+    # artifact paths in JSONB. ``TaskRecord.result`` (Phase 18.2) is
+    # where ``materials.generate`` writes the produced
+    # ``resume_path`` / ``cover_letter_path`` -- forgetting to walk
+    # it would let cleanup quarantine successful task outputs whose
+    # only durable reference is the audit row.
     for row in session.execute(select(TaskRecord.payload)).scalars():
+        for value in _walk_string_values(row):
+            _add(value)
+    for row in session.execute(select(TaskRecord.result)).scalars():
         for value in _walk_string_values(row):
             _add(value)
     for row in session.execute(select(GateRequest.payload)).scalars():

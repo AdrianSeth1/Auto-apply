@@ -535,13 +535,42 @@ def _enqueue_materials_generate_from_web(payload: "JobMaterialPayload") -> dict:
             "patch_allow_add_remove_bullets"
         ]
 
+    # Codex review fix: same idempotency-collision concern as the
+    # regenerate path -- a user clicking "Generate" twice in a row
+    # with different overrides would otherwise short-circuit to the
+    # first run's artifact. Hash the effective choices into the key.
+    import hashlib
+    import json
+
+    choice_fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "strategy": choice.get("strategy"),
+                "template_id": payload.template_id,
+                "source_document_id": choice.get("document_id"),
+                "patch_aggressiveness": choice.get("patch_aggressiveness"),
+                "patch_allow_reorder_sections": choice.get(
+                    "patch_allow_reorder_sections"
+                ),
+                "patch_allow_add_remove_bullets": choice.get(
+                    "patch_allow_add_remove_bullets"
+                ),
+            },
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+
     tenant = current_tenant_id() or "default"
     spec = EnqueueSpec(
         kind="materials.generate",
         queue="materials",
         payload=task_payload,
         tenant_id=tenant,
-        idempotency_key=f"materials.generate:{job_id}:{payload.material_type}",
+        idempotency_key=(
+            f"materials.generate:{job_id}:{payload.material_type}:"
+            f"{choice_fingerprint}"
+        ),
     )
 
     from src.core.config import load_config
@@ -1601,6 +1630,38 @@ def _enqueue_regenerate_material(
             "patch_allow_add_remove_bullets"
         ]
 
+    # Codex review fix: an idempotency key keyed only on
+    # ``application_id + material_type`` made every subsequent
+    # regenerate short-circuit to the first successful run, so a
+    # user who switched template / strategy / source_document after
+    # the first regenerate would silently get the old artifact back.
+    # Fingerprint the effective generation choices so each distinct
+    # request still hits the broker, while a duplicate click within
+    # one second still gets short-circuited.
+    import hashlib
+    import json
+
+    choice_fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "strategy": choice.get("strategy"),
+                "template_id": task_payload.get(
+                    f"{document_type}_template_id"
+                ),
+                "source_document_id": choice.get("document_id"),
+                "patch_aggressiveness": choice.get("patch_aggressiveness"),
+                "patch_allow_reorder_sections": choice.get(
+                    "patch_allow_reorder_sections"
+                ),
+                "patch_allow_add_remove_bullets": choice.get(
+                    "patch_allow_add_remove_bullets"
+                ),
+            },
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+
     tenant = current_tenant_id() or "default"
     spec = EnqueueSpec(
         kind="materials.generate",
@@ -1608,7 +1669,8 @@ def _enqueue_regenerate_material(
         payload=task_payload,
         tenant_id=tenant,
         idempotency_key=(
-            f"regenerate:{application_uuid}:{payload.material_type}"
+            f"regenerate:{application_uuid}:{payload.material_type}:"
+            f"{choice_fingerprint}"
         ),
     )
     with factory() as session:

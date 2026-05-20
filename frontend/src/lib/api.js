@@ -52,6 +52,14 @@ function _materialEnvelopeFromTaskRow(row, materialType, extras = {}) {
   // envelope from a settled TaskRecord row so call sites don't have
   // to learn the new shape. ``row.result`` carries the structured
   // task return value (artifact paths, strategy notes, errors).
+  //
+  // Codex review fix: ``artifacts`` is an OBJECT keyed by document
+  // type, not an array. The old length comparison never fired, so
+  // a task that returned ``{status: "failed", errors: [...]}``
+  // would land here with ``row.status === "succeeded"`` and yield a
+  // misleading ``{ok: true, artifact: null}``. We now treat any
+  // task whose body-level status is not "ok"/"partial-with-data" as
+  // a failure, regardless of the row's Celery-level status.
   const result = row?.result || {}
   const artifacts = result.artifacts || {}
   const docKey = materialType.startsWith("cover_letter")
@@ -63,7 +71,11 @@ function _materialEnvelopeFromTaskRow(row, materialType, extras = {}) {
     artifacts[`${docKey}_docx`] ||
     null
   const errors = result.errors || []
-  if (row.status !== "succeeded" || errors.length === artifacts.length) {
+  const bodyStatus = result.status || null
+  const noArtifacts = Object.keys(artifacts).length === 0
+  const rowFailed = row.status !== "succeeded"
+  const bodyFailed = bodyStatus === "failed" || (bodyStatus === "partial" && noArtifacts)
+  if (rowFailed || bodyFailed || (errors.length > 0 && !documentArtifact)) {
     const err = new Error(
       errors.length ? errors.map((e) => e.error).join("; ") : row.last_error || "Task failed",
     )

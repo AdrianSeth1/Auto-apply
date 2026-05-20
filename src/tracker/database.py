@@ -159,16 +159,26 @@ def get_applications_with_jobs(
     company: str | None = None,
     limit: int | None = 50,
     offset: int = 0,
+    include_soft_deleted: bool = False,
 ) -> list[tuple[Application, Job]]:
     """Query applications with jobs in a single joined query.
 
     Returns list of (Application, Job) tuples, ordered by most recently updated.
+
+    Phase 18.4: ``deleted_at`` (soft-delete marker set by
+    ``DELETE /api/applications/{id}``) is excluded by default so the
+    UI doesn't keep rendering rows the operator just deleted. Pass
+    ``include_soft_deleted=True`` from forensic / cleanup tooling
+    that needs to see them.
     """
     stmt = (
         select(Application, Job)
         .join(Job, Application.job_id == Job.id)
         .order_by(Application.updated_at.desc())
     )
+
+    if not include_soft_deleted:
+        stmt = stmt.where(Application.deleted_at.is_(None))
 
     if status:
         stmt = stmt.where(Application.status == status)
@@ -186,8 +196,16 @@ def get_applications_with_jobs(
 
 
 def get_application_counts(session: Session) -> dict[str, int]:
-    """Get counts of applications by status."""
-    stmt = select(Application.status, func.count()).group_by(Application.status)
+    """Get counts of applications by status.
+
+    Phase 18.4: soft-deleted rows are excluded so dashboard counters
+    don't keep counting rows the operator already removed.
+    """
+    stmt = (
+        select(Application.status, func.count())
+        .where(Application.deleted_at.is_(None))
+        .group_by(Application.status)
+    )
     rows = session.execute(stmt).all()
     return {status: count for status, count in rows}
 
@@ -197,6 +215,7 @@ def get_outcome_counts(session: Session) -> dict[str, int]:
     stmt = (
         select(Application.outcome, func.count())
         .where(Application.status == AppStatus.SUBMITTED)
+        .where(Application.deleted_at.is_(None))
         .group_by(Application.outcome)
     )
     rows = session.execute(stmt).all()
