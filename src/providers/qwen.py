@@ -24,24 +24,35 @@ class QwenProvider(OpenAICompatibleProvider):
     )
     default_model = "qwen-plus"
 
+    # Curated from Alibaba Cloud Model Studio docs on 2026-05-19.
+    # Qwen-Turbo / Plus / Max are the stable production aliases that
+    # automatically point at the current best snapshot under that
+    # cost tier; the explicit qwen3-* ids are also pinned for users
+    # who want a specific generation.
     KNOWN_MODELS = (
         ModelInfo(
             id="qwen-turbo",
             display_name="Qwen Turbo",
-            context_window=128_000,
+            context_window=1_000_000,
             tags=("fast", "cheap"),
         ),
         ModelInfo(
             id="qwen-plus",
             display_name="Qwen Plus",
-            context_window=128_000,
+            context_window=131_072,
             tags=("balanced",),
         ),
         ModelInfo(
-            id="qwen-max",
-            display_name="Qwen Max",
-            context_window=32_000,
-            tags=("smart",),
+            id="qwen3-max",
+            display_name="Qwen3 Max",
+            context_window=262_144,
+            tags=("smart", "flagship"),
+        ),
+        ModelInfo(
+            id="qwen3.5-flash",
+            display_name="Qwen3.5 Flash",
+            context_window=131_072,
+            tags=("fast",),
         ),
         ModelInfo(
             id="qwen-long",

@@ -19,31 +19,40 @@ class GroqProvider(OpenAICompatibleProvider):
     install_hint = "Get an API key from https://console.groq.com/keys"
     api_key_env_var = "GROQ_API_KEY"
     default_base_url = "https://api.groq.com/openai/v1"
-    default_model = "llama-3.3-70b-versatile"
+    default_model = "openai/gpt-oss-120b"
 
+    # Curated from console.groq.com/docs/models on 2026-05-19. Groq's
+    # 2026-03-23 deprecation moved moonshotai/kimi-k2-instruct-0905
+    # towards openai/gpt-oss-120b as the high-quality default.
     KNOWN_MODELS = (
+        ModelInfo(
+            id="openai/gpt-oss-20b",
+            display_name="GPT-OSS 20B (fastest)",
+            context_window=131_072,
+            tags=("fast", "cheap"),
+        ),
         ModelInfo(
             id="llama-3.1-8b-instant",
             display_name="Llama 3.1 8B Instant",
-            context_window=128_000,
+            context_window=131_072,
             tags=("fast", "cheap"),
         ),
         ModelInfo(
             id="llama-3.3-70b-versatile",
             display_name="Llama 3.3 70B Versatile",
-            context_window=128_000,
-            tags=("balanced",),
-        ),
-        ModelInfo(
-            id="qwen/qwen3-32b",
-            display_name="Qwen3 32B",
-            context_window=128_000,
+            context_window=131_072,
             tags=("balanced",),
         ),
         ModelInfo(
             id="openai/gpt-oss-120b",
             display_name="GPT-OSS 120B",
-            context_window=128_000,
-            tags=("smart",),
+            context_window=131_072,
+            tags=("smart", "balanced"),
+        ),
+        ModelInfo(
+            id="groq/compound",
+            display_name="Groq Compound (built-in tools)",
+            context_window=131_072,
+            tags=("agent", "tools"),
         ),
     )

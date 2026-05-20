@@ -9,12 +9,16 @@ from src.providers.base import ModelInfo
 class MistralProvider(OpenAICompatibleProvider):
     id = "mistral"
     display_name = "Mistral"
-    description = "Mistral AI Chat Completions (mistral-small / large / codestral)"
+    description = "Mistral AI Chat Completions (Large 3, Medium 3.5, Codestral, Magistral)"
     install_hint = "Get an API key from https://console.mistral.ai/api-keys/"
     api_key_env_var = "MISTRAL_API_KEY"
     default_base_url = "https://api.mistral.ai/v1"
-    default_model = "mistral-small-latest"
+    default_model = "mistral-medium-latest"
 
+    # Curated from mistral.ai/models on 2026-05-19. Mistral Large 3
+    # (Dec 2025) bumps the flagship to a 256k MoE; Medium 3.5
+    # (Apr 2026) is the recommended balanced default. Magistral and
+    # Devstral are the reasoning / coding-agent specialists.
     KNOWN_MODELS = (
         ModelInfo(
             id="ministral-3b-latest",
@@ -30,26 +34,38 @@ class MistralProvider(OpenAICompatibleProvider):
         ),
         ModelInfo(
             id="mistral-small-latest",
-            display_name="Mistral Small",
+            display_name="Mistral Small 3.1",
             context_window=128_000,
-            tags=("balanced",),
+            tags=("balanced", "cheap"),
         ),
         ModelInfo(
             id="mistral-medium-latest",
-            display_name="Mistral Medium",
+            display_name="Mistral Medium 3.5",
             context_window=128_000,
             tags=("balanced",),
         ),
         ModelInfo(
             id="mistral-large-latest",
-            display_name="Mistral Large",
+            display_name="Mistral Large 3",
+            context_window=256_000,
+            tags=("smart", "flagship"),
+        ),
+        ModelInfo(
+            id="magistral-medium-latest",
+            display_name="Magistral Medium (reasoning)",
             context_window=128_000,
-            tags=("smart",),
+            tags=("reasoning",),
         ),
         ModelInfo(
             id="codestral-latest",
-            display_name="Codestral",
+            display_name="Codestral 25.08",
             context_window=256_000,
             tags=("code",),
+        ),
+        ModelInfo(
+            id="devstral-2",
+            display_name="Devstral 2 (coding agent)",
+            context_window=256_000,
+            tags=("code", "agent"),
         ),
     )

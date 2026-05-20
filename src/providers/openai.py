@@ -17,46 +17,43 @@ from src.providers.api_base import OpenAICompatibleProvider
 from src.providers.base import ModelInfo
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gpt-5.4-mini"
 
 
 class OpenAIProvider(OpenAICompatibleProvider):
     id = "openai"
     display_name = "OpenAI"
-    description = "OpenAI Chat Completions (gpt-4o, gpt-4o-mini, o-series, ...)"
+    description = "OpenAI Chat Completions (GPT-5.x flagship + o-series reasoning)"
     install_hint = "Get an API key from https://platform.openai.com/api-keys"
     api_key_env_var = "OPENAI_API_KEY"
     default_base_url = DEFAULT_BASE_URL
     default_model = DEFAULT_MODEL
 
+    # Curated from developers.openai.com/api/docs/models on 2026-05-19.
+    # Legacy ids (gpt-4o, gpt-4.1, o4-mini original) still work on the
+    # API even when retired from ChatGPT, but they're hidden from the
+    # default dropdown to keep users on the live recommended set.
     KNOWN_MODELS = (
         ModelInfo(
-            id="gpt-4o-mini",
-            display_name="GPT-4o mini",
-            context_window=128_000,
-            max_output_tokens=16_384,
+            id="gpt-5.4-mini",
+            display_name="GPT-5.4 mini",
+            context_window=400_000,
+            max_output_tokens=128_000,
             tags=("fast", "cheap"),
         ),
         ModelInfo(
-            id="gpt-4o",
-            display_name="GPT-4o",
-            context_window=128_000,
-            max_output_tokens=16_384,
-            tags=("balanced", "vision"),
+            id="gpt-5.4",
+            display_name="GPT-5.4",
+            context_window=1_000_000,
+            max_output_tokens=128_000,
+            tags=("balanced",),
         ),
         ModelInfo(
-            id="gpt-4.1-mini",
-            display_name="GPT-4.1 mini",
+            id="gpt-5.5",
+            display_name="GPT-5.5",
             context_window=1_000_000,
-            max_output_tokens=32_768,
-            tags=("fast", "long-context"),
-        ),
-        ModelInfo(
-            id="gpt-4.1",
-            display_name="GPT-4.1",
-            context_window=1_000_000,
-            max_output_tokens=32_768,
-            tags=("smart", "long-context"),
+            max_output_tokens=128_000,
+            tags=("smart", "flagship"),
         ),
         ModelInfo(
             id="o4-mini",
@@ -68,6 +65,13 @@ class OpenAIProvider(OpenAICompatibleProvider):
         ModelInfo(
             id="o3",
             display_name="o3 (reasoning)",
+            context_window=200_000,
+            max_output_tokens=100_000,
+            tags=("reasoning",),
+        ),
+        ModelInfo(
+            id="o3-pro",
+            display_name="o3-pro (deep reasoning)",
             context_window=200_000,
             max_output_tokens=100_000,
             tags=("reasoning", "smart"),

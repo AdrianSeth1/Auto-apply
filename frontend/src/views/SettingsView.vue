@@ -701,6 +701,54 @@ function primaryModelDefault() {
   return state.modelCatalogs[pid]?.default_model || ""
 }
 
+// Phase 17.9.12: shape model catalog entries into the
+// { value, label } pairs AppSelect expects, with the provider's
+// `default_model` annotated and a "(saved)" hint for ids that
+// aren't in the curated list but were persisted earlier.
+function toAppSelectOptions(modelList, defaultId) {
+  if (!Array.isArray(modelList) || modelList.length === 0) return []
+  return modelList.map((m) => {
+    const label = m.display_name || m.id
+    if (m.id === defaultId) {
+      return { value: m.id, label: `${label} · default` }
+    }
+    return { value: m.id, label }
+  })
+}
+
+function primaryModelSelectOptions() {
+  return toAppSelectOptions(primaryModelOptions(), primaryModelDefault())
+}
+
+function smallTierModelSelectOptions() {
+  if (!state.form.small_provider) return []
+  const cached = state.modelCatalogs[state.form.small_provider]
+  if (!cached) return []
+  return [
+    { value: "", label: "Provider default" },
+    ...toAppSelectOptions(cached.models, cached.default_model),
+  ]
+}
+
+function smallTierProviderSelectOptions() {
+  return [
+    { value: "", label: "Disabled (use primary for everything)" },
+    ...connectedProviders.value.map((p) => ({
+      value: p.id,
+      label: p.display_name,
+    })),
+  ]
+}
+
+// Subprocess providers (claude-cli, codex-cli) own their auth via
+// their own login flow and don't expose a model-selection knob. The
+// Primary model picker should sit out of the way for those.
+function isSubprocessPrimaryProvider() {
+  const pid = state.form.primary_provider
+  const provider = state.providers.find((p) => p.id === pid)
+  return provider?.auth_type === "subprocess"
+}
+
 async function testProvider(provider) {
   const op = providerOp(provider.id)
   op.testing = true
@@ -830,6 +878,17 @@ watch(
   },
 )
 
+// Phase 17.9.12: AppSelect doesn't surface @change, so the
+// small-tier catalog load (previously inline on `@change`) moves to
+// a dedicated watcher.
+watch(
+  () => state.form.small_provider,
+  (newPid, oldPid) => {
+    if (oldPid === undefined) return
+    onSmallProviderChange()
+  },
+)
+
 // Changing the Primary model writes directly to the provider's
 // credential metadata via PUT /api/providers/{id}/model. We do NOT
 // route this through `persistSettings`, since that endpoint only
@@ -943,32 +1002,32 @@ function isPrimary(provider) {
               />
             </label>
 
-            <!-- Phase 17.9.11: Primary model dropdown. Catalog is the
-                 provider's curated KNOWN_MODELS + any runtime entries
-                 (Ollama /api/tags). No free-text input here: catalog-
-                 outside ids go through `autoapply provider set-model`. -->
+            <!-- Phase 17.9.11+12: Primary model dropdown.
+                 - Uses the global AppSelect (reka-ui) for styling parity
+                   with every other picker on the page.
+                 - Subprocess providers (claude-cli, codex-cli) own
+                   their model selection via their own auth/login
+                   flow, so the dropdown collapses into an inert note
+                   for those instead of showing "No models in catalog". -->
             <label class="space-y-1.5">
               <span class="text-xs font-medium text-muted-foreground">
                 Primary model
                 <span v-if="state.modelCatalogsLoading" class="ml-1 text-muted-foreground/70">loading…</span>
               </span>
-              <select
-                v-model="state.form.primary_model"
-                :disabled="!state.form.primary_provider || primaryModelOptions().length === 0"
-                aria-label="Primary model"
-                class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+              <div
+                v-if="isSubprocessPrimaryProvider()"
+                class="flex h-10 items-center rounded-md border border-dashed border-border bg-muted/30 px-3 text-xs text-muted-foreground"
               >
-                <option v-if="primaryModelOptions().length === 0" value="">
-                  No models in catalog
-                </option>
-                <option
-                  v-for="m in primaryModelOptions()"
-                  :key="m.id"
-                  :value="m.id"
-                >
-                  {{ m.display_name || m.id }}<template v-if="m.id === primaryModelDefault()"> · default</template>
-                </option>
-              </select>
+                Managed by the CLI itself — run <code class="mx-1 rounded bg-muted px-1">{{ state.form.primary_provider }} login</code>
+              </div>
+              <AppSelect
+                v-else
+                v-model="state.form.primary_model"
+                :options="primaryModelSelectOptions()"
+                :disabled="!state.form.primary_provider || primaryModelSelectOptions().length === 0"
+                :placeholder="primaryModelSelectOptions().length === 0 ? 'Connect this provider first' : 'Pick a model'"
+                aria-label="Primary model"
+              />
             </label>
 
             <label class="space-y-1.5">
@@ -1017,47 +1076,24 @@ function isPrimary(provider) {
           <div class="grid gap-3 md:grid-cols-2">
             <label class="space-y-1.5">
               <span class="text-xs font-medium text-muted-foreground">Provider</span>
-              <select
+              <AppSelect
                 v-model="state.form.small_provider"
+                :options="smallTierProviderSelectOptions()"
                 aria-label="Small-tier provider"
-                class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                @change="onSmallProviderChange"
-              >
-                <option value="">Disabled (use primary for everything)</option>
-                <option
-                  v-for="p in connectedProviders"
-                  :key="p.id"
-                  :value="p.id"
-                >
-                  {{ p.display_name }}
-                </option>
-              </select>
+                placeholder="Disabled"
+              />
             </label>
             <label class="space-y-1.5">
               <span class="text-xs font-medium text-muted-foreground">
                 Model
                 <span v-if="state.modelCatalogsLoading" class="ml-1 text-muted-foreground/70">loading…</span>
               </span>
-              <select
-                v-if="state.form.small_provider && state.modelCatalogs[state.form.small_provider]?.models?.length"
+              <AppSelect
                 v-model="state.form.small_model"
+                :options="smallTierModelSelectOptions()"
+                :disabled="!state.form.small_provider || smallTierModelSelectOptions().length === 0"
                 aria-label="Small-tier model"
-                class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                <option value="">Provider default</option>
-                <option
-                  v-for="m in state.modelCatalogs[state.form.small_provider].models"
-                  :key="m.id"
-                  :value="m.id"
-                >
-                  {{ m.display_name || m.id }}
-                </option>
-              </select>
-              <Input
-                v-else
-                v-model="state.form.small_model"
-                :disabled="!state.form.small_provider"
-                placeholder="Model id (or leave blank for provider default)"
+                placeholder="Provider default"
               />
             </label>
           </div>
