@@ -80,11 +80,12 @@ def get_schedule() -> dict[str, dict[str, object]]:
             "schedule": crontab(minute=0),  # every hour, on the hour
             "options": _MAINTENANCE_OPTS,
         },
-        "application_status_sync": {
-            "task": "maintenance.status_sync",
-            "schedule": crontab(hour="*/6", minute=15),
-            "options": _MAINTENANCE_OPTS,
-        },
+        # Phase 18.1: ``application_status_sync`` removed from Beat
+        # because ``maintenance.status_sync`` is explicitly
+        # ``not_implemented`` (no HR-reply / rejection-email ingest
+        # is wired). The task name is still registered for manual
+        # CLI invocation; restore this entry when the outcome-sync
+        # implementation lands.
         "linkedin_cookie_refresh": {
             "task": "maintenance.linkedin_cookie_refresh",
             "schedule": crontab(hour=3, minute=0),  # 03:00 UTC every day

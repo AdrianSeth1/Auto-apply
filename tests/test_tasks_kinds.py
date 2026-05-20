@@ -98,18 +98,13 @@ def test_application_submit_round_trip() -> None:
 # ---- Beat-driven stubs --------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "task_fn",
-    [
-        task_kinds.search_daily_fanout,
-        task_kinds.jd_health_check,
-        task_kinds.linkedin_cookie_refresh,
-        task_kinds.gate_expire_sweep,
-    ],
-)
-def test_beat_driven_stubs_return_stubbed_status(task_fn: Any) -> None:
-    out = task_fn.apply().get()
-    assert out["status"] == "stubbed"
+def test_search_daily_fanout_returns_not_implemented() -> None:
+    """Phase 18.1: search.daily_fanout is intentionally a no-op tick
+    until the saved-search registry surfaces query-id -> kwargs
+    lookup. The task is still registered for Beat audit."""
+    out = task_kinds.search_daily_fanout.apply().get()
+    assert out["status"] == "not_implemented"
+    assert out["task"] == "search.daily_fanout"
 
 
 def test_cache_eviction_runs_cleanup_pipeline(

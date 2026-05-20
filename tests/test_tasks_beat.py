@@ -19,7 +19,10 @@ app_mod = importlib.import_module("src.tasks")  # imports beat.install side-effe
 EXPECTED_ENTRIES: set[str] = {
     "daily_search",
     "jd_health_check",
-    "application_status_sync",
+    # Phase 18.1: ``application_status_sync`` removed from Beat
+    # because ``maintenance.status_sync`` is explicit
+    # ``not_implemented`` until HR-reply / rejection-email ingest
+    # is wired. Manual CLI invocation still works against the kind.
     "linkedin_cookie_refresh",
     "cache_eviction",
     "gate_expire_sweep",
@@ -58,7 +61,6 @@ def test_maintenance_entries_land_on_maintenance_queue() -> None:
     schedule = beat.get_schedule()
     for name in (
         "jd_health_check",
-        "application_status_sync",
         "linkedin_cookie_refresh",
         "cache_eviction",
         "gate_expire_sweep",

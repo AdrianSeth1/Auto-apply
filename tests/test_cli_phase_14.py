@@ -65,10 +65,12 @@ def test_tasks_list_handles_empty_state() -> None:
 def test_schedule_list_renders_all_six_entries() -> None:
     result = CliRunner().invoke(schedule_cmd, ["list"])
     assert result.exit_code == 0
+    # Phase 18.1: ``application_status_sync`` was removed from Beat
+    # because ``maintenance.status_sync`` is explicit
+    # ``not_implemented`` until HR-reply ingest is wired.
     for name in (
         "daily_search",
         "jd_health_check",
-        "application_status_sync",
         "linkedin_cookie_refresh",
         "cache_eviction",
         "gate_expire_sweep",
