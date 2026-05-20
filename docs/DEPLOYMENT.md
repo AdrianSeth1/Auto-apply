@@ -8,12 +8,14 @@ It covers local deployment, first-time initialization, CLI usage, and the Vue-ba
 AutoApply currently supports:
 
 - ATS job intake from Greenhouse and Lever
-- LinkedIn search with external ATS redirect discovery
+- LinkedIn search with external ATS redirect discovery and durable Job Index records
 - Materials workspace for tailored resume and cover letter generation per job or pasted JD
+- Document library for trusted resumes/cover letters, generated artifact promotion, and material strategy defaults
 - DOCX-first template packages with manifest-driven styles, capacity, preview, validation, and uploads
 - QA template loading from `qa_bank`
 - Browser automation for Greenhouse, Lever, and Ashby applications
-- Application tracking, analytics, CSV export, and the Vue web GUI
+- Multi-vendor LLM routing across REST providers, local Ollama, local CLIs, and user-defined OpenAI-compatible endpoints
+- Application tracking, analytics, CSV export, background task execution, and the Vue web GUI
 
 Direct apply support is currently implemented for:
 
@@ -34,8 +36,7 @@ Install these before starting:
 - At least one document-to-PDF path:
   - Microsoft Word + `docx2pdf`, or
   - LibreOffice
-- At least one local LLM CLI: Claude Code CLI or Codex CLI
-- Ideally install both if you want automatic provider fallback
+- At least one LLM provider: an API key for a hosted provider, a local Ollama server, Claude Code CLI, Codex CLI, or a user-defined OpenAI-compatible endpoint
 - Node.js and npm only if you plan to rebuild the frontend assets locally
 
 ## 3. Clone And Install
@@ -59,10 +60,17 @@ npm run build
 cd ..
 ```
 
-## 3.2 Install And Authenticate LLM CLIs
+## 3.2 Configure An LLM Provider
 
-AutoApply does not use an SDK for generation. It shells out to local CLIs.
-You must install at least one of these on the same machine that runs AutoApply:
+AutoApply uses its own provider registry rather than vendor SDKs. You can use hosted REST APIs, local Ollama, local CLIs, or a custom OpenAI-compatible endpoint.
+
+Supported built-in providers include:
+
+- OpenAI, Anthropic, Gemini, DeepSeek, Moonshot/Kimi, Qwen, xAI Grok, Groq, Mistral, and OpenRouter
+- Ollama for local models
+- Claude Code CLI and Codex CLI
+
+If you use the local CLIs, install them on the same machine that runs AutoApply:
 
 ```bash
 npm install -g @anthropic-ai/claude-code
@@ -73,9 +81,9 @@ Then complete each CLI's own local sign-in/auth flow before relying on LLM-backe
 
 Recommended setup:
 
-- install both CLIs
-- choose one primary provider
-- configure the other as fallback
+- configure one primary provider
+- optionally configure one or more fallback providers
+- optionally configure `llm.small_provider` / `llm.small_model` for cheaper extraction tasks
 
 After `uv sync`, the project exposes the CLI entrypoint. You can use either:
 
@@ -210,7 +218,7 @@ What `init` does:
 - tests database connectivity
 - runs Alembic migrations
 - imports or creates `data/profile/profile.yaml`
-- checks LLM CLI availability
+- checks configured LLM provider availability where possible
 - stores preferred primary/fallback LLM settings when you pass `--llm-primary` / `--llm-fallback`
 
 ### 7.1 LLM provider priority
@@ -219,36 +227,43 @@ Current config lives in `config/settings.yaml`:
 
 ```yaml
 llm:
-  provider: claude-cli
-  primary_provider: claude-cli
-  fallback_provider: codex-cli
+  provider: codex-cli
+  primary_provider: codex-cli
+  fallback_provider: claude-cli
   allow_fallback: true
+  fallback_providers:
+    - claude-cli
+  small_provider: claude-cli
+  small_model: null
 ```
 
 Meaning:
 
-- `primary_provider`: CLI tried first
-- `fallback_provider`: CLI tried second
+- `primary_provider`: provider tried first
+- `fallback_provider`: legacy single fallback provider
+- `fallback_providers`: ordered fallback list when more than one fallback is configured
 - `allow_fallback`: whether AutoApply should fail over automatically
+- `small_provider` / `small_model`: optional cheaper route for extraction-style work
+
+The Settings UI exposes provider connection, health, and model selection. `GET /api/providers/{id}/models` merges curated model catalogs with live runtime catalogs where available, such as Ollama.
+
+To use an OpenAI-compatible endpoint that is not built in, add an entry under `llm.custom_providers` in `config/settings.yaml`; built-in provider ids always take precedence on collision.
 
 ## 7.2 LLM fallback behavior
 
 There are two levels of fallback:
 
-### CLI-level fallback
+### Provider-level fallback
 
 - if `primary_provider` fails, times out, or is missing
 - and `allow_fallback` is enabled
-- AutoApply tries `fallback_provider`
+- AutoApply tries the configured fallback provider chain
 
-This works in both directions:
-
-- Codex -> Claude Code CLI
-- Claude Code CLI -> Codex
+This works across REST providers, local Ollama, and local CLI providers when credentials or local runtimes are configured.
 
 ### Feature-level fallback
 
-Even after both CLIs fail, several features still degrade gracefully:
+Even after provider calls fail, several features still degrade gracefully:
 
 - JD parsing -> regex heuristics fallback
 - cover letter generation -> deterministic template fallback
@@ -672,16 +687,16 @@ sudo certbot --nginx -d autoapply.example.com
 - run the service under a dedicated non-root user
 - keep `logs/`, `data/output/`, and `data/.linkedin_session/` writable by the service user
 - keep `data/templates/` writable only if users need to upload templates from the Web UI
-- keep the configured LLM CLI binaries installed and authenticated for the same service user
+- keep any configured local LLM CLI binaries installed and authenticated for the same service user
 - if you use LinkedIn search on a server, the first login may still require an interactive browser session
 - Playwright-based apply jobs are better suited to trusted internal use than a public multi-user SaaS deployment
 
 ## 18. Operational Notes
 
-- `apply` automation is currently for Greenhouse and Lever
+- `apply` automation is currently for Greenhouse, Lever, and Ashby
 - LinkedIn is primarily for search and ATS link discovery
 - PDF conversion depends on Word/docx2pdf or LibreOffice
-- LLM-dependent features degrade gracefully when the CLI is unavailable, but some parsing/generation quality will drop
+- LLM-dependent features degrade gracefully when providers are unavailable, but some parsing/generation quality will drop
 - the default workflow is human-in-the-loop; auto-submit is optional
 
 ## 19. Troubleshooting

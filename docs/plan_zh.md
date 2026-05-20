@@ -14,11 +14,13 @@
 | 用户面向的部署 | `docs/DEPLOYMENT.md` |
 | 本文 | 战略、历史路线图背景、长文规划说明 |
 
-最近更新：**2026-05-16（文档整理）**。v3.1 在 v3 基础上做了四处校准：
+最近更新：**2026-05-19（Phase 17.9 文档同步）**。当前状态、验收基线和下一步路线图以 `docs/PROJECT_MANAGEMENT.md` 为准；本文保留长文规划和历史设计理由。v3.1 在 v3 基础上做了四处校准：
 (a) Phase 14 任务队列改用 Celery（不再自建 task model + queue transport + worker runtime；见 D025），APScheduler 也随之退场，由 Celery Beat 承担 cron trigger；
 (b) Phase 14 前插入 13.9 子阶段，给所有 Phase 11 及以前的遗留表做一次性 `tenant_id` retrofit migration，把 D020 的"纪律"变成 schema 强制（见 D026）；
 (c) HITL gate 后端从单进程文件 JSON 迁到 Celery 任务态 / Postgres 持久化层，避免 Phase 14 多 worker 与 Phase 17 review queue 各自再造（并入 14.x，见 D026）；
 (d) Phase 15.3 LaTeX 范围澄清：`src/documents/latex_engine.py` 已存在，Phase 15 不是"从零搭 LaTeX"，而是"加模板包规范 + manifest + adapter"。
+
+2026-05-19 这次刷新记录 Phase 17.9 已完成：provider 层现在覆盖 OpenAI、Anthropic、Gemini、DeepSeek、Moonshot/Kimi、Qwen、xAI Grok、Groq、Mistral、OpenRouter、Ollama、Claude CLI、Codex CLI，以及用户自定义的 OpenAI-compatible provider。Phase 18 现在是 worker 激活 / 可靠性 / 并行 / 清理；多租户与 Auth 加固后移到 Phase 19。
 
 ---
 
@@ -59,7 +61,7 @@ Postgres RLS、后台 worker 模型全部已纳入路线图，即使目前还没
 | 后端 | FastAPI + Click CLI（`autoapply`） | 同一份代码同时服务 Web + CLI |
 | 前端 | Vue 3 + Vue Router + Vite + Tailwind v3 + shadcn-vue + reka-ui | 见 D015 |
 | 浏览器自动化 | Playwright（Python，async） | 完整 DOM 访问 + LinkedIn 持久化登录上下文 |
-| LLM provider | OpenAI / Anthropic / Gemini（REST via `httpx`）**或** Claude Code CLI / Codex CLI（subprocess），全部在 `ProviderRegistry` 后面 | 见 D016 |
+| LLM provider | OpenAI / Anthropic / Gemini，加上 DeepSeek、Moonshot/Kimi、Qwen、xAI Grok、Groq、Mistral、OpenRouter、Ollama、Claude Code CLI、Codex CLI，以及用户自定义 OpenAI-compatible provider；全部在 `ProviderRegistry` 后面 | 见 D016 和 Phase 17.9 |
 | Agent harness | 自研，位于 `src/agent/` —— bounded ReAct loop、allow-listed `ToolRegistry`、文件后端 HITL gate、JSON 磁盘 trace store、fixture-driven eval | 见 D017（不用 LangChain / LangGraph） |
 | 数据库（权威来源） | PostgreSQL + pgvector + alembic | 匹配用向量检索；alembic 管 schema migration |
 | 缓存 / 锁 / 队列（Phase 12+） | Redis 7+ | L2 缓存、分布式锁原语（`SET NX PX`）、任务队列基础设施；见 D018 |
@@ -81,8 +83,9 @@ src/
 │   └── eval/            #   fixture-driven eval runner + scorers
 ├── providers/           # LLM provider 抽象
 │   ├── base.py          #   LLMProvider ABC + ProviderKind + AuthType
-│   ├── openai.py / anthropic.py / gemini.py   # 通过 httpx 的 REST adapter
-│   ├── claude_cli.py / codex.py               # Subprocess adapter
+│   ├── openai.py / anthropic.py / gemini.py   # first-party REST adapter
+│   ├── deepseek.py / moonshot.py / qwen.py / xai.py / groq.py / mistral.py / openrouter.py / ollama.py
+│   ├── claude_cli.py / codex.py               # subprocess adapter
 │   ├── api_base.py      #   共享 REST helper
 │   ├── store.py         #   凭据存储（0600 文件 + OS keyring fallback）
 │   └── registry.py      #   primary / fallback 分发到 generate_text
@@ -210,7 +213,7 @@ DISCOVERED → QUALIFIED → MATERIALS_READY → FORM_OPENED
 → REVIEW_REQUIRED → SUBMITTED → FAILED → NEEDS_RETRY
 ```
 
-Phase 13 会新增一组用于 **Job Index & Freshness Engine** 的表：
+Phase 13 已新增一组用于 **Job Index & Freshness Engine** 的表：
 
 ```sql
 job_postings        -- 岗位实体（UNIQUE(source, source_job_id)）
@@ -221,7 +224,7 @@ refresh_tasks       -- 待抓取的优先级队列
 ```
 
 再加 `applications.job_snapshot_id` 外键，把每个生成产物钉到具体
-JD 版本上。Phase 12+ 所有新表都带 `tenant_id`（Phase 18 之前默认 `"default"`），
+JD 版本上。Phase 12+ 所有新表都带 `tenant_id`（Phase 19 之前默认 `"default"`），
 Phase 13.9 还会给所有遗留表（`jobs`、`applications`、`applicant_profile`、
 `bullet_pool`、`story_bank`、`qa_bank` 等）回填同样的列，见 D020 / D026。
 
@@ -230,7 +233,7 @@ Phase 13.9 还会给所有遗留表（`jobs`、`applications`、`applicant_profi
 ### Layer 1: 岗位获取（Intake）
 Greenhouse / Lever / Ashby / LinkedIn 适配器；统一 `RawJob` schema；
 LLM-assisted JD 解析 + 正则 fallback；按 `(source, company, source_id)` 去重。
-Phase 13 会用 Job Index & Freshness Engine 替换当前文件 JSON 缓存。
+Phase 13 已用 Job Index & Freshness Engine 替换文件 JSON 搜索缓存。
 
 ### Layer 2: 匹配与过滤
 三层打分：
@@ -297,10 +300,10 @@ platform / company 维度的拆分。CSV export 默认排除 `error_log`。
 
 每个子阶段的发布记录见 `docs/CHANGELOG.md`。
 
-## 8. 路线图（Phase 11 → 18） —— v3.1，2026-05-14 校准
+## 8. 路线图（Phase 11 → 19） —— v3.2，2026-05-19 刷新
 
 v3 在 v1/v2 上修正了四个问题（保留如下）；v3.1 又对 v3 做了四处校准（见本节
-开头版本说明）。
+开头版本说明）。v3.2 记录 Phase 17.9，并同步 Phase 18/19 的重排。
 
 v2/v3 重规划修正了 v1 草案的四个问题：
 
@@ -318,8 +321,9 @@ v2/v3 重规划修正了 v1 草案的四个问题：
 Freshness Engine**），因为这个问题本质是内容版本化 + freshness 状态机 +
 审计绑定，不是 KV 过期。（见 D019。）
 
-新增 **Phase 18: Multi-Tenancy & Auth Hardening** 收尾 v1 商业化就绪核心；
-Phase 12-17 所有表从第一天起就带 `tenant_id`。（见 D020。）
+多租户与 Auth 加固仍然是商业化就绪核心的收尾，但现在后移为 **Phase 19**。
+**Phase 18** 改为 worker 激活、可靠性、并行和清理，先把个人版产品打牢。
+Phase 12-17 所有表仍然从第一天起就带 `tenant_id`。（见 D020。）
 
 ### Phase 11: 可靠性 & 收尾（~1 周）
 加固 Phase 10 引入的 provider 层；交付老用户升级所需的 migrate 工具。
@@ -580,6 +584,21 @@ Phase 12（缓存）+ Phase 9 / 15（agent）串成 "睡一觉，醒来看 revie
 - **17.6** 早间 digest（08:00）。
 - **17.7** `autoapply pause-plan-runs` kill switch。
 
+### Phase 17.8: Material Strategy & Document Library（~1 周） —— **已完成**
+
+补齐用户对材料的控制权：`user_documents` 文档库、上传 / 下载 / promote API、从文档库创建 profile、默认材料策略、plan 级材料覆盖、review 卡片替换材料动作，以及 Materials 页的 Library / Templates / Generate 标签。
+
+### Phase 17.9: LLM Provider Expansion（~0.5 周） —— **已完成**
+
+在 Phase 18 worker 激活前加固 Phase 10 的 provider 抽象，让 provider / model 选择成为设置项，而不是代码改动。
+
+- **17.9.1** 抽出 `OpenAICompatibleProvider`，新增 `ModelInfo`，给一方 provider 加 curated model catalog。
+- **17.9.2** 新增 DeepSeek、Moonshot/Kimi、Qwen、xAI Grok、Groq、Mistral、OpenRouter。
+- **17.9.3** 新增本地 Ollama provider，支持空 key credential 和 `/api/tags` live catalog。
+- **17.9.4** 新增 `GET /api/providers/{id}/models` 和 Settings model picker，保留 custom model 逃生口。
+- **17.9.5** 新增 `llm.small_provider` / `llm.small_model` 小模型层，用于 JD parsing、resume import 等抽取任务。
+- **17.9.6** 新增 `llm.custom_providers`，用户可无代码接入 OpenAI-compatible proxy、私有 vLLM / LM Studio endpoint 或新上游。
+
 ### Phase 18: Worker 激活 / 可靠性 / 并行 / 垃圾清理（~2.5–3 周）
 
 > **重新排序（2026-05-19）**：这一阶段原本是 Phase 19，排在多租户之后。我们
@@ -740,7 +759,7 @@ tenant 前缀，需要全局改 wrapper）、19.7 凭据存储（`src/providers/
 
 ### 时间表
 
-截至 2026-05-19：Phase 1-17.8 已落地（`main`）；下一个要做的是 Phase 18
+截至 2026-05-19：Phase 1-17.9 已落地（`dev`）；下一个要做的是 Phase 18
 （worker 系统审计之后重排过的优先级）。
 
 | Phase | 范围 | 工时 | 状态 |
@@ -754,10 +773,11 @@ tenant 前缀，需要全局改 wrapper）、19.7 凭据存储（`src/providers/
 | 16 | Filter Agent + 可解释性 | 1.5 周 | 已完成 |
 | 17 | Plan Run Loop + Review Queue | 2 周 | 已完成 |
 | 17.8 | Material Strategy & Document Library | 1 周 | 已完成 |
+| 17.9 | LLM Provider Expansion | 0.5 周 | 已完成 |
 | **18** | **Worker 激活 / 可靠性 / 并行 / 垃圾清理** | **2.5–3 周** | **下一步** |
 | 19 | 多租户 & Auth 加固 | 2.5 周 | 已推迟（等个人版成熟后再做） |
 
-个人版产品到 Phase 17.8 已 feature-complete。Phase 18 把它做硬（真 worker、
+个人版产品到 Phase 17.9 已 feature-complete。Phase 18 把它做硬（真 worker、
 retention、并行）；Phase 19 再激活 Phase 12-17 留下的多租户底座。Phase 18 是在
 Phase 17 收尾 / Phase 18 准备阶段做完一次 worker 系统审计之后才确定的 —— 那次
 审计发现 task body 都是 stub、没有 cleanup 策略、并行机会从未被探索过。
@@ -777,7 +797,7 @@ Phase 11 起强制执行：
 - **文档同步** —— `docs/PROJECT_MANAGEMENT.md` + `docs/CHANGELOG.md` 在每个
   Phase 收尾时更新，不要攒一批。
 - **多租户卫生**（Phase 12+） —— 每张新表带 `tenant_id`；每个新 Redis key
-  带前缀；每个新后台任务接收 tenant 上下文。零例外，否则 Phase 18 变成重写。
+  带前缀；每个新后台任务接收 tenant 上下文。零例外，否则 Phase 19 变成重写。
 
 ## 10. 验收清单（按 Phase 的 smoke）
 
@@ -802,24 +822,26 @@ Phase 11 起强制执行：
 | 15 | DOCX patch 保留 named styles；三套 LaTeX 模板可从同一 IR 编译；cover-letter eval 5/5 通过；产物绑定 snapshot/source/template/trace ID |
 | 16 | JobsView 任意被过滤的岗位 5 秒内看到 reason chain；100 个岗位 agent 成本 < $0.50 |
 | 17 | 调度或手动触发 plan run → review queue 出现 N 条预生成 application，每条 30 秒内可 approve |
-| 18 | 两个 tenant 设了重叠 email / LinkedIn cookie → 互相读不到对方的 job / snapshot / application / credential / Redis key（直 SQL + 直 Redis CLI 验证）；超配额返回 429 |
+| 17.8 | 上传可信简历到文档库 → 设成默认材料来源 → 对 paused review entry 以该来源重新生成 → 再 promote 回文档库 |
+| 17.9 | 对已有凭据的内置 provider 做 connect/test；Settings model picker 展示 curated/live catalog；`tier="small"` 的抽取调用走配置的小模型 provider |
+| 18 | 真实 `materials.generate` 与 `application.*` task 通过 Celery worker 执行；worker 丢失后安全重入队；DLQ / 手动 retry 可用；cleanup dry-run 先报告孤儿 artifact 再删除 |
+| 19 | 两个 tenant 设了重叠 email / LinkedIn cookie → 互相读不到对方的 job / snapshot / application / credential / Redis key（直 SQL + 直 Redis CLI 验证）；超配额返回 429 |
 
 ## 11. 风险与未决问题
 
 - **LinkedIn 限流 / 检测。** 通过持久化 context cookie、随机延时、控并发、
   以及 Phase 13 由分布式锁把关的 force-refresh 来缓解。激进的批处理调度仍有实际
   风险。
-- **LLM 成本漂移。** 通过 Phase 12 缓存 + Phase 11 fallback 链（廉价模型作为
-  fallback 槽）+ $1 / 100 case 的 eval 上限来缓解。Phase 9.4 的成本遥测是早期
-  预警。
-- **当前任务执行仍偏同步。** Phase 14 落地前，耗时搜索、生成、申请任务仍可能
-  阻塞 CLI/Web 流程，失败后的人工重试成本较高。
-- **任意 LaTeX 不是零配置。** Phase 15 会接收任意模板，但必须先有
+- **LLM 成本漂移。** 通过 Phase 12 缓存、Phase 11 fallback 链、Phase 17.9 小模型层
+  和 $1 / 100 case 的 eval 上限来缓解。成本遥测是早期预警。
+- **Worker body 仍需激活。** Phase 14 已落地 Celery 骨架，但 Phase 18 才会把耗时
+  搜索、生成、申请任务完整迁入真实 worker task，并补齐 retry / DLQ 行为。
+- **任意 LaTeX 不是零配置。** Phase 15 接收任意模板，但必须先有
   manifest/adapter 且 sample compile 通过；全自动导入仍可能需要用户修正。
 - **当下仍是单实例假设。** Phase 14 + D018/D023 铺了多实例工作；Phase 18 才真正
   做实。在此之前，**不要**对同一 Postgres / Redis 起两个 `autoapply web` 进程
   —— 数据层允许但没有 advisory lock，会引发重复提交。
 - **Auto-submit 安全性。** `apply` 里有 `--auto-submit`，但仍走 HITL gate。
   我们还没看到能让我们按 vendor 摘掉 gate 的 eval 数据。
-- **没有 SaaS 业务层。** Phase 18 是多租户托管基础设施，不是计费 / 注册 /
+- **没有 SaaS 业务层。** Phase 19 是多租户托管基础设施，不是计费 / 注册 /
   营销。除非有商业 license 客户签约，否则这部分都在范围外。

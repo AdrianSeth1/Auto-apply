@@ -16,7 +16,7 @@ Last local verification in this workspace:
 
 | Check | Result |
 |---|---|
-| `uv run pytest -q` | 1514 passed, 1 skipped |
+| `uv run pytest -q` | 1597 passed, 1 skipped |
 | `npm run build` | Passed; existing Vite chunk-size warning remains |
 | `python -m py_compile` on plan-run modules | Passed |
 | Product-string cleanup | No remaining legacy batch-run naming in source docs or built SPA assets |

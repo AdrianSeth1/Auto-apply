@@ -4,6 +4,13 @@ All notable implementation changes to AutoApply are documented here, organized b
 
 ## [Unreleased]
 
+### Documentation Sync (2026-05-19)
+
+- Refreshed README-adjacent project docs for the Phase 17.9 baseline:
+  project-management verification, long-form English/Chinese plans,
+  phase history, and deployment provider guidance now reflect the
+  expanded LLM provider surface and Phase 18/19 ordering.
+
 ### Phase 17.9 — LLM Provider Expansion (2026-05-19)
 
 LLM hardening between Phase 17.8 (Document Library) and Phase 18
@@ -118,7 +125,7 @@ before Phase 14 begins.
   query paths are intentionally not forced to filter — they keep
   today's global-read behavior — but every new Phase 14+ code path
   must thread an explicit tenant context. The "default tenant"
-  fallback persists until Phase 18 auth middleware + RLS take over.
+  fallback persists until Phase 19 auth middleware + RLS take over.
 - 7 new tests in `test_phase_13_9_tenant_id_retrofit.py`: per-table
   invariants + a `Base.metadata` catch-all that fails if any future
   table lands without the column + migration-file metadata check.

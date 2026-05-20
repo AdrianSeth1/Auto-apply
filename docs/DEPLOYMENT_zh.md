@@ -7,12 +7,14 @@
 当前项目已经支持：
 
 - Greenhouse / Lever ATS 抓取
-- LinkedIn 搜索与外部 ATS 链接发现
+- LinkedIn 搜索与外部 ATS 链接发现，并写入持久化 Job Index
 - Materials 工作台：按搜索结果或粘贴 JD 生成定制简历与 Cover Letter
+- Document Library：管理可信简历 / Cover Letter、promote 生成产物、配置材料策略默认值
 - DOCX-first 模板包：通过 manifest 管理样式、容量、预览、校验和上传
 - 从 `qa_bank` 加载问答模板
 - Greenhouse / Lever / Ashby 表单自动填写
-- 申请记录追踪、统计分析、CSV 导出、Vue Web 界面
+- 多 provider LLM 路由：REST provider、本地 Ollama、本地 CLI、用户自定义 OpenAI-compatible endpoint
+- 申请记录追踪、统计分析、CSV 导出、后台任务执行、Vue Web 界面
 
 当前“直接投递”已实现的平台：
 
@@ -33,8 +35,7 @@
 - 至少一种 PDF 转换方案：
   - Microsoft Word + `docx2pdf`
   - LibreOffice
-- 至少一个本地 LLM CLI：Claude Code CLI 或 Codex CLI
-- 如果你希望启用自动 fallback，建议两个都安装
+- 至少一个 LLM provider：托管 provider API key、本地 Ollama、Claude Code CLI、Codex CLI，或用户自定义 OpenAI-compatible endpoint
 - 只有在你需要本地重建前端资源时，才需要 Node.js 和 npm
 
 ## 3. 克隆与安装
@@ -58,10 +59,17 @@ npm run build
 cd ..
 ```
 
-## 3.2 安装并认证 LLM CLI
+## 3.2 配置 LLM provider
 
-AutoApply 当前不直接走 SDK，而是调用本地 CLI。
-所以运行 AutoApply 的机器上，至少要安装一个：
+AutoApply 使用自己的 provider registry，不依赖 vendor SDK。你可以使用托管 REST API、本地 Ollama、本地 CLI，或自定义 OpenAI-compatible endpoint。
+
+内置 provider 包括：
+
+- OpenAI、Anthropic、Gemini、DeepSeek、Moonshot/Kimi、Qwen、xAI Grok、Groq、Mistral、OpenRouter
+- 本地 Ollama
+- Claude Code CLI 和 Codex CLI
+
+如果使用本地 CLI，需要在运行 AutoApply 的同一台机器上安装：
 
 ```bash
 npm install -g @anthropic-ai/claude-code
@@ -72,9 +80,9 @@ npm install -g @openai/codex
 
 推荐做法：
 
-- 两个 CLI 都安装
-- 选一个作为 primary provider
-- 另一个作为 fallback provider
+- 配置一个 primary provider
+- 可选配置一个或多个 fallback provider
+- 可选配置 `llm.small_provider` / `llm.small_model`，用于更便宜的抽取类任务
 
 安装完成后，CLI 一般可直接使用：
 
@@ -204,7 +212,7 @@ uv run autoapply init --skip-llm
 - 测试数据库连接
 - 执行 Alembic 迁移
 - 导入或创建 `data/profile/profile.yaml`
-- 检查 LLM CLI 是否可用
+- 尽可能检查已配置的 LLM provider 是否可用
 - 当你传入 `--llm-primary` / `--llm-fallback` 时，把主备 LLM 设置写入配置文件
 
 ### 7.1 LLM provider 优先级
@@ -213,36 +221,43 @@ uv run autoapply init --skip-llm
 
 ```yaml
 llm:
-  provider: claude-cli
-  primary_provider: claude-cli
-  fallback_provider: codex-cli
+  provider: codex-cli
+  primary_provider: codex-cli
+  fallback_provider: claude-cli
   allow_fallback: true
+  fallback_providers:
+    - claude-cli
+  small_provider: claude-cli
+  small_model: null
 ```
 
 含义：
 
-- `primary_provider`：优先调用的 CLI
-- `fallback_provider`：主 CLI 失败后尝试的 CLI
-- `allow_fallback`：是否允许自动切换到备用 CLI
+- `primary_provider`：优先调用的 provider
+- `fallback_provider`：旧版单一 fallback provider
+- `fallback_providers`：配置多个 fallback 时的有序列表
+- `allow_fallback`：是否允许自动切换到备用 provider
+- `small_provider` / `small_model`：抽取类任务可选的低成本路径
+
+Settings UI 可以连接、测试 provider，并选择模型。`GET /api/providers/{id}/models` 会合并 curated model catalog 和可用的 live runtime catalog（例如 Ollama）。
+
+如果要接入未内置的 OpenAI-compatible endpoint，可在 `config/settings.yaml` 的 `llm.custom_providers` 下新增配置；如果 id 与内置 provider 冲突，内置 provider 优先。
 
 ## 7.2 LLM fallback 机制
 
 这里有两层 fallback：
 
-### CLI 层 fallback
+### Provider 层 fallback
 
 - 如果 `primary_provider` 调用失败、超时或未安装
 - 且 `allow_fallback` 已开启
-- AutoApply 会自动尝试 `fallback_provider`
+- AutoApply 会自动尝试配置好的 fallback provider 链
 
-这个逻辑是双向的：
-
-- Codex -> Claude Code CLI
-- Claude Code CLI -> Codex
+只要凭据或本地运行环境配置好，这个逻辑可跨 REST provider、本地 Ollama 和本地 CLI provider 工作。
 
 ### 功能层 fallback
 
-即使两个 CLI 都失败，系统里也有若干降级路径：
+即使 provider 调用失败，系统里也有若干降级路径：
 
 - JD 解析 -> 正则规则 fallback
 - Cover Letter 生成 -> 模板 fallback
@@ -670,16 +685,16 @@ sudo certbot --nginx -d autoapply.example.com
 - 服务进程使用独立的非 root 用户运行
 - `logs/`、`data/output/`、`data/.linkedin_session/` 需要对运行用户可写
 - 如果需要从 Web UI 上传模板，`data/templates/` 也需要对运行用户可写
-- 被配置为 primary / fallback 的 LLM CLI 也必须对同一个运行用户可用且已认证
+- 如果 primary / fallback 使用本地 LLM CLI，这些 CLI 必须对同一个运行用户可用且已认证
 - 如果服务器上要跑 LinkedIn 搜索，第一次登录通常仍需要人工完成
 - 基于 Playwright 的自动投递更适合受控内部环境，不建议直接做成开放式公网多租户服务
 
 ## 18. 运行注意事项
 
-- 当前直接投递主要支持 Greenhouse 和 Lever
+- 当前直接投递主要支持 Greenhouse、Lever 和 Ashby
 - LinkedIn 主要用于搜索和发现外部 ATS 链接
 - PDF 转换依赖 Word/docx2pdf 或 LibreOffice
-- LLM CLI 不可用时，系统会尽量降级，但解析和生成质量会下降
+- LLM provider 不可用时，系统会尽量降级，但解析和生成质量会下降
 - 默认流程是人工复核后再提交，`--auto-submit` 是可选行为
 
 ## 19. 常见问题
