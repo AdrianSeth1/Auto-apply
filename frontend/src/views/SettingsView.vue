@@ -153,14 +153,17 @@ const state = reactive({
     // as small_tier_action='clear' on save so we delete the keys.
     small_provider: "",
     small_model: "",
+    // Phase 17.9.11: primary model selection. Mirrors
+    // `credentials.metadata.model` on the primary provider. Empty =
+    // use that provider's default_model.
+    primary_model: "",
   },
-  // Phase 17.9.9: model catalog cache keyed by provider id, populated
-  // when the user clicks the Small-model dropdown. We piggy-back on
-  // the existing GET /api/providers/{id}/models route (also used by
-  // the Connect dialog) so a switch between two configured providers
-  // doesn't refetch a list we've already seen this session.
-  smallTierModels: reactive({}),
-  smallTierModelsLoading: false,
+  // Phase 17.9.9 + 17.9.11: model catalog cache keyed by provider id.
+  // Shared by the Primary model dropdown, the Small-tier model
+  // dropdown, and the Connect dialog so the same catalog fetch isn't
+  // repeated for each picker that touches the same provider.
+  modelCatalogs: reactive({}),
+  modelCatalogsLoading: false,
   // Phase 17.8: per-document-type material strategy defaults.
   materialDefaults: {
     loading: true,
@@ -195,13 +198,10 @@ const connectDialog = reactive({
   providerId: "",
   providerLabel: "",
   apiKey: "",
-  // Phase 17.9.4: model picker. `models` is the catalog from
-  // /api/providers/{id}/models; `modelMode` swaps between picking
-  // from the catalog (a native <select>) and entering a custom id.
-  // `modelSelection` is the <select> value when in picker mode --
-  // it's the picked model id, or the sentinel "__custom__".
-  model: "",
-  modelMode: "picker",
+  // Phase 17.9.4 + 17.9.11: catalog-only model picker. `models` is
+  // the dropdown content; `modelSelection` is the currently picked
+  // id. Catalog-outside ids are not entered here -- use the CLI
+  // `autoapply provider set-model` for that path.
   modelSelection: "",
   models: [],
   modelsLoading: false,
@@ -216,8 +216,6 @@ const connectDialog = reactive({
   submitting: false,
   error: "",
 })
-
-const CUSTOM_MODEL_SENTINEL = "__custom__"
 
 // Phase 17.9.8: with the registry now shipping 13+ builtin providers
 // plus user-defined ones, the full flat list runs off the screen on a
@@ -266,6 +264,12 @@ function syncForm() {
   // "disabled" -> we'll send small_tier_action='clear' on save.
   state.form.small_provider = state.data.llm.small_provider || ""
   state.form.small_model = state.data.llm.small_model || ""
+  // Phase 17.9.11: read the primary provider's saved model so the
+  // Primary model dropdown lands on the right entry.
+  const primaryRow = (state.providers || []).find(
+    (p) => p.id === state.form.primary_provider,
+  )
+  state.form.primary_model = primaryRow?.credentials?.metadata?.model || ""
 }
 
 async function loadSettings() {
@@ -273,11 +277,15 @@ async function loadSettings() {
   try {
     state.data = await api.settings()
     syncForm()
-    // Phase 17.9.9: if the saved config already routes through a
-    // small_provider, preload its catalog so the model dropdown is
-    // ready the moment the user opens the section.
+    // Preload catalogs for whichever providers the form is currently
+    // pointing at, so the dropdowns are ready the moment the user
+    // opens the section. Small-tier (17.9.9) + primary (17.9.11) share
+    // the same cache.
     if (state.form.small_provider) {
-      void ensureSmallTierCatalog(state.form.small_provider)
+      void fetchProviderCatalog(state.form.small_provider)
+    }
+    if (state.form.primary_provider) {
+      void fetchProviderCatalog(state.form.primary_provider)
     }
   } catch (error) {
     state.error = error.message
@@ -496,7 +504,6 @@ function openConnectDialog(provider) {
   connectDialog.providerLabel = provider.display_name
   connectDialog.apiKey = ""
   const savedModel = provider.credentials?.metadata?.model || ""
-  connectDialog.model = savedModel
   connectDialog.baseUrl = provider.credentials?.metadata?.base_url || ""
   connectDialog.allowEmptyKey = Boolean(provider.allow_empty_key)
   connectDialog.showAdvanced = Boolean(connectDialog.baseUrl)
@@ -512,9 +519,8 @@ function openConnectDialog(provider) {
   // append it so the picker shows the current selection rather than
   // silently switching them to a different default.
   if (savedModel && !seed.some((m) => m.id === savedModel)) {
-    connectDialog.models.push({ id: savedModel, display_name: savedModel })
+    connectDialog.models.push({ id: savedModel, display_name: `${savedModel} (saved)` })
   }
-  connectDialog.modelMode = "picker"
   connectDialog.modelSelection = savedModel || seed[0]?.id || ""
   connectDialog.open = true
   // Fire off the catalog call -- runtime providers (Ollama) populate
@@ -524,59 +530,38 @@ function openConnectDialog(provider) {
 }
 
 async function loadProviderModels(providerId) {
+  // Connect dialog wraps the shared catalog loader so the dropdown
+  // reflects any runtime-discovered models (Ollama /api/tags etc).
   connectDialog.modelsLoading = true
   try {
-    const result = await api.providerModels(providerId)
-    if (!result?.ok) return
+    const result = await fetchProviderCatalog(providerId, { force: true })
+    if (!result) return
     connectDialog.models = result.models || []
     connectDialog.modelsSource = result.source || "catalog"
     connectDialog.defaultModel = result.default_model || ""
-    // If nothing is selected yet (e.g. seed was empty), default to
-    // the provider's default_model when present; otherwise the first
-    // entry; otherwise drop straight into the "Custom..." flow.
-    if (!connectDialog.modelSelection) {
-      if (connectDialog.defaultModel) {
-        connectDialog.modelSelection = connectDialog.defaultModel
-      } else if (connectDialog.models[0]) {
-        connectDialog.modelSelection = connectDialog.models[0].id
-      } else {
-        connectDialog.modelMode = "custom"
-      }
-    } else if (
-      connectDialog.models.length > 0 &&
+    // If the saved model id isn't in the catalog, append it as a
+    // synthetic entry so the user still sees their current selection
+    // highlighted (rather than silently switching them away from it).
+    // We deliberately do NOT offer a "Custom..." free-text input here;
+    // catalog-outside ids should go through `autoapply provider
+    // set-model` so AutoApply's curated lists stay authoritative.
+    if (
+      connectDialog.modelSelection &&
       !connectDialog.models.some((m) => m.id === connectDialog.modelSelection)
     ) {
-      // Saved model isn't in the catalog -- preserve user intent by
-      // showing it under "Custom..." rather than silently switching.
-      connectDialog.modelMode = "custom"
-      connectDialog.model = connectDialog.modelSelection
-      connectDialog.modelSelection = CUSTOM_MODEL_SENTINEL
+      connectDialog.models.push({
+        id: connectDialog.modelSelection,
+        display_name: `${connectDialog.modelSelection} (saved)`,
+      })
+    } else if (!connectDialog.modelSelection) {
+      connectDialog.modelSelection =
+        connectDialog.defaultModel || connectDialog.models[0]?.id || ""
     }
   } catch (_err) {
     // Catalog is non-essential -- the dialog still works with the seed.
   } finally {
     connectDialog.modelsLoading = false
   }
-}
-
-function onModelSelectionChange() {
-  if (connectDialog.modelSelection === CUSTOM_MODEL_SENTINEL) {
-    connectDialog.modelMode = "custom"
-    // Keep whatever's in connectDialog.model so the input isn't blank.
-  } else {
-    connectDialog.modelMode = "picker"
-    connectDialog.model = connectDialog.modelSelection
-  }
-}
-
-function backToPicker() {
-  connectDialog.modelMode = "picker"
-  // Restore the picker to the default (or first catalog row).
-  connectDialog.modelSelection =
-    connectDialog.defaultModel ||
-    connectDialog.models[0]?.id ||
-    ""
-  connectDialog.model = connectDialog.modelSelection
 }
 
 function canSubmitConnect() {
@@ -593,13 +578,10 @@ async function submitConnect() {
   connectDialog.submitting = true
   connectDialog.error = ""
   state.error = ""
-  // Resolve which model id to persist: in picker mode, the <select>'s
-  // current value; in custom mode, the free-text input. Empty string
-  // is sent as null so the backend falls back to `default_model`.
-  const resolvedModel =
-    connectDialog.modelMode === "custom"
-      ? connectDialog.model.trim()
-      : connectDialog.modelSelection
+  // Phase 17.9.11: picker-only path. The dropdown's currently-selected
+  // id IS the model; empty string sends null so the backend falls back
+  // to the provider's `default_model`.
+  const resolvedModel = connectDialog.modelSelection || ""
   try {
     const payload = await api.connectApiKeyProvider(connectDialog.providerId, {
       api_key: connectDialog.apiKey,
@@ -621,26 +603,34 @@ async function submitConnect() {
   }
 }
 
-// Phase 17.9.9: model catalog for the Small-model tier's model picker.
-// Lazy-loaded the first time the user picks a small_provider; cached
-// for the session so changing providers back and forth is instant.
-async function ensureSmallTierCatalog(providerId) {
-  if (!providerId) return
-  if (state.smallTierModels[providerId]) return
-  state.smallTierModelsLoading = true
+// Phase 17.9.9 + 17.9.11: shared model catalog fetcher. Cache keyed
+// by provider id so the Primary picker, the Small-tier picker and
+// the Connect dialog don't all re-hit the same endpoint. `force`
+// bypasses the cache for the Connect-dialog open path (we want a
+// fresh runtime list for Ollama on every dialog open).
+async function fetchProviderCatalog(providerId, { force = false } = {}) {
+  if (!providerId) return null
+  if (!force && state.modelCatalogs[providerId]) {
+    return state.modelCatalogs[providerId]
+  }
+  state.modelCatalogsLoading = true
   try {
     const result = await api.providerModels(providerId)
     if (result?.ok) {
-      state.smallTierModels[providerId] = {
+      const cached = {
         models: result.models || [],
         default_model: result.default_model || "",
+        source: result.source || "catalog",
       }
+      state.modelCatalogs[providerId] = cached
+      return cached
     }
   } catch (_err) {
-    // Non-fatal -- the input falls back to a free-text field.
+    // Non-fatal -- callers degrade gracefully.
   } finally {
-    state.smallTierModelsLoading = false
+    state.modelCatalogsLoading = false
   }
+  return null
 }
 
 function onSmallProviderChange() {
@@ -651,13 +641,64 @@ function onSmallProviderChange() {
   // previous provider.
   state.form.small_model = ""
   if (state.form.small_provider) {
-    ensureSmallTierCatalog(state.form.small_provider).then(() => {
-      const cached = state.smallTierModels[state.form.small_provider]
+    fetchProviderCatalog(state.form.small_provider).then((cached) => {
       if (cached && !state.form.small_model) {
         state.form.small_model = cached.default_model || ""
       }
     })
   }
+}
+
+// Phase 17.9.11: primary-model picker change handler.
+async function onPrimaryProviderChange() {
+  // When the user switches to a different primary provider, load that
+  // provider's catalog AND read whatever model that provider has saved
+  // in its credentials.metadata.model so the dropdown reflects what
+  // would actually get called. Empty model -> provider's default.
+  const pid = state.form.primary_provider
+  if (!pid) {
+    state.form.primary_model = ""
+    return
+  }
+  // Pull the saved model from the providers list (cheaper than another
+  // HTTP call for the same row).
+  const provider = state.providers.find((p) => p.id === pid)
+  const savedModel = provider?.credentials?.metadata?.model || ""
+  state.form.primary_model = savedModel
+  const cached = await fetchProviderCatalog(pid)
+  if (!state.form.primary_model && cached) {
+    state.form.primary_model = cached.default_model || ""
+  }
+}
+
+async function persistPrimaryModel(newModel, oldModel) {
+  // The primary-provider watcher already triggers when the provider
+  // itself changes; this handler is only for direct model swaps on
+  // the SAME provider. The check on `oldModel` skips the initial sync
+  // pass when state.form is being populated from the API response.
+  if (oldModel === undefined) return
+  const pid = state.form.primary_provider
+  if (!pid) return
+  // Optimistic: don't block the autosave indicator while we PATCH.
+  try {
+    await api.setProviderModel(pid, newModel || null)
+    // Refresh the providers list so the row's metadata.model reflects
+    // the new value (used by the next render of the primary picker).
+    await loadProviders()
+  } catch (error) {
+    state.error = error.message
+  }
+}
+
+function primaryModelOptions() {
+  const pid = state.form.primary_provider
+  if (!pid) return []
+  return state.modelCatalogs[pid]?.models || []
+}
+
+function primaryModelDefault() {
+  const pid = state.form.primary_provider
+  return state.modelCatalogs[pid]?.default_model || ""
 }
 
 async function testProvider(provider) {
@@ -777,6 +818,29 @@ watch(
   },
 )
 
+// Phase 17.9.11: when the primary provider changes, refresh the
+// primary_model field to that provider's saved (or default) model
+// so the Primary model dropdown shows the right value.
+watch(
+  () => state.form.primary_provider,
+  (newPid, oldPid) => {
+    // Skip the initial sync pass.
+    if (oldPid === undefined) return
+    void onPrimaryProviderChange()
+  },
+)
+
+// Changing the Primary model writes directly to the provider's
+// credential metadata via PUT /api/providers/{id}/model. We do NOT
+// route this through `persistSettings`, since that endpoint only
+// touches settings.yaml -- the model lives on credentials.json.
+watch(
+  () => state.form.primary_model,
+  (newModel, oldModel) => {
+    void persistPrimaryModel(newModel, oldModel)
+  },
+)
+
 onMounted(refreshAll)
 
 function providerStatusVariant(provider) {
@@ -871,7 +935,7 @@ function isPrimary(provider) {
           </h3>
           <div class="grid gap-4 md:grid-cols-2">
             <label class="space-y-1.5">
-              <span class="text-xs font-medium text-muted-foreground">Primary</span>
+              <span class="text-xs font-medium text-muted-foreground">Primary provider</span>
               <AppSelect
                 v-model="state.form.primary_provider"
                 :options="primaryOptions"
@@ -879,8 +943,36 @@ function isPrimary(provider) {
               />
             </label>
 
+            <!-- Phase 17.9.11: Primary model dropdown. Catalog is the
+                 provider's curated KNOWN_MODELS + any runtime entries
+                 (Ollama /api/tags). No free-text input here: catalog-
+                 outside ids go through `autoapply provider set-model`. -->
             <label class="space-y-1.5">
-              <span class="text-xs font-medium text-muted-foreground">Fallback</span>
+              <span class="text-xs font-medium text-muted-foreground">
+                Primary model
+                <span v-if="state.modelCatalogsLoading" class="ml-1 text-muted-foreground/70">loading…</span>
+              </span>
+              <select
+                v-model="state.form.primary_model"
+                :disabled="!state.form.primary_provider || primaryModelOptions().length === 0"
+                aria-label="Primary model"
+                class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <option v-if="primaryModelOptions().length === 0" value="">
+                  No models in catalog
+                </option>
+                <option
+                  v-for="m in primaryModelOptions()"
+                  :key="m.id"
+                  :value="m.id"
+                >
+                  {{ m.display_name || m.id }}<template v-if="m.id === primaryModelDefault()"> · default</template>
+                </option>
+              </select>
+            </label>
+
+            <label class="space-y-1.5">
+              <span class="text-xs font-medium text-muted-foreground">Fallback provider</span>
               <AppSelect
                 v-model="state.form.fallback_provider"
                 :options="fallbackOptions"
@@ -944,17 +1036,17 @@ function isPrimary(provider) {
             <label class="space-y-1.5">
               <span class="text-xs font-medium text-muted-foreground">
                 Model
-                <span v-if="state.smallTierModelsLoading" class="ml-1 text-muted-foreground/70">loading…</span>
+                <span v-if="state.modelCatalogsLoading" class="ml-1 text-muted-foreground/70">loading…</span>
               </span>
               <select
-                v-if="state.form.small_provider && state.smallTierModels[state.form.small_provider]?.models?.length"
+                v-if="state.form.small_provider && state.modelCatalogs[state.form.small_provider]?.models?.length"
                 v-model="state.form.small_model"
                 aria-label="Small-tier model"
                 class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 <option value="">Provider default</option>
                 <option
-                  v-for="m in state.smallTierModels[state.form.small_provider].models"
+                  v-for="m in state.modelCatalogs[state.form.small_provider].models"
                   :key="m.id"
                   :value="m.id"
                 >
@@ -1465,15 +1557,15 @@ function isPrimary(provider) {
                 class="ml-1 text-xs text-muted-foreground"
               >({{ connectDialog.modelsSource === 'runtime' ? 'local server catalog' : 'curated + local' }})</span>
             </Label>
+            <!-- Phase 17.9.11: catalog-only picker. Catalog-outside
+                 ids should go through `autoapply provider set-model`. -->
             <select
-              v-if="connectDialog.modelMode === 'picker'"
               id="api-model"
               v-model="connectDialog.modelSelection"
               class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-              @change="onModelSelectionChange"
             >
               <option v-if="connectDialog.models.length === 0" value="" disabled>
-                No catalog available — choose Custom...
+                No models in catalog — connect first then update via CLI
               </option>
               <option
                 v-for="m in connectDialog.models"
@@ -1482,17 +1574,7 @@ function isPrimary(provider) {
               >
                 {{ m.display_name || m.id }}<template v-if="m.id === connectDialog.defaultModel"> (default)</template>
               </option>
-              <option :value="CUSTOM_MODEL_SENTINEL">Custom…</option>
             </select>
-            <div v-else class="flex gap-2">
-              <Input
-                id="api-model"
-                v-model="connectDialog.model"
-                placeholder="Enter model id (e.g. gpt-4o-mini)"
-                class="flex-1"
-              />
-              <Button type="button" variant="ghost" size="sm" @click="backToPicker">Back</Button>
-            </div>
           </div>
 
           <button

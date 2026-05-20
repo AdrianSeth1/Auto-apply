@@ -398,6 +398,54 @@ def use_provider_as_primary(
 
 
 # ---------------------------------------------------------------------------
+# Model switch (Phase 17.9.11)
+# ---------------------------------------------------------------------------
+
+
+def update_provider_model(provider_id: str, *, model: str | None) -> dict:
+    """Swap the model on an already-connected provider.
+
+    Lets the Settings UI change which model gets called without having
+    to go through the full Connect dialog (which demands an API key).
+    ``model`` is normalised: empty / whitespace -> ``None`` (clears the
+    override so the provider's ``default_model`` wins on the next call).
+    """
+    registry = get_registry()
+    provider = registry.maybe_get(provider_id)
+    if provider is None:
+        return {
+            "ok": False,
+            "error": f"Unknown provider {provider_id!r}.",
+            "error_code": "unknown_provider",
+            "provider_id": provider_id,
+        }
+    creds = registry.store.get(provider_id)
+    if creds is None:
+        return {
+            "ok": False,
+            "error": (
+                f"{provider_id!r} is not connected yet. Connect it from "
+                "the Settings page before changing its model."
+            ),
+            "error_code": "not_connected",
+            "provider_id": provider_id,
+        }
+    new_model = (model or "").strip() or None
+    previous = creds.metadata.get("model")
+    creds.metadata["model"] = new_model
+    registry.store.set(creds)
+    return {
+        "ok": True,
+        "provider_id": provider_id,
+        "model": new_model,
+        "previous_model": previous,
+        "message": (
+            f"Model: {previous or '<default>'} -> {new_model or '<default>'}"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Model catalog (Phase 17.9.4)
 # ---------------------------------------------------------------------------
 

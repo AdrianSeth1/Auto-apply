@@ -398,6 +398,16 @@ export const api = {
       `/api/providers/${encodeURIComponent(providerId)}/models`,
     )
   },
+  setProviderModel(providerId, model) {
+    return request(
+      `/api/providers/${encodeURIComponent(providerId)}/model`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: model || null }),
+      },
+    )
+  },
   providersHealth() {
     return request("/api/providers/health")
   },

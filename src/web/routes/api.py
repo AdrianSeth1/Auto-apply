@@ -82,6 +82,7 @@ from src.application.providers import (
     list_provider_models,
     list_providers,
     test_provider_connection,
+    update_provider_model,
     use_provider_as_primary,
 )
 from src.application.regenerate_materials import regenerate_application_material
@@ -255,6 +256,13 @@ class ProviderSetKeyPayload(BaseModel):
 
 class ProviderUsePayload(BaseModel):
     fallback_provider: str | None = None
+
+
+class ProviderSetModelPayload(BaseModel):
+    """Phase 17.9.11: swap the model on an already-connected provider
+    without re-entering the API key."""
+
+    model: str | None = None
 
 
 class ProfileSavePayload(BaseModel):
@@ -1083,6 +1091,21 @@ async def providers_set_key(
         raise HTTPException(status_code=404, detail=result["error"])
     if code in {"wrong_auth_type", "empty_api_key"}:
         raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@router.put("/providers/{provider_id}/model")
+async def providers_set_model(
+    provider_id: str, payload: ProviderSetModelPayload
+) -> dict:
+    """Phase 17.9.11: change a provider's model without re-entering its key."""
+    result = update_provider_model(provider_id, model=payload.model)
+    if not result["ok"]:
+        code = result.get("error_code")
+        if code == "unknown_provider":
+            raise HTTPException(status_code=404, detail=result["error"])
+        if code == "not_connected":
+            raise HTTPException(status_code=409, detail=result["error"])
     return result
 
 

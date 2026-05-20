@@ -1196,6 +1196,58 @@ class TestProvidersApi:
         assert body["models"][0]["id"] == "gpt-4o-mini"
         assert body["source"] == "catalog"
 
+    def test_set_provider_model_ok(self, client):
+        """Phase 17.9.11: PUT /api/providers/{id}/model updates the
+        provider's credential metadata without re-entering the key."""
+        with patch(
+            "src.web.routes.api.update_provider_model",
+            return_value={
+                "ok": True,
+                "provider_id": "openai",
+                "model": "gpt-4.1",
+                "previous_model": "gpt-4o-mini",
+                "message": "Model: gpt-4o-mini -> gpt-4.1",
+            },
+        ) as mocked:
+            response = client.put(
+                "/api/providers/openai/model",
+                json={"model": "gpt-4.1"},
+            )
+        assert response.status_code == 200
+        assert mocked.call_args.args == ("openai",)
+        assert mocked.call_args.kwargs == {"model": "gpt-4.1"}
+        assert response.json()["model"] == "gpt-4.1"
+
+    def test_set_provider_model_unknown_404s(self, client):
+        with patch(
+            "src.web.routes.api.update_provider_model",
+            return_value={
+                "ok": False,
+                "error": "Unknown provider 'nope'.",
+                "error_code": "unknown_provider",
+                "provider_id": "nope",
+            },
+        ):
+            response = client.put(
+                "/api/providers/nope/model", json={"model": "anything"}
+            )
+        assert response.status_code == 404
+
+    def test_set_provider_model_not_connected_409s(self, client):
+        with patch(
+            "src.web.routes.api.update_provider_model",
+            return_value={
+                "ok": False,
+                "error": "'openai' is not connected yet.",
+                "error_code": "not_connected",
+                "provider_id": "openai",
+            },
+        ):
+            response = client.put(
+                "/api/providers/openai/model", json={"model": "gpt-4.1"}
+            )
+        assert response.status_code == 409
+
 
 class TestWebCLI:
     def test_web_help(self):

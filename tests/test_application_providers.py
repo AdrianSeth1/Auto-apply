@@ -1032,3 +1032,72 @@ class TestListProviderModels:
         assert result["ok"] is True
         # No live list -> default seed only.
         assert [m["id"] for m in result["models"]] == ["runtime-default"]
+
+
+# ---------------------------------------------------------------------------
+# update_provider_model (Phase 17.9.11)
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateProviderModel:
+    def test_unknown_provider_returns_error(self, isolated_setup) -> None:
+        from src.application.providers import update_provider_model
+
+        result = update_provider_model("nope", model="anything")
+        assert result["ok"] is False
+        assert result["error_code"] == "unknown_provider"
+
+    def test_not_connected_returns_error(self, isolated_setup) -> None:
+        """No credentials saved -> error_code='not_connected'."""
+        from src.application.providers import update_provider_model
+
+        result = update_provider_model("stub-api", model="stub-pro")
+        assert result["ok"] is False
+        assert result["error_code"] == "not_connected"
+
+    def test_updates_metadata_without_touching_secret(
+        self, isolated_setup
+    ) -> None:
+        """The secret must survive a model swap unchanged -- the whole
+        point of this endpoint is avoiding the API-key re-prompt."""
+        from src.application.providers import update_provider_model
+
+        registry, _ = isolated_setup
+        registry.store.set(
+            ProviderCredentials(
+                provider_id="stub-api",
+                auth_type=AuthType.API_KEY,
+                secret={"api_key": "sk-original"},
+                metadata={"model": "stub-model", "base_url": "https://x.example"},
+            )
+        )
+        result = update_provider_model("stub-api", model="stub-pro")
+        assert result["ok"] is True
+        assert result["model"] == "stub-pro"
+        assert result["previous_model"] == "stub-model"
+
+        creds = registry.store.get("stub-api")
+        assert creds is not None
+        assert creds.secret["api_key"] == "sk-original"
+        assert creds.metadata["model"] == "stub-pro"
+        # Other metadata (base_url) must be preserved.
+        assert creds.metadata["base_url"] == "https://x.example"
+
+    def test_empty_model_clears_override(self, isolated_setup) -> None:
+        """Passing '' or None should clear the model override so the
+        provider falls back to its default_model on the next call."""
+        from src.application.providers import update_provider_model
+
+        registry, _ = isolated_setup
+        registry.store.set(
+            ProviderCredentials(
+                provider_id="stub-api",
+                auth_type=AuthType.API_KEY,
+                secret={"api_key": "sk"},
+                metadata={"model": "stub-pro"},
+            )
+        )
+        result = update_provider_model("stub-api", model="")
+        assert result["ok"] is True
+        creds = registry.store.get("stub-api")
+        assert creds.metadata["model"] is None
