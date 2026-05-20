@@ -198,11 +198,12 @@ const connectDialog = reactive({
   providerId: "",
   providerLabel: "",
   apiKey: "",
-  // Phase 17.9.4 + 17.9.11: catalog-only model picker. `models` is
-  // the dropdown content; `modelSelection` is the currently picked
-  // id. Catalog-outside ids are not entered here -- use the CLI
-  // `autoapply provider set-model` for that path.
+  // Phase 17.9.4 + 17.9.11: catalog model picker. `models` is the
+  // dropdown content; `modelSelection` is the currently picked id.
+  // `customModel` lets users enter newly released or private models
+  // that are not in the catalog yet.
   modelSelection: "",
+  customModel: "",
   models: [],
   modelsLoading: false,
   modelsSource: "catalog",
@@ -278,6 +279,16 @@ function syncForm() {
   state.form.primary_model = primaryRow?.credentials?.metadata?.model || ""
 }
 
+function syncPrimaryModelFromProviders() {
+  const pid = state.form.primary_provider
+  if (!pid) return
+  const primaryRow = (state.providers || []).find((p) => p.id === pid)
+  const savedModel = primaryRow?.credentials?.metadata?.model || ""
+  if (savedModel || !state.form.primary_model) {
+    state.form.primary_model = savedModel
+  }
+}
+
 async function loadSettings() {
   state.suspendAutosave = true
   try {
@@ -308,6 +319,7 @@ async function loadProviders() {
       return
     }
     state.providers = payload.providers || []
+    syncPrimaryModelFromProviders()
   } catch (error) {
     state.error = error.message
   }
@@ -523,6 +535,7 @@ function openConnectDialog(provider) {
   connectDialog.models = seed
   connectDialog.modelsSource = "catalog"
   connectDialog.defaultModel = ""
+  connectDialog.customModel = ""
   // If the user already had a saved model that's not in the seed,
   // append it so the picker shows the current selection rather than
   // silently switching them to a different default.
@@ -550,9 +563,8 @@ async function loadProviderModels(providerId) {
     // If the saved model id isn't in the catalog, append it as a
     // synthetic entry so the user still sees their current selection
     // highlighted (rather than silently switching them away from it).
-    // We deliberately do NOT offer a "Custom..." free-text input here;
-    // catalog-outside ids should go through `autoapply provider
-    // set-model` so AutoApply's curated lists stay authoritative.
+    // The dialog also has a free-text custom model field for ids that
+    // ship after our curated/runtime snapshot.
     if (
       connectDialog.modelSelection &&
       !connectDialog.models.some((m) => m.id === connectDialog.modelSelection)
@@ -609,10 +621,10 @@ async function submitConnect() {
   connectDialog.submitting = true
   connectDialog.error = ""
   state.error = ""
-  // Phase 17.9.11: picker-only path. The dropdown's currently-selected
-  // id IS the model; empty string sends null so the backend falls back
-  // to the provider's `default_model`.
-  const resolvedModel = connectDialog.modelSelection || ""
+  // Phase 17.9.11+: picker + custom path. Empty string sends null so
+  // the backend falls back to the provider's `default_model`.
+  const resolvedModel =
+    connectDialog.customModel.trim() || connectDialog.modelSelection || ""
   try {
     const payload = await api.connectApiKeyProvider(connectDialog.providerId, {
       api_key: connectDialog.apiKey,
@@ -1637,15 +1649,21 @@ function isPrimary(provider) {
                 class="ml-1 text-xs text-muted-foreground"
               >({{ connectDialog.modelsSource === 'runtime' ? 'local server catalog' : 'curated + local' }})</span>
             </Label>
-            <!-- Phase 17.9.11+13: catalog-only AppSelect picker.
-                 Catalog-outside ids should go through `autoapply
-                 provider set-model`. -->
+            <!-- Phase 17.9.11+13: catalog AppSelect picker plus
+                 custom id fallback for newly released/private models. -->
             <AppSelect
               v-model="connectDialog.modelSelection"
               :options="connectDialogModelOptions()"
               :disabled="connectDialog.models.length === 0"
-              :placeholder="connectDialog.models.length === 0 ? 'No models in catalog — update via CLI after connecting' : 'Pick a model'"
+              :placeholder="connectDialog.models.length === 0 ? 'No catalog models available' : 'Pick a model'"
               aria-label="Model"
+            />
+            <Input
+              id="api-custom-model"
+              v-model="connectDialog.customModel"
+              class="mt-2"
+              placeholder="Or enter a custom model id"
+              spellcheck="false"
             />
           </div>
 

@@ -22,6 +22,7 @@ from pathlib import Path
 import yaml
 from sqlalchemy.orm import Session
 
+from src.core.config import bootstrap_user_configs
 from src.intake.base import ScraperError
 from src.intake.filters import JobFilter
 from src.intake.greenhouse import GreenhouseScraper
@@ -38,6 +39,7 @@ def load_company_list(config_path: Path) -> dict[str, list[str]]:
 
     Returns dict mapping ATS name to list of company slugs.
     """
+    bootstrap_user_configs()
     if not config_path.exists():
         logger.warning("Company config not found at %s", config_path)
         return {}

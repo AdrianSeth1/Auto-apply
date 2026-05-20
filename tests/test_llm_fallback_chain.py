@@ -520,6 +520,31 @@ class TestSmallTier:
         assert recorded["provider"] == "codex-cli"
         assert recorded["model"] == "cheap-model-7b"
 
+    def test_small_model_not_threaded_to_fallback_provider(self):
+        """Small-tier model ids are provider-local and must not leak to fallbacks."""
+        calls = []
+
+        def fake_dispatch(provider, prompt, *, system, timeout, output_format, model=None):
+            calls.append((provider, model))
+            if provider == "codex-cli":
+                raise LLMError("codex CLI timed out after 60s")
+            return "primary rescue"
+
+        with (
+            patch(
+                "src.utils.llm.load_config",
+                return_value=_small_tier_config(
+                    primary="claude-cli",
+                    small_provider="codex-cli",
+                    small_model="cheap-model-7b",
+                ),
+            ),
+            patch("src.utils.llm._call_provider", side_effect=fake_dispatch),
+        ):
+            assert generate_text("p", tier="small") == "primary rescue"
+
+        assert calls == [("codex-cli", "cheap-model-7b"), ("claude-cli", None)]
+
     def test_primary_tier_does_not_thread_small_model(self):
         """tier='primary' (default) must NOT inject the small_model override."""
         recorded = {}

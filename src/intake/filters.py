@@ -20,6 +20,7 @@ from pathlib import Path
 
 import yaml
 
+from src.core.config import bootstrap_user_configs
 from src.intake.schema import EmploymentType, RawJob, SeniorityLevel
 
 logger = logging.getLogger("autoapply.intake.filters")
@@ -182,6 +183,7 @@ def load_filter_profiles(config_path: Path) -> dict[str, JobFilter]:
 
     Returns dict mapping profile name to JobFilter instance.
     """
+    bootstrap_user_configs()
     if not config_path.exists():
         logger.warning("Filter config not found at %s", config_path)
         return {}

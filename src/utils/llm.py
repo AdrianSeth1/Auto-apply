@@ -299,9 +299,11 @@ def generate_text(
     # When neither knob is configured, "small" silently behaves as
     # "primary" so call sites can opt in optimistically.
     model_override: str | None = None
+    model_override_provider: str | None = None
     if tier == "small":
         model_override = settings.get("small_model")
         small_provider = settings.get("small_provider")
+        model_override_provider = small_provider or settings["primary_provider"]
         if small_provider:
             providers = [small_provider]
             # The small tier still gets the fallback chain as a safety
@@ -391,13 +393,14 @@ def generate_text(
         }
         attempts.append(attempt)
         try:
+            provider_model = model_override if provider == model_override_provider else None
             result = _call_provider(
                 provider,
                 prompt,
                 system=system,
                 timeout=timeout,
                 output_format=output_format,
-                model=model_override,
+                model=provider_model,
             )
         except LLMError as exc:
             attempt["latency_ms"] = int((time.monotonic() - start) * 1000)

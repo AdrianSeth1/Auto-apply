@@ -397,12 +397,17 @@ def _patch_bullets(
                     + (" …" if len(dropped) > 3 else "")
                 )
 
+        patched_count = (
+            len(new_bullets)
+            if allow_add_remove_bullets
+            else min(len(new_bullets), len(bullet_indices))
+        )
         report.operations.append(
             PatchOperation(
                 kind="bullet",
                 detail=(
                     f"section={name} bullets {len(bullet_indices)} -> "
-                    f"{min(len(new_bullets), len(bullet_indices)) if not allow_add_remove_bullets else len(new_bullets)}"
+                    f"{patched_count}"
                 ),
             )
         )
@@ -561,14 +566,20 @@ def _find_cover_closing_index(
     """Return the index of the first closing line at or after
     ``after_idx``, or ``None`` if no recognized closing is present."""
     for idx in range(after_idx + 1, len(doc.paragraphs)):
-        text = (doc.paragraphs[idx].text or "").strip().lower().rstrip(",")
+        text = (doc.paragraphs[idx].text or "").strip().lower()
         if not text:
             continue
         for marker in _COVER_CLOSING_PATTERNS:
-            if text == marker or text.startswith(marker + ","):
+            marker_norm = marker.rstrip(",")
+            text_norm = text.rstrip(",")
+            if text == marker or text_norm == marker_norm:
                 return idx
             # Some closings appear inline like "Sincerely yours"
-            if text.startswith(marker + " ") and len(text) - len(marker) < 16:
+            if (
+                not marker.endswith(",")
+                and text_norm.startswith(marker_norm + " ")
+                and len(text_norm) - len(marker_norm) < 16
+            ):
                 return idx
     return None
 
@@ -639,20 +650,13 @@ def patch_cover_letter_docx(
         if (doc.paragraphs[idx].text or "").strip()
     ]
 
-    # Extract the new body paragraphs from the IR. ``paragraphs`` is a
-    # list of CoverLetterParagraph; we drop salutation/closing-typed
-    # entries because the source DOCX already provides those and we
-    # explicitly want to keep them.
+    # Extract the new body paragraphs from the IR. ``opening`` and
+    # ``closing`` are body paragraph roles, not salutation/sign-off
+    # lines; the generator is instructed not to include Dear/Sincerely.
     new_paragraphs: list[str] = []
     for para in getattr(document, "paragraphs", []) or []:
         text = (getattr(para, "text", "") or "").strip()
         if not text:
-            continue
-        ptype = getattr(para, "type", "other")
-        if ptype in {"opening", "closing"}:
-            # ``opening`` from the IR is the salutation, ``closing``
-            # is "Sincerely,\nLiam" — both already in the source
-            # template, don't duplicate them.
             continue
         new_paragraphs.append(text)
 

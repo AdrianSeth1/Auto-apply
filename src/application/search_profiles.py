@@ -6,7 +6,7 @@ import re
 
 import yaml
 
-from src.core.config import PROJECT_ROOT
+from src.core.config import PROJECT_ROOT, bootstrap_user_configs
 
 SEARCH_PROFILES_PATH = PROJECT_ROOT / "config" / "search_profiles.yaml"
 _PROFILE_ID_RE = re.compile(r"^[\w][\w \-\.]{0,98}[\w]$|^[\w]$")
@@ -71,6 +71,7 @@ def delete_search_profile_data(profile_id: str) -> dict:
 
 
 def _read_profiles() -> dict[str, dict]:
+    bootstrap_user_configs()
     if not SEARCH_PROFILES_PATH.exists():
         return {}
 
