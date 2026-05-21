@@ -1,4 +1,25 @@
-# AutoApply
+<p align="center">
+  <img src="docs/logo/AutoApply_logo.svg" alt="AutoApply Logo" width="400"/>
+</p>
+
+<p align="center">
+  <a href="#product">Product</a> •
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#documentation">Docs</a> •
+  <a href="#architecture">Architecture</a> •
+  <a href="#license">License</a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/version-0.18.9-blue.svg" alt="Version"/>
+  <img src="https://img.shields.io/badge/license-PolyForm_Noncommercial-green.svg" alt="License"/>
+  <img src="https://img.shields.io/badge/python-3.12%2B-3776AB.svg" alt="Python"/>
+  <img src="https://img.shields.io/badge/FastAPI-0.115%2B-009688.svg" alt="FastAPI"/>
+  <img src="https://img.shields.io/badge/Vue-3.5-42B883.svg" alt="Vue"/>
+  <img src="https://img.shields.io/badge/PostgreSQL-16%2B-4169E1.svg" alt="PostgreSQL"/>
+</p>
+
+---
 
 AutoApply is a local-first job application automation workspace. It helps a job seeker discover roles, score fit, generate tailored application materials, prepare applications, and track outcomes while keeping every submit behind an explicit human decision.
 
@@ -21,43 +42,45 @@ AutoApply is designed for users who want automation without losing control over 
 
 ## Current Status
 
-Core product development is complete through **Phase 17.9: LLM Provider Expansion** (layered on top of Phase 17.8: Material Strategy & Document Library).
+Core product development is complete through **Phase 18: Worker Activation, Reliability, Parallelism, and automatic artifact Cleanup with quarantine/audit** (layered on top of Phase 17.9: LLM Provider Expansion).
 
-The current application includes the Job Index, task queue, plan-run automation, review queue, document library, material strategy defaults, multi-vendor provider management with per-provider model catalogs, a Settings model picker, custom OpenAI-compatible provider support, and an optional cheap-model tier, plus LinkedIn session management and the modern Vue web console. The roadmap from here is **Phase 18** (Worker Activation, Reliability, Parallelism, and automatic artifact Cleanup with quarantine/audit) → **Phase 19** (Per-Posting Tag Cache & Filter Fast Path: every search re-fetches upstream, while snapshot tags and profile/scorer-version scores are cached) → **Phase 20** (Custom Job Sources / Connectors with URL safety, bounded multi-source search, and feature-gated template DSL) → **Phase 21** (Multi-tenancy & Auth Hardening, deferred until the personal-version product is feature-complete).
+The current application includes the Job Index, task queue with closed-out worker bodies (no fake `"scheduled"` / `"stubbed"` success returns), async materials generation that returns `task_id` + structured `TaskRecord.result`, a `dead_lettered` state + "Stuck / failed" tab for retries/discards, an automatic artifact-cleanup pipeline with quarantine + restore + purge, atomic-write protection on every materials writer, process-wide LLM rate-limit gates (global + per-provider), and the existing Phase 17.x surface (review queue, document library, material strategy defaults, multi-vendor provider management with per-provider model catalogs, Settings model picker, custom OpenAI-compatible providers, optional cheap-model tier, LinkedIn session management, modern Vue web console). Browser form-fill / click-submit, saved-search registry fanout, and outcome status sync are still explicit `not_implemented` paths rather than silent fake successes; legacy submit entrypoints now keep entries approved/queued instead of marking them submitted. The roadmap from here is **Phase 19** (Per-Posting Tag Cache & Filter Fast Path plus saved-search registry fanout) → **Phase 20** (Custom Job Sources / Connectors with URL safety, bounded multi-source search, and feature-gated template DSL) → **Phase 21** (Multi-tenancy & Auth Hardening) → future ATS-first application status sync.
 
 Latest local verification in this workspace:
 
-- `uv run pytest -q`: 1597 passed, 1 skipped (2026-05-19, after Phase 17.9)
+- `uv run pytest -q`: 1719 passed, 1 skipped (2026-05-21, after Phase 18)
 - `npm run build`: passed, with the existing Vite chunk-size warning
-- Legacy batch-run naming cleanup: no remaining obsolete product strings in source docs or built SPA assets
+- Alembic head: `b8d2f9e15c33` (Phase 18.3 DLQ columns); the Phase 18 schema chain is `e7c3a5b91f48` → `f4e8c1d2a907` → `a1c7b3e54f08` → `b8d2f9e15c33`
 
 For implementation-level history, see [Phase History](docs/PHASE_HISTORY.md) and [Changelog](docs/CHANGELOG.md).
 
 ## Quick Start
 
-Bring up Postgres (with pgvector) and Redis via the bundled Compose
-file, then launch the app on the host:
+Install dependencies once, then use the unified local launcher:
 
 ```powershell
-# 1. Set AUTOAPPLY_DB_PASSWORD in .env (any non-empty value)
-docker compose up -d
-
-# 2. Install Python deps + Chromium and run migrations
+# 1. Set AUTOAPPLY_DB_PASSWORD in .env (any non-empty value), then install deps
 uv sync
 uv run playwright install chromium
-uv run alembic upgrade head
 uv run autoapply init
-uv run autoapply web
+
+# 2. Start Postgres + Redis, migrations, Celery worker/Beat, and the web UI
+uv run autoapply start
 ```
 
 Open the web console at `http://127.0.0.1:8000`.
 
-The Compose file only runs the **data dependencies** (Postgres + Redis).
-The Python app stays on the host — Playwright and the docx→PDF
-toolchain run more reliably native than in a container. For a
-single-server production install that runs the web GUI, Celery
-worker, and Beat under one supervisor, see `supervisord.conf` at the
-repo root and section 15 of [the deployment guide](docs/DEPLOYMENT.md).
+`autoapply start` runs Docker Compose for **data dependencies**
+(Postgres + Redis), applies Alembic migrations, starts Celery worker
+and Beat, then launches the Python web app on the host. Use
+`uv run autoapply start --check` to print the exact startup plan without
+starting anything. If the default host ports are unavailable, the launcher
+chooses alternate ports and passes them to Compose, Alembic, Celery, and
+the web process for that run. It is cross-platform; Docker Desktop can be
+auto-launched on Windows/macOS when installed, while Linux expects the
+Docker daemon to already be available. For a single-server production install that runs the
+same processes under one supervisor, see `supervisord.conf` and section
+15 of [the deployment guide](docs/DEPLOYMENT.md).
 
 If you modify frontend files:
 
@@ -86,7 +109,10 @@ The repository includes built SPA assets under `src/web/static/spa`, so a fronte
 # Database schema
 uv run alembic upgrade head
 
-# Web console
+# All-in-one local runtime
+uv run autoapply start
+
+# Web console only
 uv run autoapply web --host 127.0.0.1 --port 8000
 
 # Provider setup

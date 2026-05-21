@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import importlib
 from datetime import UTC, datetime
-from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, delete
@@ -159,12 +158,102 @@ def test_regenerate_idempotency_key_includes_choice_fingerprint() -> None:
         body = fh.read()
     for fragment in (
         "choice_fingerprint",
+        "regenerate_enqueue_version",
+        "legacy_job_payload",
+        "job_id",
         "strategy",
         "template_id",
+        "template_manifest_fingerprint",
         "source_document_id",
         "patch_aggressiveness",
     ):
         assert fragment in body, f"expected {fragment!r} in api.py idempotency key fingerprint"
+
+
+def test_regenerate_idempotency_key_invalidates_on_template_edit(tmp_path) -> None:
+    """2026-05-21 fix: editing a template's style_overrides / target_pages
+    in the Template Library must change the regenerate idempotency
+    fingerprint so the broker actually re-runs the task instead of
+    handing back the previously-succeeded artifact.
+    """
+    import hashlib
+    import json
+
+    from src.documents.templates import (
+        ensure_template_package,
+        load_template_package,
+        update_docx_template_styles,
+    )
+
+    ensure_template_package("resume", template_root=tmp_path)
+
+    def _fingerprint() -> str:
+        package = load_template_package(
+            "resume", "ats_single_column_v1", template_root=tmp_path
+        )
+        manifest_fp = hashlib.sha256(
+            package.manifest.model_dump_json(
+                exclude={"name", "description"}
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        # Pin request_bucket_5s so the test isolates "manifest changed"
+        # from "user waited >5s and got a new bucket".
+        return hashlib.sha256(
+            json.dumps(
+                {
+                    "regenerate_enqueue_version": 4,
+                    "strategy": "regenerate",
+                    "template_id": "ats_single_column_v1",
+                    "template_manifest_fingerprint": manifest_fp,
+                    "legacy_job_payload": False,
+                    "job_id": "job-1",
+                    "source_document_id": None,
+                    "patch_aggressiveness": None,
+                    "patch_allow_reorder_sections": None,
+                    "patch_allow_add_remove_bullets": None,
+                    "request_bucket_5s": 1234567,
+                },
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+
+    before = _fingerprint()
+    update_docx_template_styles(
+        document_type="resume",
+        template_id="ats_single_column_v1",
+        overrides={"normal": {"font": "Garamond", "size": 11}},
+        target_pages=2,
+        template_root=tmp_path,
+    )
+    after = _fingerprint()
+    assert before != after, (
+        "template manifest hash must change when style_overrides or "
+        "target_pages are edited so regenerate stops short-circuiting"
+    )
+
+
+def test_regenerate_idempotency_key_includes_time_bucket() -> None:
+    """2026-05-21 fix v4: user-initiated regenerate must fire when the
+    user really wants it -- including a 5-second time bucket in the
+    fingerprint means the only short-circuit window is sub-5-second
+    duplicates (network retry / accidental double click), not a
+    deliberate re-click an hour later."""
+    import importlib
+
+    src_path = importlib.import_module("src.web.routes.api").__file__
+    assert src_path is not None
+    with open(src_path, encoding="utf-8") as fh:
+        body = fh.read()
+    assert "request_bucket_5s" in body, (
+        "regenerate fingerprint must include a 5-second time bucket so a "
+        "user clicking Regenerate after >5s is not blocked by idempotency"
+    )
+    assert "DEFAULT_TEMPLATE_IDS" in body, (
+        "fingerprint must resolve to the seeded default template_id when the "
+        "task payload has no explicit template_id, otherwise template edits "
+        "on the default template do not invalidate the fingerprint"
+    )
 
 
 def test_material_envelope_recognises_failed_task() -> None:

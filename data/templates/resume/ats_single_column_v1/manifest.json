@@ -1,6 +1,12 @@
 {
   "template_id": "ats_single_column_v1",
   "document_type": "resume",
+  "template_format": "docx",
+  "renderer": "docx",
+  "supported_outputs": [
+    "docx",
+    "pdf"
+  ],
   "name": "ATS Single Column",
   "description": "One-page ATS-friendly resume with named Word styles and tab-stop dates.",
   "page": {
@@ -22,26 +28,37 @@
   "sections": {
     "summary": {
       "enabled": false,
-      "max_items": 1
+      "max_items": 1,
+      "max_bullets_per_item": null,
+      "max_words_per_bullet": null,
+      "max_lines": null
     },
     "education": {
       "enabled": true,
-      "max_items": 2
+      "max_items": 2,
+      "max_bullets_per_item": null,
+      "max_words_per_bullet": null,
+      "max_lines": null
     },
     "experience": {
       "enabled": true,
       "max_items": 3,
       "max_bullets_per_item": 4,
-      "max_words_per_bullet": 24
+      "max_words_per_bullet": 24,
+      "max_lines": null
     },
     "projects": {
       "enabled": true,
       "max_items": 3,
       "max_bullets_per_item": 3,
-      "max_words_per_bullet": 22
+      "max_words_per_bullet": 22,
+      "max_lines": null
     },
     "skills": {
       "enabled": true,
+      "max_items": null,
+      "max_bullets_per_item": null,
+      "max_words_per_bullet": null,
       "max_lines": 4
     }
   },
@@ -63,5 +80,10 @@
   },
   "blocks": {
     "sections": "{{resume.sections}}"
-  }
+  },
+  "latex": null,
+  "style_overrides": {},
+  "target_pages": 1,
+  "filename_pattern": "company_role_date",
+  "filename_custom_label": ""
 }

@@ -53,6 +53,44 @@ class ResumeItem(BaseModel):
     bullets: list[ResumeBullet] = Field(default_factory=list)
 
 
+class CustomSectionEntry(BaseModel):
+    """A single line/row inside a free-form resume section.
+
+    Resume schemas that hard-code Experience / Projects / Skills lose
+    everything else a candidate actually has on their resume --
+    Volunteer Experience, Awards, Affiliations, Interests, Publications,
+    Certifications, Languages-spoken, etc. This model is intentionally
+    permissive: ``title`` is the visible label (e.g. "President" or an
+    award name), the rest are optional supporting fields and the freeform
+    ``details`` / ``bullets`` carry whatever else the source document had.
+    """
+
+    title: str = ""
+    organization: str = ""
+    location: str = ""
+    start_date: str = ""
+    end_date: str = ""
+    # One-line supporting text shown under the title (e.g. award issuer,
+    # affiliation level, summary description). Renderers print this as a
+    # single grey line; if the source resume only had a one-liner, this
+    # is where it lives.
+    details: str = ""
+    bullets: list[str] = Field(default_factory=list)
+
+
+class CustomSection(BaseModel):
+    """A resume section that the canonical schema does not know about.
+
+    The original resume text decided what to call it ("VOLUNTEER
+    EXPERIENCE", "AWARDS & HONORS", "PROFESSIONAL AFFILIATIONS",
+    "INTERESTS & ACTIVITIES", ...); we preserve the title verbatim so
+    the rendered output keeps the candidate's chosen heading.
+    """
+
+    title: str
+    entries: list[CustomSectionEntry] = Field(default_factory=list)
+
+
 class ResumeDocument(BaseModel):
     """Renderer-agnostic representation of a tailored resume."""
 
@@ -67,6 +105,10 @@ class ResumeDocument(BaseModel):
     education: list[dict[str, Any]] = Field(default_factory=list)
     experiences: list[ResumeItem] = Field(default_factory=list)
     projects: list[ResumeItem] = Field(default_factory=list)
+    # Free-form sections that the canonical schema does not enumerate --
+    # rendered after the known sections in their natural order unless a
+    # ``custom:<title>`` token appears in ``section_order``.
+    custom_sections: list[CustomSection] = Field(default_factory=list)
     section_order: list[str] = Field(
         default_factory=lambda: ["header", "education", "skills", "experience", "projects"]
     )

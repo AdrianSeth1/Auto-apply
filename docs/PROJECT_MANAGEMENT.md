@@ -4,11 +4,11 @@ This document is the live operating context for AutoApply. It should stay short,
 
 ## Current State
 
-AutoApply is complete through **Phase 17.9: LLM Provider Expansion** (2026-05-19), itself layered on top of Phase 17.8.
+AutoApply is complete through **Phase 18: Worker Activation, Reliability, Parallelism, Cleanup** (2026-05-20), itself layered on top of Phase 17.9.
 
-The product currently supports job discovery, job-index freshness, fit scoring and explanations, materials generation, document-library curation, automation plans, review queues, gated submission, application tracking, multi-vendor LLM routing (OpenAI / Anthropic / Gemini / DeepSeek / Moonshot / Qwen / xAI / Groq / Mistral / OpenRouter / Ollama / Claude+Codex CLI / user-defined custom providers), per-provider model catalogs surfaced in the Settings UI, an optional cheap-model tier for extraction-style work, and background task execution.
+The product currently supports job discovery, job-index freshness, fit scoring and explanations, materials generation (now async with structured task results), document-library curation, automation plans, review queues, gated submission, application tracking, multi-vendor LLM routing with global + per-provider concurrency caps, per-provider model catalogs surfaced in the Settings UI, an optional cheap-model tier for extraction-style work, background task execution with worker bodies that no longer return fake `"scheduled"`/`"stubbed"` success, durable task results via `TaskRecord.result`, dead-letter-queue plumbing for tasks that exhaust `max_retries`, and an automatic artifact-cleanup pipeline that protects DB-referenced files while quarantining orphans / tmp / failed-artifact remnants.
 
-The next planned hardening area is **Phase 18: Worker Activation, Reliability, Parallelism, Cleanup** (re-ordered 2026-05-19; refined 2026-05-20 to require full worker-stub closeout, durable task results/DLQ, and automatic artifact cleanup with quarantine/audit). **Phase 19: Per-Posting Tag Cache & Filter Fast Path** then drops the search-result-set cache in favour of snapshot-level objective tags and profile/scorer-version score caches, so the same JD snapshot is not re-scored on every search. **Phase 20: Custom Job Sources (Connectors)** introduces URL-safe user-added company careers sites (Nvidia, Microsoft, Stripe, etc.) on top of the LinkedIn / ATS intake we ship today, with bounded multi-source search and a feature-gated LLM template DSL for the long tail. Multi-tenancy & auth hardening, originally Phase 18, now lands as **Phase 21** once the personal-version product is feature-complete.
+The next planned hardening area is **Phase 19: Per-Posting Tag Cache & Filter Fast Path** -- drop the search-result-set cache in favour of snapshot-level objective tags and profile/scorer-version score caches, so the same JD snapshot is not re-scored on every search. Phase 19 also owns the saved-search registry needed for `search.daily_fanout` / `search.refresh` to become real fanout tasks. **Phase 20: Custom Job Sources (Connectors)** introduces URL-safe user-added company careers sites (Nvidia, Microsoft, Stripe, etc.) on top of the LinkedIn / ATS intake we ship today, with bounded multi-source search and a feature-gated LLM template DSL for the long tail. Multi-tenancy & auth hardening, originally Phase 18, now lands as **Phase 21** once the personal-version product is feature-complete. Outcome status sync is a later ATS-first feature: poll supported ATS/application portals first, then add email / HR-reply ingestion.
 
 ## Verification Baseline
 
@@ -16,12 +16,12 @@ Last local verification in this workspace:
 
 | Check | Result |
 |---|---|
-| `uv run pytest -q` | 1597 passed, 1 skipped |
+| `uv run pytest -q` | 1688 passed, 1 skipped |
 | `npm run build` | Passed; existing Vite chunk-size warning remains |
 | `python -m py_compile` on plan-run modules | Passed |
-| Product-string cleanup | No remaining legacy batch-run naming in source docs or built SPA assets |
+| Phase 18 worker bodies | Fake `"scheduled"` / `"stubbed"` returns closed out; unsupported browser/status-sync paths now return explicit `not_implemented`; `application_status_sync` removed from Beat |
 
-When schema changes are present, run `uv run alembic upgrade head` before launching the web app. The current head is `e7c3a5b91f48`, which creates the `user_documents` table for the Document Library.
+When schema changes are present, run `uv run alembic upgrade head` before launching the web app. The current head is `b8d2f9e15c33`, which adds the dead-letter-queue columns on `tasks` (Phase 18.3). The Phase 18 schema chain is: `e7c3a5b91f48` (user_documents) → `f4e8c1d2a907` (cleanup_runs + cleanup_items + applications.deleted_at) → `a1c7b3e54f08` (tasks.result) → `b8d2f9e15c33` (tasks.last_attempted_at + dead_lettered_at + dlq_reason).
 
 ## Active Roadmap
 
@@ -29,23 +29,30 @@ When schema changes are present, run `uv run alembic upgrade head` before launch
 |---|---|---|
 | 17.8 | Material strategy defaults, user document library, plan-level material overrides, replace-materials review actions | Complete |
 | 17.9 | LLM provider expansion (more vendors, per-provider model catalog + UI picker, small-model tier, user-defined custom providers) | Complete |
-| 18 | Worker activation, reliability, parallelism, cleanup | Planned |
+| 18 | Worker activation, reliability, parallelism, cleanup | Complete |
 | 19 | Per-Posting Tag Cache & Filter Fast Path: drop search-result TTL cache; tags keyed by snapshot, scores keyed by snapshot + profile_version + scorer_version | Planned |
 | 20 | Custom Job Sources (Connectors): URL-safe user sources, ATS auto-detection, multi-source search, and feature-gated LLM template DSL | Planned |
 | 21 | Multi-tenancy and auth hardening (deferred from Phase 18 → 19 → 20) | Future |
+| Future | ATS-first application status sync, then email / HR-reply ingestion | Backlog |
 
-### Phase 18 Working Scope
+### Phase 18 Shipped Scope (2026-05-20)
 
-| Area | Intended Outcome |
+| Area | Shipped Outcome |
 |---|---|
-| Worker stub closeout | Every registered / scheduled task body stops fake-succeeding. `materials.generate`, `application.prepare/fill/submit`, `jobs.enrich`, and maintenance tasks either call real use cases or explicitly return `not_implemented` and are removed from Beat/UI scheduling. |
-| Async API + task result | Long-running material routes enqueue and return `task_id`; `GET /api/tasks/{task_id}` exposes durable status plus `TaskRecord.result` so the UI can retrieve generated artifacts after completion. |
-| Reliability + DLQ | Exercise ack-late worker-loss behavior with real broker tests; add a durable `dead_lettered` state (or equivalent DLQ table), `last_attempted_at`, `dlq_reason`, and manual retry/discard actions backed by Postgres rather than transient Redis state. |
-| Automatic cleanup | Daily artifact cleanup is in scope and enabled through a safe pipeline: build a DB-derived protected-path set, classify candidates, move eligible orphan/tmp/failed artifacts into `data/quarantine/<run_id>/`, write cleanup reports, and permanently purge only after the quarantine window. Manual `scan`, `clean`, `restore`, and `purge-quarantine` commands share the same rules. |
-| Parallelism + rate limits | Add targeted concurrency for bullet rewrites, dual document generation, and JD parsing, but route LLM calls through global/provider-level semaphores so multiple workers cannot multiply per-task concurrency into provider abuse. |
-| Sync fallback retirement | `AUTOAPPLY_SYNC_MATERIALS=1` is a short soak/debug escape hatch only. The UI defaults to async, and the fallback is removed or marked dev-only once Phase 18 passes. |
+| Worker stub closeout (18.1) | `materials.generate`, `jobs.enrich`, `application.prepare`, `maintenance.jd_health_check`, `maintenance.gate_expire_sweep`, `maintenance.linkedin_cookie_refresh` and `maintenance.cache_eviction` now run real call chains. `application.submit` runs the pre-submit freshness gate but does not click the final ATS submit button. `application.fill`, `maintenance.status_sync`, and the saved-search refresh tasks return explicit `status="not_implemented"` with a structured detail message; `application_status_sync` is removed from Beat. |
+| Async API + task result (18.2) | `POST /api/jobs/generate-material` and `POST /api/applications/{id}/regenerate-material` default to enqueue + return `{task_id, poll_url}`. `tasks.result` JSONB column is populated by the postrun signal handler so `GET /api/tasks/{task_id}` returns produced artifact paths. SPA gained a generic `getTask` / `pollTask` helper; existing wrappers transparently await the poll and yield the legacy envelope. |
+| Reliability + DLQ (18.3) | Tasks that exhaust `max_retries` transition to a new durable `dead_lettered` status. `tasks.last_attempted_at` / `tasks.dead_lettered_at` / `tasks.dlq_reason` columns + a partial DLQ index back the SPA's "Stuck / failed" tab. `POST /api/tasks/{id}/retry` accepts dead-lettered rows; new `POST /api/tasks/{id}/discard` drops the row to `cancelled` with audit. |
+| Automatic cleanup (18.4) | `src/maintenance/artifacts.py` ships the reference-aware classifier (protected / tmp / failed_artifact / screenshot / version_log / orphan_output / unknown). Eligible files move to `data/quarantine/<run_id>/`; `purge_quarantine` deletes after `cleanup.quarantine_days=7`. `cleanup_runs` + `cleanup_items` audit tables. `autoapply cleanup scan/clean/restore/purge-quarantine` CLI and the Beat-driven `maintenance.cache_eviction` task share the same engine. `DELETE /api/applications/{id}?cascade=true` soft-deletes + quarantines linked artifacts. `atomic_write` context manager protects every patch / library copy / generation-version write. |
+| Parallelism + rate limits (18.5) | `rewrite_bullets`, materials.generate's dual-document run, and `parse_requirements_batch` fan out via `asyncio.gather`. `src/utils/parallelism.py` provides process-wide `threading.Semaphore` gates: global LLM cap (default 10), per-provider override, per-task bullet-rewrite cap (default 5). Every `generate_text` dispatch acquires `llm_call_gate(provider_id)` so multi-worker fan-out can't multiply provider concurrency. LinkedIn detail-page enrichment intentionally stays serial. |
+| Sync fallback retirement (18.6) | `AUTOAPPLY_SYNC_MATERIALS=1` is the dev-only escape hatch; the first hit on `generate-material` / `regenerate-material` while the flag is set emits a deprecation warning to the operator log. The SPA only takes the async path. |
 
-Phase 18 cleanup is intentionally not just dry-run. The safety mechanism is reference-based protection plus quarantine and auditability: user-owned library/source/template files and any DB-referenced artifact are protected, while temp files, failed intermediate artifacts, old screenshots, orphan outputs, and soft-deleted application artifacts are automatically moved out of `data/output` under category-specific retention rules.
+### Known Phase 18 Follow-Ups
+
+| Follow-up | Why it remains |
+|---|---|
+| Final ATS click-submit | Legacy submit entrypoints no longer mark rows submitted, but the external browser click-submit step remains `not_implemented`. Submitted counts should mean real external submission only after that worker path lands. |
+| Saved-search registry fanout | `search.daily_fanout` / `search.refresh` are no longer fake successes, but they still wait on a saved-search `query_id -> kwargs` registry. Production search continues through direct `search_jobs` / `orchestration.plan_run`; Phase 19 should add the registry and wire the tasks. |
+| Outcome status sync | `maintenance.status_sync` is intentionally registered but not scheduled. Future status sync should start with ATS/application-portal polling for supported connectors, then add email / HR-reply ingestion as a second source. |
 
 ### Phase 19 Working Scope
 
@@ -66,6 +73,7 @@ The current `search_results` TTL cache short-circuits whole result sets, which m
 |---|---|
 | 19.2 `src/jobs/tagger.py` | Pure-function rule set over JD snapshots only: `work_mode` / `level` / `sponsorship_signal` / `intern_eligible` / `posting_age_bucket` / `clearance_required` / `usa_only`. A1 tags are profile-independent objective attributes; subjective labels belong to A2 score. |
 | 19.3 `posting.tag` + `posting.tag_backfill` Celery tasks | `posting.tag` writes snapshot tags idempotently on content-hash change. `posting.tag_backfill` pages through stale `tagger_version` rows in batches and shows a UI banner while draining. |
+| 19.3b saved-search registry fanout | Persist saved-search definitions (`query_id -> source / keywords / location / filters / max_pages / profile`) so `search.daily_fanout` can enumerate active searches and enqueue real `search.refresh` children. This keeps the Phase 19 “every search hits upstream” rule while moving scheduled search refreshes out of no-op task bodies. |
 | 19.4 `job_posting_scores` write-through | Filter Agent in `src/agent/` writes computed score keyed by `(tenant_id, snapshot_id, profile_id, profile_version, scorer_version)`. Read path checks only current profile/scorer versions before invoking the agent. |
 | 19.5 `cached_search` refactor | `src/jobs/search.py` drops the TTL short-circuit; `search_results` rows stay (for "removed since" diffs and pagination) and the existing distributed lock stays (still want to prevent concurrent same-source scrapes) |
 | 19.6 Filter fast-path | New `src/filter/fast_path.py`: A1 hard rules reject only when snapshot tags are `ready`; pending/computing tags show `Tagging...` and fall back to slow scoring; failed tags use ordinary scoring/manual retag, never default reject. A2 cache hits reuse current-version scores; misses enqueue the real Filter Agent. |

@@ -169,7 +169,7 @@ class AutoApplyTask(Task):
     ) -> dict[str, Any] | None:
         """Phase 14.3 contract: a task body should call this first.
         If a previous run with the same idempotency key already
-        reached ``succeeded``, returns the stored payload (suitable to
+        reached ``succeeded``, returns the stored result (suitable to
         ``return`` straight from the task)."""
         if not idempotency_key:
             return None
@@ -180,7 +180,7 @@ class AutoApplyTask(Task):
         return {
             "replayed": True,
             "task_id": str(prior.id),
-            "result": prior.payload,
+            "result": prior.result,
         }
 
     # ----- Agent boundary -------------------------------------------------

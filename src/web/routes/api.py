@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
@@ -52,6 +54,9 @@ from src.application.jobs import (
 )
 from src.application.jobs import (
     update_material_template as update_material_template_usecase,
+)
+from src.application.jobs import (
+    update_material_template_styles as update_material_template_styles_usecase,
 )
 from src.application.jobs import (
     upload_material_template as upload_material_template_usecase,
@@ -106,6 +111,7 @@ from src.application.tracking import (
 )
 from src.core.config import PROJECT_ROOT
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["api"])
 MAX_TEMPLATE_UPLOAD_BYTES = 10 * 1024 * 1024
 
@@ -185,6 +191,28 @@ class TemplateUpdatePayload(BaseModel):
     content: str
     template_name: str = ""
     description: str = ""
+    target_pages: int | None = None
+    filename_pattern: str | None = None
+    filename_custom_label: str | None = None
+
+
+class TemplateStyleOverridePayload(BaseModel):
+    font: str | None = None
+    size: int | None = None
+    bold: bool | None = None
+    italic: bool | None = None
+    line_spacing: float | None = None
+    space_before_pt: float | None = None
+    space_after_pt: float | None = None
+
+
+class TemplateStylesPayload(BaseModel):
+    overrides: dict[str, TemplateStyleOverridePayload] = Field(default_factory=dict)
+    template_name: str = ""
+    description: str = ""
+    target_pages: int | None = None
+    filename_pattern: str | None = None
+    filename_custom_label: str | None = None
 
 
 class SearchProfilePayload(BaseModel):
@@ -460,7 +488,7 @@ async def generate_job_material(payload: JobMaterialPayload) -> dict:
     return _enqueue_materials_generate_from_web(payload)
 
 
-def _enqueue_materials_generate_from_web(payload: "JobMaterialPayload") -> dict:
+def _enqueue_materials_generate_from_web(payload: JobMaterialPayload) -> dict:
     """Bridge the JobsView payload onto the Phase 14 enqueue contract.
 
     The ``materials.generate`` task accepts either a stored
@@ -475,8 +503,8 @@ def _enqueue_materials_generate_from_web(payload: "JobMaterialPayload") -> dict:
 
     from src.application.material_defaults import resolve_material_choice
     from src.tasks.app import celery_app
-    from src.tasks.base import EnqueueSpec
     from src.tasks.base import AutoApplyTask as _AutoApplyTask
+    from src.tasks.base import EnqueueSpec
     from src.tasks.context import current_tenant_id
 
     # Resolve overrides so the task body doesn't have to re-derive
@@ -542,11 +570,49 @@ def _enqueue_materials_generate_from_web(payload: "JobMaterialPayload") -> dict:
     import hashlib
     import json
 
+    # 2026-05-21 fix (v3): see the regenerate path for full rationale.
+    # Same template-manifest fingerprint + 5s time-bucket strategy so
+    # an explicit Generate click always fires when the user means it.
+    import time
+
+    from src.documents.templates import (  # noqa: PLC0415
+        DEFAULT_TEMPLATE_IDS,
+        load_template_package,
+    )
+
+    effective_template_id = (
+        task_payload.get("resume_template_id")
+        if document_type == "resume"
+        else task_payload.get("cover_letter_template_id")
+    ) or DEFAULT_TEMPLATE_IDS.get(document_type)
+    template_manifest_fingerprint: str | None = None
+    if effective_template_id:
+        try:
+            template_package = load_template_package(
+                document_type, effective_template_id
+            )
+            template_manifest_fingerprint = hashlib.sha256(
+                template_package.manifest.model_dump_json(
+                    exclude={"name", "description"}
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "materials.generate: failed to hash template manifest for %s/%s: %s",
+                document_type,
+                effective_template_id,
+                exc,
+            )
+
+    request_bucket = int(time.time()) // 5
+
     choice_fingerprint = hashlib.sha256(
         json.dumps(
             {
+                "version": 3,
                 "strategy": choice.get("strategy"),
                 "template_id": payload.template_id,
+                "template_manifest_fingerprint": template_manifest_fingerprint,
                 "source_document_id": choice.get("document_id"),
                 "patch_aggressiveness": choice.get("patch_aggressiveness"),
                 "patch_allow_reorder_sections": choice.get(
@@ -555,6 +621,7 @@ def _enqueue_materials_generate_from_web(payload: "JobMaterialPayload") -> dict:
                 "patch_allow_add_remove_bullets": choice.get(
                     "patch_allow_add_remove_bullets"
                 ),
+                "request_bucket_5s": request_bucket,
             },
             sort_keys=True,
             default=str,
@@ -652,6 +719,35 @@ async def update_material_template(
         content=payload.content,
         template_name=payload.template_name or None,
         description=payload.description or None,
+        target_pages=payload.target_pages,
+        filename_pattern=payload.filename_pattern,
+        filename_custom_label=payload.filename_custom_label,
+    )
+    if result["ok"]:
+        return result
+    status_code = 400 if result["error_code"] != "template_update_failed" else 500
+    raise HTTPException(status_code=status_code, detail=result["error"])
+
+
+@router.put("/templates/{document_type}/{template_id}/styles")
+async def update_material_template_styles(
+    document_type: str,
+    template_id: str,
+    payload: TemplateStylesPayload,
+) -> dict:
+    overrides = {
+        key: value.model_dump(exclude_none=True)
+        for key, value in payload.overrides.items()
+    }
+    result = update_material_template_styles_usecase(
+        document_type=document_type,
+        template_id=template_id,
+        overrides=overrides,
+        template_name=payload.template_name or None,
+        description=payload.description or None,
+        target_pages=payload.target_pages,
+        filename_pattern=payload.filename_pattern,
+        filename_custom_label=payload.filename_custom_label,
     )
     if result["ok"]:
         return result
@@ -977,6 +1073,8 @@ async def submit_application(application_id: str) -> dict:
             raise HTTPException(status_code=404, detail=result["error"])
         if result["error_code"] == "invalid_status":
             raise HTTPException(status_code=409, detail=result["error"])
+        if result["error_code"] == "submit_enqueue_failed":
+            raise HTTPException(status_code=503, detail=result["error"])
         raise HTTPException(status_code=500, detail=result["error"])
     return result
 
@@ -1547,7 +1645,7 @@ async def cache_clear_namespace_endpoint(
 
 
 def _enqueue_regenerate_material(
-    application_uuid: "Any", payload: "RegenerateMaterialPayload"
+    application_uuid: Any, payload: RegenerateMaterialPayload
 ) -> dict:
     """Phase 18.2: enqueue ``materials.generate`` for an existing
     application's job, returning ``{task_id, poll_url}`` so the SPA
@@ -1581,11 +1679,34 @@ def _enqueue_regenerate_material(
         )
 
     factory = get_session_factory(load_config())
+    job_payload: dict[str, Any] | None = None
     with factory() as session:
         app = session.get(Application, application_uuid)
         if app is None:
             raise HTTPException(status_code=404, detail="Application not found.")
         job_id = str(app.job_id)
+        try:
+            from src.core.models import Job  # noqa: PLC0415
+
+            job = session.get(Job, app.job_id) if app.job_id else None
+            if job is not None:
+                job_payload = {
+                    "id": str(job.id),
+                    "source": job.source or "unknown",
+                    "source_id": job.source_id or str(job.id),
+                    "company": job.company,
+                    "title": job.title,
+                    "location": job.location,
+                    "employment_type": job.employment_type,
+                    "seniority": job.seniority,
+                    "description": job.description,
+                    "requirements": job.requirements or {},
+                    "application_url": job.application_url,
+                    "ats_type": job.ats_type or job.source or "unknown",
+                    "raw_data": job.raw_data or {},
+                }
+        except Exception:
+            job_payload = None
 
     try:
         choice = resolve_material_choice(
@@ -1605,6 +1726,8 @@ def _enqueue_regenerate_material(
         "application_id": str(application_uuid),
         "document_types": [document_type],
     }
+    if job_payload:
+        task_payload["job"] = job_payload
     if document_type == "resume":
         task_payload["resume_strategy"] = choice["strategy"]
         task_payload["resume_template_id"] = choice["template_id"] or payload.template_id
@@ -1636,18 +1759,78 @@ def _enqueue_regenerate_material(
     # user who switched template / strategy / source_document after
     # the first regenerate would silently get the old artifact back.
     # Fingerprint the effective generation choices so each distinct
-    # request still hits the broker, while a duplicate click within
-    # one second still gets short-circuited.
+    # request still hits the broker, while duplicate identical clicks
+    # still short-circuit. Include a version because older regenerate
+    # tasks omitted inline legacy Job payloads and could persist
+    # ``posting_not_found`` as a Celery-successful result under the old
+    # key; those stale rows must not block the fixed enqueue payload.
     import hashlib
     import json
+
+    # 2026-05-21 fix (v4): a user-initiated **Regenerate** click is an
+    # explicit intent to re-run. The previous fingerprint-only model
+    # blocked the click whenever the configuration looked identical,
+    # even when:
+    #   * the same template's content was edited (style overrides /
+    #     target_pages / filename pattern) but the template_id stayed
+    #     the same,
+    #   * the rendered template_id was the seeded default (None on the
+    #     task payload because the user never explicitly picked one),
+    #     so the manifest hash never even made it into the fingerprint.
+    #
+    # The fix has two pieces:
+    #   1. Resolve the *effective* template_id by falling back to the
+    #      seeded default when the payload has no explicit pick. This
+    #      is the template the renderer will actually load, so it is
+    #      the one whose manifest should fingerprint the run.
+    #   2. Include a 5-second time bucket in the fingerprint. Real
+    #      double-clicks (network retry, accidental dup) land in the
+    #      same bucket and still dedupe; a user who waits long enough
+    #      to actually want a re-run lands in a fresh bucket and gets
+    #      one. This is the right tradeoff: the idempotency guard is
+    #      meant to catch automation-level duplicates, not to lock
+    #      humans out of their own button.
+    import time
+
+    from src.documents.templates import (  # noqa: PLC0415
+        DEFAULT_TEMPLATE_IDS,
+        load_template_package,
+    )
+
+    effective_template_id = (
+        task_payload.get(f"{document_type}_template_id")
+        or DEFAULT_TEMPLATE_IDS.get(document_type)
+    )
+    template_manifest_fingerprint: str | None = None
+    if effective_template_id:
+        try:
+            template_package = load_template_package(
+                document_type, effective_template_id
+            )
+            template_manifest_fingerprint = hashlib.sha256(
+                template_package.manifest.model_dump_json(
+                    exclude={"name", "description"}
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "regenerate: failed to hash template manifest for %s/%s: %s",
+                document_type,
+                effective_template_id,
+                exc,
+            )
+
+    request_bucket = int(time.time()) // 5
 
     choice_fingerprint = hashlib.sha256(
         json.dumps(
             {
+                "regenerate_enqueue_version": 4,
                 "strategy": choice.get("strategy"),
-                "template_id": task_payload.get(
-                    f"{document_type}_template_id"
-                ),
+                "template_id": effective_template_id,
+                "template_manifest_fingerprint": template_manifest_fingerprint,
+                "legacy_job_payload": bool(job_payload),
+                "job_id": job_id,
                 "source_document_id": choice.get("document_id"),
                 "patch_aggressiveness": choice.get("patch_aggressiveness"),
                 "patch_allow_reorder_sections": choice.get(
@@ -1656,6 +1839,7 @@ def _enqueue_regenerate_material(
                 "patch_allow_add_remove_bullets": choice.get(
                     "patch_allow_add_remove_bullets"
                 ),
+                "request_bucket_5s": request_bucket,
             },
             sort_keys=True,
             default=str,

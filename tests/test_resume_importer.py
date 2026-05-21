@@ -19,7 +19,6 @@ from src.memory.resume_importer import (
     extract_text_from_docx,
 )
 
-
 VALID_YAML = """\
 identity:
   full_name: "Liam Liu"
@@ -101,9 +100,9 @@ def _build_docx_with_hyperlink(
     user types a URL and presses space.
     """
     from docx import Document
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
     from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
 
     doc = Document()
     paragraph = doc.add_paragraph(leading_text)
@@ -173,3 +172,88 @@ def test_extract_preserves_plain_paragraphs(tmp_path: Path) -> None:
 
     assert "Liam Liu" in rendered
     assert "Software Engineer Intern" in rendered
+
+
+# ----------------------------- Custom sections ------------------------------
+
+
+def test_scan_resume_headings_finds_volunteer_and_awards() -> None:
+    """Deterministic scanner must pull non-canonical headings even when
+    the LLM-extracted YAML doesn't include them, so the candidate's
+    Volunteer / Awards / Affiliations content cannot silently disappear."""
+    from src.memory.resume_importer import _looks_canonical_heading, _scan_resume_headings
+
+    text = """LIAM FROST
+liam@example.com
+
+EDUCATION
+University X
+BSc CS
+
+VOLUNTEER EXPERIENCE
+Local Library
+- Tutored 12 students
+
+AWARDS & HONORS
+Dean's List 2023
+"""
+
+    headings = _scan_resume_headings(text)
+    titles = [h["title"] for h in headings]
+    assert "EDUCATION" in titles
+    assert "VOLUNTEER EXPERIENCE" in titles
+    assert "AWARDS & HONORS" in titles
+    # The candidate's name at the very top is NOT a section heading.
+    assert "LIAM FROST" not in titles
+    # _looks_canonical_heading must classify these correctly.
+    assert _looks_canonical_heading("EDUCATION")
+    assert not _looks_canonical_heading("VOLUNTEER EXPERIENCE")
+    assert not _looks_canonical_heading("AWARDS & HONORS")
+
+
+def test_backfill_custom_sections_adds_missed_headings(monkeypatch) -> None:
+    """When the LLM forgets to populate ``custom_sections``, the
+    deterministic backfill must rescue every non-canonical heading."""
+    from src.memory import resume_importer
+
+    raw_text = """JANE DOE
+jane@example.com
+
+EDUCATION
+University X
+BSc CS
+
+VOLUNTEER EXPERIENCE
+Local Library
+- Tutored 12 students
+
+AWARDS & HONORS
+Dean's List 2023
+"""
+
+    profile_data = {
+        "identity": {"full_name": "Jane Doe"},
+        "education": [{"institution": "University X"}],
+        # LLM forgot custom_sections entirely
+    }
+
+    # Force the structuring LLM call to fail so we exercise the
+    # deterministic fallback path.
+    def _explode(*args, **kwargs):
+        raise RuntimeError("simulated LLM outage")
+
+    monkeypatch.setattr(
+        "src.utils.llm.generate_json", _explode, raising=False
+    )
+
+    enriched = resume_importer._backfill_custom_sections(profile_data, raw_text)
+
+    titles = [s["title"] for s in enriched["custom_sections"]]
+    assert "VOLUNTEER EXPERIENCE" in titles
+    assert "AWARDS & HONORS" in titles
+    for section in enriched["custom_sections"]:
+        # Fallback path leaves the raw body in details so content
+        # is preserved verbatim, never lost.
+        assert section["entries"]
+        first = section["entries"][0]
+        assert first.get("details")

@@ -117,7 +117,13 @@ def _build_celery_app() -> Celery:
         # the same leader-election lock.
         redbeat_redis_url=_resolve_broker_url(),
         redbeat_key_prefix="autoapply:beat:",
-        redbeat_lock_timeout=60,
+        # RedBeat extends its Redis lock from the scheduler tick loop.
+        # If Beat sleeps longer than the lock TTL (common with sparse
+        # schedules), Redis expires the lock and redbeat crashes with
+        # LockNotOwnedError on the next extend. Keep the loop interval
+        # comfortably below the TTL for local long-running AutoApply jobs.
+        beat_max_loop_interval=30,
+        redbeat_lock_timeout=300,
     )
     return app
 

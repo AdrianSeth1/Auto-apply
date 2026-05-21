@@ -115,6 +115,8 @@ class ApplicationSubmitPayload(BaseModel):
 class OrchestrationPlanRunPayload(BaseModel):
     """Phase 17.1 plan_run task payload."""
 
+    automation_plan_id: str | None = None
+    automation_plan_name: str | None = None
     profile_id: str = "default"
     search_profile_id: str | None = None
     top_n: int = 10
@@ -861,9 +863,10 @@ def status_sync(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
         "application_id": args.application_id,
         "status": "not_implemented",
         "detail": (
-            "Application-outcome sync requires HR-reply / rejection-email "
-            "ingestion that hasn't landed yet. Task body is intentionally "
-            "a no-op so Beat ticks (when restored) audit honestly."
+            "Application-outcome sync should start with supported ATS / "
+            "application-portal polling, then add HR-reply / rejection-email "
+            "ingestion. Task body is intentionally a no-op so manual "
+            "invocations audit honestly."
         ),
     }
 

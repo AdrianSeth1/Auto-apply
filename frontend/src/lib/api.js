@@ -74,10 +74,13 @@ function _materialEnvelopeFromTaskRow(row, materialType, extras = {}) {
   const bodyStatus = result.status || null
   const noArtifacts = Object.keys(artifacts).length === 0
   const rowFailed = row.status !== "succeeded"
-  const bodyFailed = bodyStatus === "failed" || (bodyStatus === "partial" && noArtifacts)
+  const bodyFailed =
+    bodyStatus && bodyStatus !== "ok" && (bodyStatus !== "partial" || noArtifacts)
   if (rowFailed || bodyFailed || (errors.length > 0 && !documentArtifact)) {
     const err = new Error(
-      errors.length ? errors.map((e) => e.error).join("; ") : row.last_error || "Task failed",
+      errors.length
+        ? errors.map((e) => e.error).join("; ")
+        : result.detail || row.last_error || `Task failed: ${bodyStatus || row.status}`,
     )
     err.row = row
     err.errors = errors
@@ -332,6 +335,13 @@ export const api = {
       body: JSON.stringify(payload),
     })
   },
+  updateTemplateStyles(documentType, templateId, payload) {
+    return request(`/api/templates/${encodeURIComponent(documentType)}/${encodeURIComponent(templateId)}/styles`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+  },
   validateTemplate(documentType, templateId) {
     return request(`/api/templates/${encodeURIComponent(documentType)}/${encodeURIComponent(templateId)}/validate`, {
       method: "POST",
@@ -424,6 +434,21 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reason: reason || null }),
+    })
+  },
+  /**
+   * Delete an application from the tracker.
+   *
+   * ``cascade=true`` (default) moves the linked resume / cover letter
+   * artifacts and screenshots into the cleanup quarantine immediately
+   * so the user does not have to wait for the retention window. The
+   * database row itself is still soft-deleted via ``deleted_at`` so
+   * audit history survives until the cleanup task purges it.
+   */
+  deleteApplication(applicationId, { cascade = true } = {}) {
+    const query = cascade ? "?cascade=true" : ""
+    return request(`/api/applications/${applicationId}${query}`, {
+      method: "DELETE",
     })
   },
   /**
@@ -603,6 +628,13 @@ export const api = {
   },
   automationPlans() {
     return request("/api/automation-plans")
+  },
+  automationPlanRuns(params = {}) {
+    const query = new URLSearchParams()
+    if (params.limit) query.set("limit", String(params.limit))
+    if (params.status) query.set("status", params.status)
+    const suffix = query.toString() ? `?${query.toString()}` : ""
+    return request(`/api/automation-plans/runs${suffix}`)
   },
   createAutomationPlan(payload) {
     return request("/api/automation-plans", {

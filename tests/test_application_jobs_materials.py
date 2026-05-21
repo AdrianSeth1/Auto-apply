@@ -40,6 +40,33 @@ def _stub_resume_pipeline(monkeypatch, tmp_path: Path) -> None:
     )
 
 
+async def test_application_materials_prefers_cover_letter_pdf_not_txt(
+    monkeypatch, tmp_path: Path
+) -> None:
+    resume_pdf = tmp_path / "resume.pdf"
+    cover_pdf = tmp_path / "cover.pdf"
+    cover_docx = tmp_path / "cover.docx"
+    cover_txt = tmp_path / "cover.txt"
+    for path in (resume_pdf, cover_pdf, cover_docx, cover_txt):
+        path.write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "src.generation.resume_builder.generate_resume",
+        lambda **_kwargs: {"pdf": resume_pdf, "docx": tmp_path / "resume.docx"},
+    )
+    monkeypatch.setattr(
+        "src.generation.cover_letter.generate_cover_letter",
+        lambda **_kwargs: {"pdf": cover_pdf, "docx": cover_docx, "txt": cover_txt},
+    )
+
+    resume_path, cover_letter_path, _qa = await jobs_app._generate_materials(
+        {"qa_bank": []}, SimpleNamespace(company="Acme", title="Engineer")
+    )
+
+    assert resume_path == resume_pdf
+    assert cover_letter_path == cover_pdf
+
+
 def test_patch_existing_drops_stale_template_pdf_for_docx_request(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -58,6 +85,50 @@ def test_patch_existing_drops_stale_template_pdf_for_docx_request(
 
     assert result["artifacts"]["resume_docx"] == str(tmp_path / "patched.docx")
     assert result["artifacts"]["resume_pdf"] is None
+
+
+def test_patch_existing_generates_tailored_ir_with_rewrite(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        "src.documents.templates.ensure_template_package",
+        lambda *_args, **_kwargs: _template_package(),
+    )
+    monkeypatch.setattr(
+        "src.documents.templates.serialize_template_package",
+        lambda package: {"template_id": package.template_id},
+    )
+
+    def fake_generate_resume(**kwargs):
+        captured.update(kwargs)
+        return {
+            "pdf": str(tmp_path / "template.pdf"),
+            "docx": str(tmp_path / "template.docx"),
+            "ir": object(),
+            "validation": None,
+        }
+
+    monkeypatch.setattr("src.generation.resume_builder.generate_resume", fake_generate_resume)
+    monkeypatch.setattr(
+        jobs_app,
+        "_try_patch_docx_from_library",
+        lambda **_kwargs: (tmp_path / "patched.docx", None),
+    )
+
+    jobs_app._generate_selected_material(
+        {},
+        SimpleNamespace(),
+        "resume_docx",
+        strategy="patch_existing",
+        source_document_id=str(uuid4()),
+        patch_aggressiveness="aggressive",
+    )
+
+    assert captured["rewrite"] is True
+    assert captured["use_llm"] is True
+    assert captured["rewrite_mode"] == "aggressive"
 
 
 def test_patch_existing_preserves_pdf_when_pdf_was_requested(

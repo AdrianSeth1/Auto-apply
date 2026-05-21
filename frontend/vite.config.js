@@ -11,10 +11,16 @@ export default defineConfig({
     },
   },
   server: {
+    fs: {
+      allow: [resolve(__dirname), resolve(__dirname, "../docs")],
+    },
     host: "127.0.0.1",
     port: 5173,
     proxy: {
       "/api": "http://127.0.0.1:8000",
+      "/favicon.svg": "http://127.0.0.1:8000",
+      "/favicon.ico": "http://127.0.0.1:8000",
+      "/logo.svg": "http://127.0.0.1:8000",
     },
   },
   build: {

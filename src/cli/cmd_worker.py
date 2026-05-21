@@ -9,6 +9,7 @@ prefetch, concurrency) without losing the underlying knobs.
 from __future__ import annotations
 
 import logging
+import os
 
 import click
 
@@ -26,6 +27,10 @@ def _validate_queues(ctx: click.Context, param: click.Parameter, value: str) -> 
     if unknown:
         raise click.BadParameter(f"unknown queue(s): {unknown}; known: {list(QUEUES)}")
     return raw
+
+
+def _default_pool() -> str:
+    return "solo" if os.name == "nt" else "prefork"
 
 
 @click.command("worker")
@@ -49,11 +54,19 @@ def _validate_queues(ctx: click.Context, param: click.Parameter, value: str) -> 
     type=click.Choice(["debug", "info", "warning", "error"]),
 )
 @click.option(
+    "--pool",
+    default=_default_pool(),
+    type=click.Choice(["solo", "prefork", "threads"]),
+    help="Celery worker pool. Windows defaults to solo.",
+)
+@click.option(
     "--check",
     is_flag=True,
     help="Print the resolved invocation and exit instead of starting the worker.",
 )
-def worker_cmd(queues: list[str], concurrency: int, loglevel: str, check: bool) -> None:
+def worker_cmd(
+    queues: list[str], concurrency: int, loglevel: str, pool: str, check: bool
+) -> None:
     """Start a Celery worker consuming AutoApply task queues."""
     argv = [
         "worker",
@@ -61,6 +74,8 @@ def worker_cmd(queues: list[str], concurrency: int, loglevel: str, check: bool) 
         ",".join(queues),
         "-c",
         str(concurrency),
+        "--pool",
+        pool,
         "-l",
         loglevel,
     ]
@@ -86,7 +101,10 @@ def worker_cmd(queues: list[str], concurrency: int, loglevel: str, check: bool) 
 def beat_cmd(loglevel: str, check: bool) -> None:
     """Start Celery Beat (cron triggers; uses redbeat for multi-instance safety)."""
     if check:
-        click.echo("celery -A src.tasks beat -S redbeat.RedBeatScheduler -l " + loglevel)
+        click.echo(
+            "celery -A src.tasks beat -S redbeat.RedBeatScheduler "
+            f"--max-interval 30 -l {loglevel}"
+        )
         return
     from src.tasks import celery_app as app
 
@@ -96,6 +114,8 @@ def beat_cmd(loglevel: str, check: bool) -> None:
             "beat",
             "-S",
             "redbeat.RedBeatScheduler",
+            "--max-interval",
+            "30",
             "-l",
             loglevel,
         ]

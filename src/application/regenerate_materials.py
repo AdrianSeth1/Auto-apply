@@ -36,7 +36,6 @@ MATERIAL_TYPE_TO_DOCUMENT_TYPE = {
     "cover_letter_docx": "cover_letter",
     "cover_letter_pdf": "cover_letter",
     "cover_letter_tex": "cover_letter",
-    "cover_letter_txt": "cover_letter",
 }
 
 

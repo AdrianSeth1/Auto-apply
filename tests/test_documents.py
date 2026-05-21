@@ -17,7 +17,12 @@ from src.documents.docx_engine import (
     create_default_template,
     substitute_placeholders,
 )
-from src.documents.file_manager import get_output_paths, make_filename
+from src.documents.file_manager import (
+    get_output_paths,
+    make_filename,
+    make_filename_from_pattern,
+    next_template_sequence,
+)
 from src.documents.latex_engine import (
     _resolved_section_order as _resolved_section_order_latex,
 )
@@ -29,12 +34,14 @@ from src.documents.latex_engine import (
 from src.documents.templates import (
     create_latex_template_package,
     discover_templates,
+    editable_style_options,
     ensure_template_package,
     get_template_package_detail,
     get_template_path,
     list_template_packages,
     register_template,
     save_uploaded_template_package,
+    update_docx_template_styles,
     update_latex_template_package,
 )
 from src.generation.ir import ResumeBullet, ResumeDocument, ResumeItem
@@ -202,6 +209,103 @@ class TestDocxEngine:
         assert paragraph_text.index("Skills") < paragraph_text.index("Experience")
         assert paragraph_text.index("Experience") < paragraph_text.index("Education")
 
+    def test_build_resume_skips_empty_gpa(self, tmp_path):
+        """Profile fields the user did not fill out must NOT appear as
+        literal "None" / "N/A" on the rendered resume. This is the
+        regression for the GPA: None bug -- f-string interpolation of
+        edu.get('gpa') used to slip through even when the field was
+        missing."""
+        template_path = tmp_path / "template_no_gpa.docx"
+        create_default_template(template_path)
+        output_path = tmp_path / "resume_no_gpa.docx"
+        education = [
+            {
+                "institution": "Test U",
+                "degree": "BSc",
+                "field": "CS",
+                # gpa is deliberately absent
+                "start_date": "2024-09",
+                "end_date": "2028-05",
+            },
+            {
+                "institution": "Test U2",
+                "degree": "BSc",
+                "field": "CS",
+                "gpa": "None",  # also catch the literal string "None"
+                "start_date": "2024-09",
+                "end_date": "2028-05",
+            },
+        ]
+        document = ResumeDocument(
+            target_role="SWE",
+            company="Acme",
+            header=SAMPLE_IDENTITY,
+            education=education,
+            skills={},
+            section_order=["header", "education"],
+            experiences=[],
+            projects=[],
+        )
+
+        result = build_resume_from_ir(template_path, document, output_path)
+        doc = Document(str(result))
+        full_text = " ".join(p.text for p in doc.paragraphs)
+        assert "GPA: None" not in full_text
+        assert "None" not in full_text  # not anywhere as a stray field
+
+    def test_build_resume_renders_custom_sections(self, tmp_path):
+        """Profile sections outside the canonical buckets (VOLUNTEER,
+        AWARDS, etc.) must show up on the rendered resume. Otherwise
+        the user's content silently disappears between import and
+        generation."""
+        from src.generation.ir import CustomSection, CustomSectionEntry
+
+        template_path = tmp_path / "template_custom.docx"
+        create_default_template(template_path)
+        output_path = tmp_path / "resume_custom.docx"
+        document = ResumeDocument(
+            target_role="SWE",
+            company="Acme",
+            header=SAMPLE_IDENTITY,
+            education=SAMPLE_EDUCATION,
+            skills=SAMPLE_SKILLS,
+            section_order=["header", "education", "skills"],
+            experiences=[],
+            projects=[],
+            custom_sections=[
+                CustomSection(
+                    title="VOLUNTEER EXPERIENCE",
+                    entries=[
+                        CustomSectionEntry(
+                            title="Tutor",
+                            organization="Local Library",
+                            start_date="2023-01",
+                            end_date="2023-08",
+                            bullets=["Mentored 12 students in introductory CS"],
+                        ),
+                    ],
+                ),
+                CustomSection(
+                    title="AWARDS",
+                    entries=[
+                        CustomSectionEntry(
+                            title="Dean's List",
+                            details="2023, 2024",
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        result = build_resume_from_ir(template_path, document, output_path)
+        doc = Document(str(result))
+        full_text = " ".join(p.text for p in doc.paragraphs)
+        assert "VOLUNTEER EXPERIENCE" in full_text
+        assert "Tutor" in full_text
+        assert "Mentored 12 students" in full_text
+        assert "AWARDS" in full_text
+        assert "Dean's List" in full_text
+
     def test_template_package_renderer_uses_named_styles(self, tmp_path):
         package = ensure_template_package("resume", template_root=tmp_path)
         output_path = tmp_path / "resume_named_styles.docx"
@@ -303,6 +407,51 @@ class TestFileManager:
         assert "cover_pdf" in paths
         assert "cover_tex" in paths
         assert paths["resume_docx"].suffix == ".docx"
+
+    def test_make_filename_from_pattern_profile_seq(self):
+        name = make_filename_from_pattern(
+            doc_type="resume",
+            ext="docx",
+            pattern="type_profile_seq",
+            company="Stripe",
+            role="Backend Intern",
+            profile_name="Jane Doe",
+            seq=3,
+        )
+        assert name == "resume_jane_doe_003.docx"
+
+    def test_make_filename_from_pattern_custom_seq_fallback(self):
+        # Empty custom label falls back to a slug of the company.
+        name = make_filename_from_pattern(
+            doc_type="cover",
+            ext="pdf",
+            pattern="type_custom_seq",
+            company="ACME Robotics",
+            role="ignored",
+            custom_label="",
+            seq=12,
+        )
+        assert name == "cover_acme_robotics_012.pdf"
+
+    def test_next_template_sequence_persists_monotonically(self, tmp_path):
+        first = next_template_sequence(tmp_path, "resume:ats_v1")
+        second = next_template_sequence(tmp_path, "resume:ats_v1")
+        other = next_template_sequence(tmp_path, "resume:other")
+        third = next_template_sequence(tmp_path, "resume:ats_v1")
+        assert (first, second, third) == (1, 2, 3)
+        assert other == 1
+
+    def test_get_output_paths_respects_pattern(self, tmp_path):
+        paths = get_output_paths(
+            tmp_path,
+            "Stripe",
+            "Backend Intern",
+            pattern="type_profile_seq",
+            profile_name="Jane Doe",
+            template_id="ats_v1",
+        )
+        assert paths["resume_docx"].name == "resume_jane_doe_001.docx"
+        assert paths["cover_docx"].name == "cover_jane_doe_001.docx"
         assert paths["resume_pdf"].suffix == ".pdf"
         assert paths["resume_tex"].suffix == ".tex"
 
@@ -339,6 +488,16 @@ class TestTemplateRegistry:
         assert not Path(templates["resume"][0]["preview_pdf"]).is_absolute()
         assert templates["resume"][0]["validation"]["ok"] is True
         assert templates["cover_letter"][0]["template_id"] == "classic_v1"
+
+        cover_doc = Document(str(tmp_path / "cover_letter" / "classic_v1" / "template.docx"))
+        cover_texts = [paragraph.text for paragraph in cover_doc.paragraphs]
+        body_style = cover_doc.styles["CoverLetter.Body"]
+        assert "Dear Hiring Manager," in cover_texts
+        assert "Sincerely," in cover_texts
+        assert "{{date}}" in cover_texts
+        assert body_style.font.name == "Times New Roman"
+        assert body_style.font.size.pt == 11
+        assert round(cover_doc.sections[0].left_margin.inches, 2) == 0.85
 
     def test_save_uploaded_template_package(self, tmp_path):
         upload_docx = tmp_path / "upload.docx"
@@ -421,6 +580,143 @@ class TestLatexTemplates:
         assert updated["name"] == "Updated Cover"
         assert updated["description"] == "Edited in tests."
         assert updated["validation"]["ok"] is True
+
+    def test_editable_style_options_lists_resume_and_cover_letter(self):
+        resume_styles = editable_style_options("resume")
+        cover_styles = editable_style_options("cover_letter")
+
+        resume_keys = {entry["key"] for entry in resume_styles}
+        cover_keys = {entry["key"] for entry in cover_styles}
+        assert {"name", "normal", "section_heading", "bullet"} <= resume_keys
+        assert {"header", "body", "signature"} <= cover_keys
+        body_entry = next(entry for entry in cover_styles if entry["key"] == "body")
+        assert body_entry["defaults"]["font"] == "Times New Roman"
+        assert body_entry["supports_line_spacing"] is True
+        normal_entry = next(entry for entry in resume_styles if entry["key"] == "normal")
+        assert normal_entry["defaults"]["font"] == "Arial"
+
+    def test_update_docx_template_styles_applies_overrides(self, tmp_path):
+        ensure_template_package("cover_letter", template_root=tmp_path)
+        updated = update_docx_template_styles(
+            document_type="cover_letter",
+            template_id="classic_v1",
+            overrides={
+                "body": {"font": "Garamond", "size": 12, "line_spacing": 1.2},
+                "header": {"bold": False},
+            },
+            template_root=tmp_path,
+        )
+
+        assert updated["style_overrides"]["body"]["font"] == "Garamond"
+        assert updated["style_overrides"]["body"]["size"] == 12
+        assert updated["style_overrides"]["body"]["line_spacing"] == 1.2
+        assert updated["style_overrides"]["header"]["bold"] is False
+
+        cover_doc = Document(
+            str(tmp_path / "cover_letter" / "classic_v1" / "template.docx")
+        )
+        body_style = cover_doc.styles["CoverLetter.Body"]
+        assert body_style.font.name == "Garamond"
+        assert body_style.font.size.pt == 12
+        assert body_style.paragraph_format.line_spacing == pytest.approx(1.2)
+        header_style = cover_doc.styles["CoverLetter.Header"]
+        assert header_style.font.bold is False
+
+    def test_update_template_settings_target_pages_and_filename_pattern(self, tmp_path):
+        ensure_template_package("resume", template_root=tmp_path)
+        updated = update_docx_template_styles(
+            document_type="resume",
+            template_id="ats_single_column_v1",
+            overrides={},
+            target_pages=2,
+            filename_pattern="type_custom_seq",
+            filename_custom_label="ML Engineering",
+            template_root=tmp_path,
+        )
+
+        manifest = updated["manifest"]
+        assert manifest["target_pages"] == 2
+        assert manifest["capacity"]["max_pages"] == 2
+        assert manifest["filename_pattern"] == "type_custom_seq"
+        assert manifest["filename_custom_label"] == "ML Engineering"
+
+    def test_update_template_settings_rejects_unknown_filename_pattern(self, tmp_path):
+        ensure_template_package("resume", template_root=tmp_path)
+        with pytest.raises(ValueError, match="filename_pattern"):
+            update_docx_template_styles(
+                document_type="resume",
+                template_id="ats_single_column_v1",
+                overrides={},
+                filename_pattern="does_not_exist",
+                template_root=tmp_path,
+            )
+
+    def test_update_template_settings_rejects_out_of_range_target_pages(self, tmp_path):
+        ensure_template_package("resume", template_root=tmp_path)
+        with pytest.raises(ValueError, match="target_pages"):
+            update_docx_template_styles(
+                document_type="resume",
+                template_id="ats_single_column_v1",
+                overrides={},
+                target_pages=42,
+                template_root=tmp_path,
+            )
+
+    def test_style_overrides_survive_ensure_template_package(self, tmp_path):
+        """Regenerate path calls ensure_template_package -> _ensure_required_markers,
+        which previously re-applied default styles on the default cover letter
+        template and silently undid the user's Template Library edits."""
+        ensure_template_package("cover_letter", template_root=tmp_path)
+        update_docx_template_styles(
+            document_type="cover_letter",
+            template_id="classic_v1",
+            overrides={"body": {"font": "Garamond", "size": 13}},
+            template_root=tmp_path,
+        )
+
+        # Simulate a regenerate kick: the materials pipeline calls
+        # ensure_template_package which used to clobber the override.
+        package = ensure_template_package(
+            "cover_letter", "classic_v1", template_root=tmp_path
+        )
+        cover_doc = Document(str(package.template_path))
+        body_style = cover_doc.styles["CoverLetter.Body"]
+        assert body_style.font.name == "Garamond"
+        assert body_style.font.size.pt == 13
+
+    def test_update_docx_template_styles_rejects_latex(self, tmp_path):
+        template = create_latex_template_package(
+            document_type="resume",
+            template_name="LaTeX",
+            template_root=tmp_path / "templates",
+        )
+        with pytest.raises(ValueError, match="DOCX"):
+            update_docx_template_styles(
+                document_type="resume",
+                template_id=template["template_id"],
+                overrides={},
+                template_root=tmp_path / "templates",
+            )
+
+    def test_update_docx_template_styles_rejects_unknown_key(self, tmp_path):
+        ensure_template_package("resume", template_root=tmp_path)
+        with pytest.raises(ValueError, match="Unknown style key"):
+            update_docx_template_styles(
+                document_type="resume",
+                template_id="ats_single_column_v1",
+                overrides={"not_a_real_style": {"size": 12}},
+                template_root=tmp_path,
+            )
+
+    def test_get_template_package_detail_includes_editable_styles(self, tmp_path):
+        ensure_template_package("resume", template_root=tmp_path)
+        detail = get_template_package_detail(
+            "resume", "ats_single_column_v1", template_root=tmp_path
+        )
+
+        assert detail["editable_styles"], "expected DOCX templates to expose editable_styles"
+        assert detail["style_overrides"] == {}
+        assert detail["content"] is None
 
     def test_latex_escape(self):
         escaped = latex_escape(r"R&D_50% C# {x} \ path")

@@ -53,7 +53,7 @@ services:
       # Host 5432 -> container 5432. Matches the default
       # `localhost:5432` in `config/settings.yaml` so the app
       # connects without extra wiring.
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${AUTOAPPLY_DB_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -77,7 +77,7 @@ services:
       # Host port 6379 -> container 6379. Matches the default
       # `redis://localhost:6379/0` URL the Python layer falls back
       # to, so `autoapply redis ping` works without extra wiring.
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:${AUTOAPPLY_REDIS_HOST_PORT:-6379}:6379"
     command:
       - redis-server
       - --appendonly

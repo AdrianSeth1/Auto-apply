@@ -4,6 +4,18 @@ All notable implementation changes to AutoApply are documented here, organized b
 
 ## [Unreleased]
 
+### Phase 18 — Worker Activation, Reliability, Parallelism, Cleanup (2026-05-20)
+
+Phase 18 converted the Phase 14 task scaffold from audit-visible placeholders into the default execution surface for long-running materials work, and added the operational guardrails needed for local-first automation.
+
+- **18.1 Worker stub closeout**: `materials.generate` now calls the material-generation usecase and writes artifact paths back to review/application records when possible. `jobs.enrich`, `application.prepare`, `maintenance.jd_health_check`, `maintenance.gate_expire_sweep`, `maintenance.linkedin_cookie_refresh`, and `maintenance.cache_eviction` now run real code paths. Unsupported paths (`application.fill`, `maintenance.status_sync`, saved-search fanout/refresh, and final browser click-submit) return explicit `status="not_implemented"` instead of fake success.
+- **18.2 Async material APIs + task result**: `POST /api/jobs/generate-material` and `POST /api/applications/{id}/regenerate-material` default to enqueueing `materials.generate` and returning `{task_id, poll_url}`. `tasks.result` JSONB is persisted from Celery postrun and surfaced by `/api/tasks/{id}`; the SPA gained `getTask` / `pollTask` helpers and wraps material-generation calls through them.
+- **18.3 DLQ + retry/discard**: added `tasks.last_attempted_at`, `tasks.dead_lettered_at`, `tasks.dlq_reason`, a partial DLQ index, `dead_lettered` task status, retry support for dead-lettered rows, and a discard action for the Tasks UI's "Stuck / failed" tab.
+- **18.4 Automatic artifact cleanup**: added `src/maintenance/artifacts.py`, `src/maintenance/atomic.py`, `cleanup_runs`, `cleanup_items`, `applications.deleted_at`, `autoapply cleanup scan/clean/restore/purge-quarantine`, and scheduled cleanup through `maintenance.cache_eviction`. Cleanup builds a DB-derived protected path set, quarantines eligible files under `data/quarantine/<run_id>/`, audits every decision, supports restore, and only purges after the quarantine window.
+- **18.5 Strategic parallelism + provider limits**: bullet rewrites, dual-document material generation, and JD requirement parsing now fan out with bounded concurrency. `src/utils/parallelism.py` provides global and per-provider LLM semaphores used by `generate_text`; LinkedIn detail scraping remains serial by design.
+- **18.6 Sync fallback retirement**: material-generation endpoints default to async. `AUTOAPPLY_SYNC_MATERIALS=1` remains a dev-only escape hatch and emits a warning when used; the SPA only uses the async path.
+- **Review follow-up**: fixed idempotency replay to return `TaskRecord.result` instead of the original task payload. Legacy submit entrypoints no longer mark records submitted before a real external ATS submission exists. Remaining known follow-ups are final browser click-submit, saved-search registry fanout, and outcome status sync.
+
 ### Documentation Sync (2026-05-20)
 
 - Refined the Phase 18 roadmap across project docs: all registered worker

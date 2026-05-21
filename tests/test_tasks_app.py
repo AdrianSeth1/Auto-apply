@@ -64,6 +64,7 @@ def test_redbeat_namespace_is_set() -> None:
     conf = app_mod.celery_app.conf
     assert conf["redbeat_key_prefix"] == "autoapply:beat:"
     assert conf["redbeat_redis_url"]  # not empty
+    assert conf["redbeat_lock_timeout"] > conf["beat_max_loop_interval"]
 
 
 def test_serializer_is_json() -> None:

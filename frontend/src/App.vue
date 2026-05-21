@@ -24,6 +24,7 @@ const themePreference = ref("system")
 const systemPrefersDark = ref(false)
 const themeMenuOpen = ref(false)
 const THEME_STORAGE_KEY = "autoapply.theme"
+const logoUrl = "/logo.svg"
 
 const themeOptions = [
   { value: "system", label: "Follow system", icon: Monitor },
@@ -192,8 +193,10 @@ onBeforeUnmount(() => {
 
     <main class="workspace">
       <header class="page-header">
-        <span class="page-eyebrow">AutoApply</span>
-        <h1 class="page-title">{{ route.meta.label }}</h1>
+        <img class="page-logo" :src="logoUrl" alt="AutoApply logo" />
+        <div>
+          <h1 class="page-title">{{ route.meta.label }}</h1>
+        </div>
       </header>
 
       <RouterView />

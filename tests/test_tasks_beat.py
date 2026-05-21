@@ -21,8 +21,8 @@ EXPECTED_ENTRIES: set[str] = {
     "jd_health_check",
     # Phase 18.1: ``application_status_sync`` removed from Beat
     # because ``maintenance.status_sync`` is explicit
-    # ``not_implemented`` until HR-reply / rejection-email ingest
-    # is wired. Manual CLI invocation still works against the kind.
+    # ``not_implemented`` until ATS/application-portal polling lands.
+    # Manual CLI invocation still works against the kind.
     "linkedin_cookie_refresh",
     "cache_eviction",
     "gate_expire_sweep",

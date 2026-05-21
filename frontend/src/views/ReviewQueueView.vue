@@ -106,6 +106,7 @@ const replaceDialog = reactive({
   patchAllowReorderSections: null,
   patchAllowAddRemoveBullets: null,
   submitting: false,
+  progress: "",
 })
 
 const promoteDialog = reactive({
@@ -220,6 +221,7 @@ function openReplaceDialog(application) {
   replaceDialog.patchAllowReorderSections = null
   replaceDialog.patchAllowAddRemoveBullets = null
   replaceDialog.submitting = false
+  replaceDialog.progress = ""
   replaceDialog.open = true
   // If the user clearly only has a cover letter to fix, switch the
   // initial radio so they don't have to.
@@ -236,6 +238,7 @@ function closeReplaceDialog() {
 async function confirmReplace() {
   if (!replaceDialog.application) return
   replaceDialog.submitting = true
+  replaceDialog.progress = "Queued material generation..."
   state.message = ""
   state.messageVariant = "info"
   try {
@@ -256,6 +259,19 @@ async function confirmReplace() {
         replaceDialog.strategy === "patch_existing"
           ? replaceDialog.patchAllowAddRemoveBullets
           : null,
+      // 5-minute budget gives the fit-planner loop room for one or
+      // two LLM rounds (~30-60s each) plus DOCX rendering + PDF
+      // conversion without blowing past on slow providers. The
+      // backend Celery task has its own much longer time limit; this
+      // poll just decides when the dialog stops waiting.
+      pollTimeoutMs: 5 * 60 * 1000,
+      onProgress(row) {
+        const status = row?.status || "queued"
+        replaceDialog.progress =
+          status === "queued"
+            ? "Queued; waiting for a materials worker to pick it up..."
+            : `Materials worker status: ${status}`
+      },
     })
     const notes = Array.isArray(result?.strategy_notes) ? result.strategy_notes : []
     const verb = replaceDialog.strategy === "use_library" ? "replaced" : "regenerated"
@@ -265,10 +281,14 @@ async function confirmReplace() {
     closeReplaceDialog()
     await refresh()
   } catch (err) {
-    state.message = err?.message || "Couldn't regenerate materials."
+    const timedOut = String(err?.message || "").includes("pollTask timed out")
+    state.message = timedOut
+      ? "Materials generation was queued but no worker completed it within 5 minutes. Check the materials worker is running and look at the task row for the latest status."
+      : err?.message || "Couldn't regenerate materials."
     state.messageVariant = "error"
   } finally {
     replaceDialog.submitting = false
+    replaceDialog.progress = ""
   }
 }
 
@@ -903,6 +923,11 @@ onMounted(refresh)
             </label>
           </div>
         </div>
+
+        <Alert v-if="replaceDialog.progress" class="border-border bg-muted/40">
+          <Loader2 class="h-4 w-4 animate-spin" />
+          <AlertDescription>{{ replaceDialog.progress }}</AlertDescription>
+        </Alert>
 
         <DialogFooter>
           <Button variant="outline" :disabled="replaceDialog.submitting" @click="closeReplaceDialog">

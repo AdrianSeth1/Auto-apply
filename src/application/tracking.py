@@ -133,7 +133,13 @@ def update_application_outcome(*, application_id: UUID, outcome: str) -> dict:
 
 
 def submit_paused_application(*, application_id: UUID) -> dict:
-    """Approve a paused application and enqueue the submit task."""
+    """Queue submit for a paused application without marking it submitted.
+
+    Phase 18 made ``application.submit`` honest: after the freshness gate
+    clears, the worker still returns ``not_implemented`` for the external ATS
+    click-submit step. This legacy endpoint must therefore not transition the
+    application to ``SUBMITTED`` just because the operator approved the attempt.
+    """
     try:
         from src.core.database import get_session_factory
         from src.core.state_machine import AppStatus
@@ -169,19 +175,27 @@ def submit_paused_application(*, application_id: UUID) -> dict:
                 submit_task_id = str(async_result.id)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to enqueue application.submit: %s", exc, exc_info=True)
+                return {
+                    "ok": False,
+                    "error": f"Failed to enqueue submit task: {exc}",
+                    "error_code": "submit_enqueue_failed",
+                }
 
             now = datetime.now(UTC)
-            app.status = str(AppStatus.SUBMITTED)
-            app.submitted_at = app.submitted_at or now
-            app.outcome = app.outcome or "pending"
             history = list(app.state_history or [])
             history.append(
                 {
                     "timestamp": now.isoformat(),
-                    "event": "USER_APPROVED_SUBMIT",
+                    "event": "USER_APPROVED_SUBMIT_QUEUED",
                     "from": str(AppStatus.REVIEW_REQUIRED),
-                    "to": str(AppStatus.SUBMITTED),
-                    "meta": {"submit_task_id": submit_task_id},
+                    "to": str(AppStatus.REVIEW_REQUIRED),
+                    "meta": {
+                        "submit_task_id": submit_task_id,
+                        "note": (
+                            "Application is not marked SUBMITTED until a real submit worker "
+                            "confirms external ATS submission."
+                        ),
+                    },
                 }
             )
             app.state_history = history
@@ -189,8 +203,11 @@ def submit_paused_application(*, application_id: UUID) -> dict:
 
             return {
                 "ok": True,
-                "status": "submitted",
-                "message": "Application submitted.",
+                "status": "submit_queued",
+                "message": (
+                    "Submit task queued; application is not marked submitted until external "
+                    "ATS submission is implemented and confirmed."
+                ),
                 "application_id": str(app.id),
                 "submit_task_id": submit_task_id,
                 "submitted_at": _isoformat(app.submitted_at),
@@ -397,6 +414,16 @@ def _cascade_quarantine_application_artifacts(
             started_at=now,
         )
         session.add(run)
+        # FK fix: ``CleanupItem.run_id`` has a foreign key to
+        # ``cleanup_runs.id`` but no SQLAlchemy ``relationship`` declared,
+        # so the unit-of-work has no dependency edge between the parent
+        # and child rows. When both are added inside the same begin()
+        # block, the flush order is not guaranteed -- with bulk INSERT
+        # enabled, children can be issued before the parent, which trips
+        # the ``fk_cleanup_items_run`` constraint and aborts the delete.
+        # Flushing here forces the ``cleanup_runs`` INSERT to land first
+        # so every subsequent ``CleanupItem`` has a parent row to point at.
+        session.flush()
         for raw in paths:
             source = Path(raw)
             if not source.is_absolute():

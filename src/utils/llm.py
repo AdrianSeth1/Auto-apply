@@ -590,7 +590,9 @@ def codex_generate(
     cmd = [
         executable,
         "exec",
-        "--full-auto",
+        "--sandbox",
+        "workspace-write",
+        "--skip-git-repo-check",
         "--color",
         "never",
         "--output-last-message",

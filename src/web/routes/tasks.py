@@ -22,6 +22,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from src.application.automation_plans import (
+    delete_automation_plan_data,
+    get_automation_plan,
+    load_automation_plans_data,
+    save_automation_plan_data,
+    schedule_entry_for_plan,
+)
 from src.application.schedule_control import (
     ScheduleEntryNotFound,
     dispatch_schedule_entry,
@@ -34,13 +41,6 @@ from src.application.task_control import (
     list_task_records,
     require_task_for_tenant,
     retry_task_record,
-)
-from src.application.automation_plans import (
-    delete_automation_plan_data,
-    get_automation_plan,
-    load_automation_plans_data,
-    save_automation_plan_data,
-    schedule_entry_for_plan,
 )
 from src.core.config import load_config
 from src.core.database import get_engine
@@ -358,6 +358,45 @@ def list_automation_plans() -> list[ScheduleEntryDTO]:
     for plan in load_automation_plans_data()["plans"]:
         entries.append(_custom_plan_dto(plan, now))
     return entries
+
+
+@router.get("/api/automation-plans/runs")
+def list_automation_plan_runs(
+    tenant: str = Depends(get_tenant),
+    session: Session = Depends(get_session),
+    limit: int = 75,
+    status: str | None = None,
+) -> TaskListDTO:
+    """Recent runs for user-created automation plans only.
+
+    The Plans page must not show internal worker rows such as
+    ``materials.generate``. Only ``orchestration.plan_run`` tasks that were
+    dispatched from a saved automation plan carry ``automation_plan_id`` in the
+    payload and belong on this surface.
+    """
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be 1..500")
+    active_plan_ids = {
+        str(plan.get("id")) for plan in load_automation_plans_data()["plans"]
+    }
+    if not active_plan_ids:
+        return TaskListDTO(items=[], total=0)
+    rows = list_task_records(
+        session,
+        tenant_id=tenant,
+        limit=500,
+        status=status,
+        kind="orchestration.plan_run",
+    )
+    filtered = [
+        row
+        for row in rows
+        if isinstance(row.payload, dict)
+        and row.payload.get("automation_plan_id") in active_plan_ids
+    ]
+    return TaskListDTO(
+        items=[TaskRowDTO.from_row(r) for r in filtered[:limit]], total=len(filtered)
+    )
 
 
 @router.post("/api/automation-plans")

@@ -43,6 +43,7 @@ temp/
 data/profile/profile.yaml
 data/output/*
 !data/output/.gitkeep
+data/quarantine/
 data/.linkedin_session/
 
 # User-editable configs — track .example (project defaults), ignore live

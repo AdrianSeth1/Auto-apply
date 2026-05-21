@@ -13,9 +13,9 @@ Thin wrappers over :mod:`src.application.review`. The frontend
 * ``POST /api/review/bulk/reject`` (Phase 17.4) -- multi-id or
   by-filter reject.
 
-Submission (``approved → submitted``) is NOT exposed here; the
-Phase 17.5 pre-submit gate owns that transition and the gate route
-ships in a later sub-phase. Trying to PATCH straight to ``submitted``
+Submission still runs through the Phase 17.5 pre-submit gate, but this
+route does not mark entries ``submitted`` until a real external ATS
+click-submit worker exists. Trying to PATCH straight to ``submitted``
 returns a 409 with the gate-required reason.
 
 Auth: routes resolve ``tenant_id`` from the request (Phase 18 wires
@@ -29,6 +29,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.application.review import (
@@ -378,16 +379,18 @@ async def submit_route(
       1. Load the entry (tenant-scoped).
       2. Run the pre-submit gate (freshness + lifecycle). The gate
          may mutate the entry's status to ``stale`` or ``rejected``.
-      3. If the gate cleared, flip the entry to ``submitted`` and
-         enqueue ``application.submit``.
+      3. If the gate cleared, enqueue ``application.submit`` only when
+         a real ``Application`` row can be found. Do NOT flip the review
+         entry to ``submitted`` here; Phase 18's worker does not perform
+         the final external ATS click-submit yet.
       4. Return the structured gate verdict so the UI can render
-         "Submitted" / "Refresh required" / "Posting expired"
+         "Submit queued" / "Refresh required" / "Posting expired"
          deterministically.
 
     Returns 409 when the entry is not in ``approved`` state -- the
     caller must approve first.
     """
-    from src.application.review import mark_submitted  # noqa: PLC0415
+    from src.core.models import Application  # noqa: PLC0415
     from src.review.pre_submit_gate import run_pre_submit_gate  # noqa: PLC0415
 
     factory = get_session_factory()
@@ -413,41 +416,49 @@ async def submit_route(
                 ),
             }
 
-        try:
-            mark_submitted(
-                session, entry_id, reviewer=payload.reviewer, reason=payload.reason
-            )
-        except InvalidTransitionError as exc:
-            raise HTTPException(409, str(exc)) from exc
+        app = None
+        if entry.job_id is not None:
+            app = session.execute(
+                select(Application)
+                .where(Application.tenant_id == entry.tenant_id)
+                .where(Application.job_id == entry.job_id)
+                .order_by(Application.created_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
 
         # Enqueue the application.submit task. Lazy import keeps this
         # route fast in unit tests that don't have a Celery broker --
         # the import lives behind the gate so a missing Redis only
         # surfaces when we actually try to submit.
-        try:
-            from src.tasks.app import celery_app  # noqa: PLC0415
+        submit_task_id = None
+        if app is not None:
+            try:
+                from src.tasks.app import celery_app  # noqa: PLC0415
 
-            async_result = celery_app.send_task(
-                "application.submit",
-                kwargs={"application_id": str(entry.job_id)},
-            )
-            submit_task_id = str(async_result.id)
-        except Exception as exc:  # noqa: BLE001
-            # Don't roll back -- the entry is in ``submitted`` state
-            # and the operator's decision is recorded. Worker queue
-            # health is a separate concern.
-            logger.warning(
-                "review submit_route: enqueue failed: %s",
-                exc,
-                exc_info=True,
-            )
-            submit_task_id = None
+                async_result = celery_app.send_task(
+                    "application.submit",
+                    kwargs={"application_id": str(app.id)},
+                )
+                submit_task_id = str(async_result.id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "review submit_route: enqueue failed: %s",
+                    exc,
+                    exc_info=True,
+                )
 
         return {
-            "ok": True,
+            "ok": False,
+            "status": "submit_not_completed",
             "gate": gate_result.to_dict(),
             "entry": serialize_entry(
                 get_entry_db(session, entry_id) or entry
             ),
+            "application_id": str(app.id) if app is not None else None,
             "submit_task_id": submit_task_id,
+            "detail": (
+                "Pre-submit gate cleared, but Phase 18 does not perform the final external "
+                "ATS click-submit. "
+                "The review entry remains approved and must not be counted as submitted."
+            ),
         }

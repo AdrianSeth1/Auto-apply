@@ -247,6 +247,8 @@ def _crontab_for_plan(plan: dict[str, Any]) -> crontab:
 
 def _task_kwargs(plan: dict[str, Any]) -> dict[str, Any]:
     return {
+        "automation_plan_id": plan["id"],
+        "automation_plan_name": plan["name"],
         "profile_id": plan["profile_id"],
         "search_profile_id": plan["search_profile_id"] or None,
         "top_n": plan["top_n"],
