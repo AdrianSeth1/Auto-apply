@@ -4,9 +4,9 @@ This document is the live operating context for AutoApply. It should stay short,
 
 ## Current State
 
-AutoApply is complete through **Phase 18: Worker Activation, Reliability, Parallelism, Cleanup** (2026-05-20), itself layered on top of Phase 17.9.
+AutoApply is complete through **Phase 18: Worker Activation, Reliability, Parallelism, Cleanup** (2026-05-21), itself layered on top of Phase 17.9.
 
-The product currently supports job discovery, job-index freshness, fit scoring and explanations, materials generation (now async with structured task results), document-library curation, automation plans, review queues, gated submission, application tracking, multi-vendor LLM routing with global + per-provider concurrency caps, per-provider model catalogs surfaced in the Settings UI, an optional cheap-model tier for extraction-style work, background task execution with worker bodies that no longer return fake `"scheduled"`/`"stubbed"` success, durable task results via `TaskRecord.result`, dead-letter-queue plumbing for tasks that exhaust `max_retries`, and an automatic artifact-cleanup pipeline that protects DB-referenced files while quarantining orphans / tmp / failed-artifact remnants.
+The product currently supports job discovery, job-index freshness, fit scoring and explanations, materials generation (now async with structured task results), document-library curation, automation plans, review queues, gated submission, application tracking, multi-vendor LLM routing with global + per-provider concurrency caps, per-provider model catalogs surfaced in the Settings UI, an optional cheap-model tier for extraction-style work, background task execution with worker bodies that no longer return fake `"scheduled"`/`"stubbed"` success, durable JSONB-safe task results via `TaskRecord.result`, dead-letter-queue plumbing for tasks that exhaust `max_retries`, and an automatic artifact-cleanup pipeline that protects DB-referenced files while quarantining orphans / tmp / failed-artifact remnants without letting old task audit rows defeat soft-delete retention.
 
 The next planned hardening area is **Phase 19: Per-Posting Tag Cache & Filter Fast Path** -- drop the search-result-set cache in favour of snapshot-level objective tags and profile/scorer-version score caches, so the same JD snapshot is not re-scored on every search. Phase 19 also owns the saved-search registry needed for `search.daily_fanout` / `search.refresh` to become real fanout tasks. **Phase 20: Custom Job Sources (Connectors)** introduces URL-safe user-added company careers sites (Nvidia, Microsoft, Stripe, etc.) on top of the LinkedIn / ATS intake we ship today, with bounded multi-source search and a feature-gated LLM template DSL for the long tail. Multi-tenancy & auth hardening, originally Phase 18, now lands as **Phase 21** once the personal-version product is feature-complete. Outcome status sync is a later ATS-first feature: poll supported ATS/application portals first, then add email / HR-reply ingestion.
 
@@ -16,8 +16,9 @@ Last local verification in this workspace:
 
 | Check | Result |
 |---|---|
-| `uv run pytest -q` | 1688 passed, 1 skipped |
+| `uv run pytest -q` | 1720 passed, 1 skipped |
 | `npm run build` | Passed; existing Vite chunk-size warning remains |
+| `uv run ruff check` on changed Python files | Passed |
 | `python -m py_compile` on plan-run modules | Passed |
 | Phase 18 worker bodies | Fake `"scheduled"` / `"stubbed"` returns closed out; unsupported browser/status-sync paths now return explicit `not_implemented`; `application_status_sync` removed from Beat |
 
@@ -45,6 +46,7 @@ When schema changes are present, run `uv run alembic upgrade head` before launch
 | Automatic cleanup (18.4) | `src/maintenance/artifacts.py` ships the reference-aware classifier (protected / tmp / failed_artifact / screenshot / version_log / orphan_output / unknown). Eligible files move to `data/quarantine/<run_id>/`; `purge_quarantine` deletes after `cleanup.quarantine_days=7`. `cleanup_runs` + `cleanup_items` audit tables. `autoapply cleanup scan/clean/restore/purge-quarantine` CLI and the Beat-driven `maintenance.cache_eviction` task share the same engine. `DELETE /api/applications/{id}?cascade=true` soft-deletes + quarantines linked artifacts. `atomic_write` context manager protects every patch / library copy / generation-version write. |
 | Parallelism + rate limits (18.5) | `rewrite_bullets`, materials.generate's dual-document run, and `parse_requirements_batch` fan out via `asyncio.gather`. `src/utils/parallelism.py` provides process-wide `threading.Semaphore` gates: global LLM cap (default 10), per-provider override, per-task bullet-rewrite cap (default 5). Every `generate_text` dispatch acquires `llm_call_gate(provider_id)` so multi-worker fan-out can't multiply provider concurrency. LinkedIn detail-page enrichment intentionally stays serial. |
 | Sync fallback retirement (18.6) | `AUTOAPPLY_SYNC_MATERIALS=1` is the dev-only escape hatch; the first hit on `generate-material` / `regenerate-material` while the flag is set emits a deprecation warning to the operator log. The SPA only takes the async path. |
+| Material workflow + branding hardening (18.7) | SPA/README branding now uses the checked-in logo/favicon; task audit result coercion stores JSONB-safe copies when workers return `Path` / `datetime` / UUID-like values; cleanup no longer lets stale `TaskRecord.result` paths keep expired soft-deleted application artifacts alive forever; material generation tests cover the async result and fit-planner paths. |
 
 ### Known Phase 18 Follow-Ups
 

@@ -48,7 +48,7 @@ The current application includes the Job Index, task queue with closed-out worke
 
 Latest local verification in this workspace:
 
-- `uv run pytest -q`: 1719 passed, 1 skipped (2026-05-21, after Phase 18)
+- `uv run pytest -q`: 1720 passed, 1 skipped (2026-05-21, after Phase 18)
 - `npm run build`: passed, with the existing Vite chunk-size warning
 - Alembic head: `b8d2f9e15c33` (Phase 18.3 DLQ columns); the Phase 18 schema chain is `e7c3a5b91f48` → `f4e8c1d2a907` → `a1c7b3e54f08` → `b8d2f9e15c33`
 

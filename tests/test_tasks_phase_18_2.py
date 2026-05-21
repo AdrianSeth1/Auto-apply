@@ -49,16 +49,24 @@ def test_coerce_result_for_storage_handles_none() -> None:
 
 def test_coerce_result_for_storage_stringifies_non_json_safe() -> None:
     from datetime import UTC, datetime
+    from pathlib import Path
+    from uuid import UUID
 
     from src.tasks.audit import _coerce_result_for_storage
 
     out = _coerce_result_for_storage(
-        {"now": datetime(2026, 5, 20, tzinfo=UTC)}
+        {
+            "now": datetime(2026, 5, 20, tzinfo=UTC),
+            "path": Path("data/output/resume.docx"),
+            "id": UUID("00000000-0000-0000-0000-000000000123"),
+        }
     )
     assert isinstance(out, dict)
     # datetime got stringified via default=str during the json round-trip.
     assert "now" in out
     assert "2026-05-20" in str(out["now"])
+    assert out["path"] == "data\\output\\resume.docx" or out["path"] == "data/output/resume.docx"
+    assert out["id"] == "00000000-0000-0000-0000-000000000123"
 
 
 def test_materials_generate_payload_accepts_inline_job() -> None:

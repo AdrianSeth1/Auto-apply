@@ -106,7 +106,7 @@ def _coerce_result_for_storage(retval: Any) -> dict[str, Any] | None:
     if not isinstance(retval, dict):
         retval = {"value": retval}
     try:
-        json.dumps(retval, default=str)
+        json.dumps(retval)
         return retval
     except (TypeError, ValueError):
         try:

@@ -8,7 +8,7 @@ them.
 from __future__ import annotations
 
 import importlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, delete
@@ -141,6 +141,70 @@ def test_protected_paths_includes_task_record_result() -> None:
     assert "TaskRecord.result" in body, (
         "build_protected_paths must walk TaskRecord.result (Codex P2 fix)"
     )
+
+
+def test_task_result_paths_do_not_reprotect_expired_soft_deleted_artifacts(
+    tmp_path,
+) -> None:
+    """Codex P2 follow-up: task audit rows protect standalone task
+    outputs, but they must not keep soft-deleted application artifacts
+    alive forever after the application retention window expires."""
+    from src.maintenance.artifacts import build_protected_paths
+
+    expired_app_artifact = tmp_path / "expired_resume.pdf"
+    task_only_artifact = tmp_path / "task_only_resume.pdf"
+    live_library_artifact = tmp_path / "library_resume.pdf"
+
+    class FakeResult:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+        def scalars(self):
+            return iter(self.rows)
+
+    class FakeSession:
+        def __init__(self):
+            self.results = [
+                # Application rows: resume, cover, files_uploaded, deleted_at.
+                FakeResult(
+                    [
+                        (
+                            str(expired_app_artifact),
+                            None,
+                            None,
+                            datetime(2026, 5, 1, tzinfo=UTC),
+                        )
+                    ]
+                ),
+                FakeResult([str(live_library_artifact)]),  # UserDocument.storage_path
+                FakeResult([]),  # SourceResume.storage_path
+                FakeResult([]),  # ReviewQueueEntry.materials_path
+                FakeResult([]),  # TaskRecord.payload
+                FakeResult(  # TaskRecord.result
+                    [
+                        {
+                            "expired": str(expired_app_artifact),
+                            "standalone": str(task_only_artifact),
+                        }
+                    ]
+                ),
+                FakeResult([]),  # GateRequest.payload
+            ]
+
+        def execute(self, _stmt):
+            return self.results.pop(0)
+
+    protected = build_protected_paths(
+        FakeSession(),
+        soft_delete_cutoff=datetime(2026, 5, 10, tzinfo=UTC) - timedelta(days=1),
+    )
+
+    assert expired_app_artifact.resolve() not in protected
+    assert task_only_artifact.resolve() in protected
+    assert live_library_artifact.resolve() in protected
 
 
 def test_regenerate_idempotency_key_includes_choice_fingerprint() -> None:

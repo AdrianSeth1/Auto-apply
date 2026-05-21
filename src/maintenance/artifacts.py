@@ -12,9 +12,10 @@ The cleanup contract (see D028) is:
    a *protected set* of paths the database considers load-bearing:
    live ``Application.resume_version`` / ``cover_letter_version``,
    ``UserDocument.storage_path``, ``SourceResume.storage_path``,
-   ``ReviewQueueEntry.materials_path`` and any ``TaskRecord.result``
-   artifact path. Anything in the protected set is *never* touched
-   by automatic cleanup.
+   ``ReviewQueueEntry.materials_path`` and durable task artifact paths.
+   Expired soft-deleted application artifacts are deliberately excluded
+   even if an old task audit row still mentions them. Anything in the
+   protected set is *never* touched by automatic cleanup.
 2. **Classification.** Unprotected files are bucketed by
    :func:`classify_path` into ``tmp`` (half-written
    ``*.tmp`` siblings), ``failed_artifact`` (zero-byte / unreadable
@@ -223,16 +224,27 @@ def build_protected_paths(
     can preview without the cutoff math).
     """
     protected: set[Path] = set()
+    expired_application_paths: set[Path] = set()
 
-    def _add(raw: str | None) -> None:
+    def _resolve(raw: str | None) -> Path | None:
         if not raw:
-            return
+            return None
         try:
-            resolved = _resolve_path(raw)
+            return _resolve_path(raw)
         except Exception:  # noqa: BLE001 -- malformed paths are ignored
             return
+
+    def _add(raw: str | None, *, skip: set[Path] | None = None) -> None:
+        resolved = _resolve(raw)
         if resolved is not None:
+            if skip is not None and resolved in skip:
+                return
             protected.add(resolved)
+
+    def _mark_expired(raw: str | None) -> None:
+        resolved = _resolve(raw)
+        if resolved is not None:
+            expired_application_paths.add(resolved)
 
     for raw_resume, raw_cover, files, deleted_at in _collect_application_paths(
         session, tenant_id=tenant_id
@@ -245,6 +257,11 @@ def build_protected_paths(
             # Past the retention window -- artifacts are eligible for
             # cleanup, so we deliberately omit them from the protected
             # set.
+            _mark_expired(raw_resume)
+            _mark_expired(raw_cover)
+            if isinstance(files, list):
+                for entry in files:
+                    _mark_expired(entry if isinstance(entry, str) else None)
             continue
         _add(raw_resume)
         _add(raw_cover)
@@ -271,15 +288,15 @@ def build_protected_paths(
     # Task input payloads and produced results both can reference
     # artifact paths in JSONB. ``TaskRecord.result`` (Phase 18.2) is
     # where ``materials.generate`` writes the produced
-    # ``resume_path`` / ``cover_letter_path`` -- forgetting to walk
-    # it would let cleanup quarantine successful task outputs whose
-    # only durable reference is the audit row.
+    # ``resume_path`` / ``cover_letter_path``. Result paths protect
+    # still-live task outputs, but must not re-protect artifacts whose
+    # owning Application is past the soft-delete retention cutoff.
     for row in session.execute(select(TaskRecord.payload)).scalars():
         for value in _walk_string_values(row):
             _add(value)
     for row in session.execute(select(TaskRecord.result)).scalars():
         for value in _walk_string_values(row):
-            _add(value)
+            _add(value, skip=expired_application_paths)
     for row in session.execute(select(GateRequest.payload)).scalars():
         for value in _walk_string_values(row):
             _add(value)
@@ -298,8 +315,7 @@ def _collect_application_paths(
     )
     if tenant_id is not None:
         stmt = stmt.where(Application.tenant_id == tenant_id)
-    for resume, cover, files, deleted_at in session.execute(stmt).all():
-        yield resume, cover, files, deleted_at
+    yield from session.execute(stmt).all()
 
 
 def _collect_storage_paths(
