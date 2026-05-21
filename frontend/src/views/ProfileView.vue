@@ -494,6 +494,39 @@ function removeSkillCategory(index) {
   state.editor.skills.splice(index, 1)
 }
 
+function addCustomSection() {
+  state.editor.custom_sections.push(emptyCustomSection())
+  state.sections.custom_sections = true
+}
+
+function removeCustomSection(index) {
+  state.editor.custom_sections.splice(index, 1)
+}
+
+function addCustomSectionEntry(sectionIndex) {
+  const entry = emptyCustomEntry()
+  state.editor.custom_sections[sectionIndex].entries.push(entry)
+  state.editor.custom_sections[sectionIndex].expanded = true
+}
+
+function removeCustomSectionEntry(sectionIndex, entryIndex) {
+  state.editor.custom_sections[sectionIndex].entries.splice(entryIndex, 1)
+}
+
+function addCustomEntryBullet(sectionIndex, entryIndex) {
+  state.editor.custom_sections[sectionIndex].entries[entryIndex].bullets.push({
+    id: makeId("custom_bullet"),
+    text: "",
+  })
+}
+
+function removeCustomEntryBullet(sectionIndex, entryIndex, bulletIndex) {
+  state.editor.custom_sections[sectionIndex].entries[entryIndex].bullets.splice(
+    bulletIndex,
+    1,
+  )
+}
+
 function toEditorProfile(profile) {
   const normalized = normalizeProfile(profile)
   const skillKeys = [...defaultSkillCategories]
@@ -514,6 +547,11 @@ function toEditorProfile(profile) {
       values: normalizeStringArray(normalized.skills[key]),
       expanded: false,
     })),
+    // Free-form sections coming from the resume importer / hand-edited
+    // YAML (VOLUNTEER EXPERIENCE / AWARDS / AFFILIATIONS / INTERESTS /
+    // CERTIFICATIONS / ...). Stored exactly as the user authored them
+    // so re-saving never silently drops fields we did not understand.
+    custom_sections: normalized.custom_sections.map(toCustomSectionEditor),
   }
 }
 
@@ -543,13 +581,100 @@ function buildProfilePayload(editor, validateSkillKeys) {
     }
   }
 
+  const customSections = (editor.custom_sections || [])
+    .map(serializeCustomSection)
+    .filter((section) => section && section.entries && section.entries.length)
+
   return {
     identity,
     education: editor.education.map(serializeEducation).filter(hasContent),
     work_experiences: editor.work_experiences.map(serializeExperience).filter(hasContent),
     projects: editor.projects.map(serializeProject).filter(hasContent),
     skills: Object.fromEntries(skillEntries),
+    custom_sections: customSections,
   }
+}
+
+function serializeCustomSection(section) {
+  const title = String(section.title || "").trim()
+  if (!title) return null
+  const entries = (section.entries || [])
+    .map((entry) =>
+      compactObject({
+        title: entry.title,
+        organization: entry.organization,
+        location: entry.location,
+        start_date: entry.start_date,
+        end_date: entry.end_date,
+        details: entry.details,
+        bullets: (entry.bullets || [])
+          .map((bullet) => String(bullet.text || "").trim())
+          .filter(Boolean),
+      }),
+    )
+    .filter(hasContent)
+  return { title, entries }
+}
+
+function toCustomSectionEditor(section) {
+  return {
+    id: makeId("custom"),
+    title: String(section?.title || "").trim(),
+    expanded: false,
+    entries: Array.isArray(section?.entries)
+      ? section.entries.map(toCustomEntryEditor)
+      : [],
+  }
+}
+
+function toCustomEntryEditor(entry) {
+  const bullets = Array.isArray(entry?.bullets) ? entry.bullets : []
+  return {
+    id: makeId("custom_entry"),
+    title: String(entry?.title || "").trim(),
+    organization: String(entry?.organization || "").trim(),
+    location: String(entry?.location || "").trim(),
+    start_date: String(entry?.start_date || "").trim(),
+    end_date: String(entry?.end_date || "").trim(),
+    details: String(entry?.details || entry?.description || "").trim(),
+    expanded: false,
+    bullets: bullets.map((bullet) => ({
+      id: makeId("custom_bullet"),
+      text: typeof bullet === "string" ? bullet : String(bullet?.text || "").trim(),
+    })),
+  }
+}
+
+function emptyCustomSection() {
+  return {
+    id: makeId("custom"),
+    title: "",
+    expanded: true,
+    entries: [emptyCustomEntry()],
+  }
+}
+
+function emptyCustomEntry() {
+  return {
+    id: makeId("custom_entry"),
+    title: "",
+    organization: "",
+    location: "",
+    start_date: "",
+    end_date: "",
+    details: "",
+    expanded: true,
+    bullets: [],
+  }
+}
+
+function customSectionEntryLabel(entry, index) {
+  return (
+    entry.title ||
+    entry.organization ||
+    entry.details?.slice(0, 60) ||
+    `Entry ${index + 1}`
+  )
 }
 
 function serializeEducation(item) {
@@ -620,7 +745,23 @@ function normalizeProfile(profile) {
     work_experiences: Array.isArray(profile.work_experiences) ? profile.work_experiences : [],
     projects: Array.isArray(profile.projects) ? profile.projects : [],
     skills: typeof profile.skills === "object" && profile.skills !== null ? profile.skills : {},
+    custom_sections: normalizeCustomSections(profile.custom_sections),
   }
+}
+
+function normalizeCustomSections(value) {
+  if (Array.isArray(value)) {
+    return value.filter((section) => section && typeof section === "object")
+  }
+  // Accept the dict-of-sections shape as well so a hand-authored YAML
+  // ({"VOLUNTEER EXPERIENCE": [...]}) still surfaces in the editor.
+  if (value && typeof value === "object") {
+    return Object.entries(value).map(([title, entries]) => ({
+      title,
+      entries: Array.isArray(entries) ? entries : [],
+    }))
+  }
+  return []
 }
 
 function emptyEditorProfile() {
@@ -634,6 +775,7 @@ function emptyEditorProfile() {
       key,
       values: [],
     })),
+    custom_sections: [],
   }
 }
 
@@ -851,6 +993,7 @@ function collapsedSections() {
     experience: false,
     projects: false,
     skills: false,
+    custom_sections: false,
   }
 }
 
@@ -869,6 +1012,11 @@ function sectionLabel(section) {
   }
   if (section === "skills") {
     return `${state.editor.skills.filter((entry) => entry.values.length).length} categories`
+  }
+  if (section === "custom_sections") {
+    const sections = state.editor.custom_sections || []
+    if (!sections.length) return "0 sections"
+    return `${sections.length} ${sections.length === 1 ? "section" : "sections"}`
   }
   return ""
 }
@@ -916,6 +1064,12 @@ function captureEditorUiState(editor) {
       bullets: item.bullets.map((bullet) => ({ expanded: Boolean(bullet.expanded) })),
     })),
     skills: editor.skills.map((entry) => ({ expanded: Boolean(entry.expanded) })),
+    custom_sections: (editor.custom_sections || []).map((section) => ({
+      expanded: Boolean(section.expanded),
+      entries: (section.entries || []).map((entry) => ({
+        expanded: Boolean(entry.expanded),
+      })),
+    })),
   }
 }
 
@@ -940,6 +1094,14 @@ function applyEditorUiState(editor, snapshot) {
 
   editor.skills.forEach((entry, index) => {
     entry.expanded = snapshot.skills?.[index]?.expanded ?? entry.expanded
+  })
+
+  ;(editor.custom_sections || []).forEach((section, index) => {
+    const sectionSnap = snapshot.custom_sections?.[index]
+    section.expanded = sectionSnap?.expanded ?? section.expanded
+    ;(section.entries || []).forEach((entry, entryIndex) => {
+      entry.expanded = sectionSnap?.entries?.[entryIndex]?.expanded ?? entry.expanded
+    })
   })
 }
 
@@ -1472,6 +1634,257 @@ function makeId(prefix) {
                     <label class="field"><span>Values</span><TagInput v-model="entry.values" placeholder="Python, SQL, React" /></label>
                   </div>
                 </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="editor-section accordion-section">
+            <button
+              class="accordion-head"
+              type="button"
+              :aria-expanded="state.sections.custom_sections"
+              @click="toggleSection('custom_sections')"
+            >
+              <div>
+                <strong>Other sections</strong>
+                <div class="muted-inline">{{ sectionLabel('custom_sections') }}</div>
+              </div>
+              <span class="accordion-icon">
+                <component
+                  :is="state.sections.custom_sections ? ChevronDown : ChevronRight"
+                  class="h-4 w-4"
+                />
+              </span>
+            </button>
+
+            <div v-if="state.sections.custom_sections" class="accordion-body">
+              <p class="text-xs text-muted-foreground">
+                Volunteer work, awards, affiliations, certifications, interests, or
+                anything else the resume parser pulled from your file that doesn't
+                fit the structured sections above. Each section keeps its original
+                heading and renders into generated resumes after the canonical sections.
+              </p>
+              <div class="section-head compact-head">
+                <h2>Custom sections</h2>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  type="button"
+                  aria-label="Add custom section"
+                  title="Add custom section"
+                  @click="addCustomSection"
+                ><Plus class="h-4 w-4" /></Button>
+              </div>
+
+              <div class="editor-stack">
+                <div
+                  v-for="(section, sectionIndex) in state.editor.custom_sections"
+                  :key="section.id"
+                  class="editor-mini-card"
+                >
+                  <div class="editor-card-head">
+                    <button
+                      class="editor-item-head"
+                      type="button"
+                      :aria-expanded="section.expanded"
+                      @click="toggleItem(section)"
+                    >
+                      <div>
+                        <strong>{{ section.title || `Section ${sectionIndex + 1}` }}</strong>
+                        <div class="muted-inline">
+                          {{ section.entries.length }}
+                          {{ section.entries.length === 1 ? "entry" : "entries" }}
+                        </div>
+                      </div>
+                      <span class="accordion-icon">
+                        <component
+                          :is="section.expanded ? ChevronDown : ChevronRight"
+                          class="h-4 w-4"
+                        />
+                      </span>
+                    </button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      type="button"
+                      class="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                      :aria-label="`Delete ${section.title || 'section'}`"
+                      :title="`Delete ${section.title || 'section'}`"
+                      @click="removeCustomSection(sectionIndex)"
+                    ><Trash2 class="h-4 w-4" /></Button>
+                  </div>
+
+                  <div v-if="section.expanded" class="editor-item-body">
+                    <label class="field">
+                      <span>Heading</span>
+                      <input
+                        v-model="section.title"
+                        class="input"
+                        type="text"
+                        placeholder="e.g. VOLUNTEER EXPERIENCE"
+                      />
+                    </label>
+
+                    <div class="section-head compact-head">
+                      <h3 class="text-sm font-medium">Entries</h3>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        type="button"
+                        aria-label="Add entry"
+                        title="Add entry"
+                        @click="addCustomSectionEntry(sectionIndex)"
+                      ><Plus class="h-4 w-4" /></Button>
+                    </div>
+
+                    <div class="editor-stack">
+                      <div
+                        v-for="(entry, entryIndex) in section.entries"
+                        :key="entry.id"
+                        class="editor-mini-card"
+                      >
+                        <div class="editor-card-head">
+                          <button
+                            class="editor-item-head"
+                            type="button"
+                            :aria-expanded="entry.expanded"
+                            @click="toggleItem(entry)"
+                          >
+                            <div>
+                              <strong>{{ customSectionEntryLabel(entry, entryIndex) }}</strong>
+                              <div class="muted-inline">
+                                {{ summaryLine([entry.organization, entry.location]) }}
+                              </div>
+                            </div>
+                            <span class="accordion-icon">
+                              <component
+                                :is="entry.expanded ? ChevronDown : ChevronRight"
+                                class="h-4 w-4"
+                              />
+                            </span>
+                          </button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            type="button"
+                            class="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            aria-label="Delete entry"
+                            title="Delete entry"
+                            @click="removeCustomSectionEntry(sectionIndex, entryIndex)"
+                          ><Trash2 class="h-4 w-4" /></Button>
+                        </div>
+
+                        <div v-if="entry.expanded" class="editor-item-body">
+                          <div class="grid gap-2 md:grid-cols-2">
+                            <label class="field">
+                              <span>Title</span>
+                              <input
+                                v-model="entry.title"
+                                class="input"
+                                type="text"
+                                placeholder="Role / award name"
+                              />
+                            </label>
+                            <label class="field">
+                              <span>Organization</span>
+                              <input
+                                v-model="entry.organization"
+                                class="input"
+                                type="text"
+                                placeholder="Issuer / org"
+                              />
+                            </label>
+                            <label class="field">
+                              <span>Location</span>
+                              <input v-model="entry.location" class="input" type="text" />
+                            </label>
+                            <div class="grid grid-cols-2 gap-2">
+                              <label class="field">
+                                <span>Start</span>
+                                <input
+                                  v-model="entry.start_date"
+                                  class="input"
+                                  type="text"
+                                  placeholder="YYYY-MM"
+                                />
+                              </label>
+                              <label class="field">
+                                <span>End</span>
+                                <input
+                                  v-model="entry.end_date"
+                                  class="input"
+                                  type="text"
+                                  placeholder="YYYY-MM or Present"
+                                />
+                              </label>
+                            </div>
+                          </div>
+                          <label class="field">
+                            <span>Details</span>
+                            <input
+                              v-model="entry.details"
+                              class="input"
+                              type="text"
+                              placeholder="One-line description"
+                            />
+                          </label>
+
+                          <div class="section-head compact-head">
+                            <h4 class="text-xs font-semibold text-muted-foreground">
+                              Bullets
+                            </h4>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              type="button"
+                              aria-label="Add bullet"
+                              title="Add bullet"
+                              @click="addCustomEntryBullet(sectionIndex, entryIndex)"
+                            ><Plus class="h-4 w-4" /></Button>
+                          </div>
+                          <div
+                            v-for="(bullet, bulletIndex) in entry.bullets"
+                            :key="bullet.id"
+                            class="flex items-start gap-2"
+                          >
+                            <input
+                              v-model="bullet.text"
+                              class="input flex-1"
+                              type="text"
+                              placeholder="Bullet text"
+                            />
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              type="button"
+                              class="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                              aria-label="Delete bullet"
+                              title="Delete bullet"
+                              @click="removeCustomEntryBullet(sectionIndex, entryIndex, bulletIndex)"
+                            ><Trash2 class="h-4 w-4" /></Button>
+                          </div>
+                          <div
+                            v-if="!entry.bullets.length"
+                            class="text-xs text-muted-foreground"
+                          >
+                            No bullets yet. Use bullets for multi-line entries
+                            (volunteer roles, certifications with descriptions). For
+                            comma-lists (interests, language proficiency) just use the
+                            Details field above.
+                          </div>
+                        </div>
+                      </div>
+                      <div
+                        v-if="!section.entries.length"
+                        class="empty-state"
+                      >No entries in this section yet</div>
+                    </div>
+                  </div>
+                </div>
+                <div
+                  v-if="!state.editor.custom_sections.length"
+                  class="empty-state"
+                >No custom sections. Click + above to add one.</div>
               </div>
             </div>
           </section>

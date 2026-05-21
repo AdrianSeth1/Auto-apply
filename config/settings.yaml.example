@@ -58,3 +58,47 @@ linkedin:
   max_redirect_detail_fetches: 5000
 cache:
   l1_max_entries: 1024
+# Phase 18.4: artifact cleanup + quarantine pipeline.
+# ``maintenance.cache_eviction`` (Beat: hourly on :30) and the manual
+# ``autoapply cleanup ...`` CLI share these knobs. The flow is:
+# scan -> move eligible files to data/quarantine/<run_id>/ -> purge
+# from quarantine after ``quarantine_days``. DB-referenced artifacts
+# (Application.resume_version, UserDocument.storage_path, etc.) are
+# always protected regardless of age.
+cleanup:
+  # Half-written ``*.tmp`` siblings dropped by atomic_write. 24h is
+  # long enough that a still-running write isn't mistaken for a
+  # corpse, short enough that a real ghost doesn't linger.
+  tmp_hours: 24
+  # Zero-byte DOCX/PDF on disk -- typically crashed patch attempts.
+  failed_artifact_hours: 48
+  # ``data/output`` files NOT referenced by any DB row.
+  output_retention_days: 30
+  # ``Application.deleted_at`` window: once an application has been
+  # soft-deleted for this many days, its artifacts stop being
+  # protected and cleanup can harvest them.
+  soft_deleted_retention_days: 14
+  # ``data/output/screenshots``: keep the newest N per application
+  # prefix; older ones quarantine.
+  screenshot_keep_per_application: 5
+  # How long quarantined files live before ``purge_quarantine``
+  # permanently deletes them.
+  quarantine_days: 7
+# Phase 18.5: process-wide LLM concurrency caps. ``llm.max_concurrent_global``
+# is the ceiling that every dispatch acquires; per-provider entries override
+# the cap for that provider. ``bullet_rewrites.max_concurrent_per_task`` caps
+# the asyncio.gather fan-out inside one ``rewrite_bullets`` call but the
+# global gate still bounds provider load across concurrent workers.
+parallelism:
+  llm:
+    max_concurrent_global: 10
+  bullet_rewrites:
+    max_concurrent_per_task: 5
+  # Per-provider overrides. Add an entry like:
+  #   provider:
+  #     openai:
+  #       max_concurrent: 6
+  #     anthropic:
+  #       max_concurrent: 4
+  # Missing entries inherit the global cap.
+  provider: {}

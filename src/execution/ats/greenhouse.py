@@ -33,6 +33,23 @@ class GreenhouseAdapter(BaseATSAdapter):
 
     ats_name = "greenhouse"
 
+    # The classic ``boards.greenhouse.io`` markup uses ``#application_form``,
+    # but the newer ``job-boards.greenhouse.io`` v3 experience strips that
+    # ID and may hide the form behind an "Apply for this job" button. Keep
+    # the legacy IDs first so existing boards remain a one-step path, then
+    # fall back to the post-redesign hooks.
+    _FORM_SELECTOR = (
+        "#application_form, form[action*='applications'], #application, "
+        "form#application-form, form[data-mapped], "
+        "main form:has(input[type='file']), [data-testid='application-form']"
+    )
+
+    _APPLY_BUTTON_SELECTOR = (
+        "a:has-text('Apply for this job'), button:has-text('Apply for this job'), "
+        "a:has-text('Apply now'), button:has-text('Apply now'), "
+        "a[href*='#app'], a[href*='#application']"
+    )
+
     async def fill_form(
         self,
         page: Page,
@@ -40,17 +57,13 @@ class GreenhouseAdapter(BaseATSAdapter):
         qa_responses: dict[str, str] | None = None,
     ) -> tuple[int, int]:
         """Fill Greenhouse application form fields."""
-        # Wait for the form to load
-        await page.wait_for_selector(
-            "#application_form, form[action*='applications'], #application",
-            timeout=15000,
-        )
+        await self._wait_for_form(page)
         await self.browser.delay()
 
         # Detect and map fields (scoped to the application form)
         fields = await detect_fields(
             page,
-            form_selector="#application_form, form[action*='applications'], #application",
+            form_selector=self._FORM_SELECTOR,
         )
         mappings = map_fields_to_profile(fields, profile_data, qa_responses)
 
@@ -61,6 +74,32 @@ class GreenhouseAdapter(BaseATSAdapter):
 
         logger.info("Greenhouse form: filled %d/%d fields", filled, total)
         return filled, total
+
+    async def _wait_for_form(self, page: Page) -> None:
+        """Wait for the application form, clicking 'Apply' if it's hidden.
+
+        Sequoia and other companies on the new ``job-boards.greenhouse.io``
+        layout require a click on "Apply for this job" before the form
+        is mounted into the DOM. Try the form selector first with a
+        shorter probe so existing legacy boards stay fast; on failure,
+        click any visible apply CTA and re-wait.
+        """
+        try:
+            await page.wait_for_selector(self._FORM_SELECTOR, timeout=6000)
+            return
+        except Exception:
+            pass
+
+        apply_btn = page.locator(self._APPLY_BUTTON_SELECTOR).first
+        try:
+            if await apply_btn.is_visible():
+                logger.info("Greenhouse form not immediately visible; clicking apply CTA")
+                await apply_btn.click()
+                await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Greenhouse apply CTA click skipped: %s", exc)
+
+        await page.wait_for_selector(self._FORM_SELECTOR, timeout=15000)
 
     async def upload_files(
         self,

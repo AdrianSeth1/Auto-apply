@@ -16,9 +16,16 @@ def fit_resume_document_to_template(
 
     Fitting removes or shortens content; it never invents new claims or changes
     template formatting. Visual details remain in template.docx/styles.
+
+    Multi-page targets scale the per-section caps proportionally so a
+    2-page template asks the bullet selector for roughly twice as much
+    content as the default 1-page layout. The renderer + post-render
+    page-count validator then enforce the actual page budget.
     """
     if manifest.document_type != "resume":
         return document
+
+    page_scale = _page_scale(manifest)
 
     fitted = document.model_copy(deep=True)
     fitted.template_id = manifest.template_id
@@ -31,30 +38,45 @@ def fit_resume_document_to_template(
     if not _section_enabled(manifest, "education"):
         fitted.education = []
     else:
-        fitted.education = fitted.education[
-            : _section_limit(manifest, "education", "max_items", len(fitted.education))
-        ]
+        edu_limit = _section_limit(manifest, "education", "max_items", len(fitted.education))
+        fitted.education = fitted.education[: max(edu_limit, edu_limit * page_scale)]
 
     fitted.experiences = _fit_items(
         fitted.experiences,
         manifest,
         section="experience",
-        max_items=manifest.capacity.max_experience_items,
+        max_items=_scaled_limit(manifest.capacity.max_experience_items, page_scale),
+        page_scale=page_scale,
     )
     fitted.projects = _fit_items(
         fitted.projects,
         manifest,
         section="projects",
-        max_items=manifest.capacity.max_project_items,
+        max_items=_scaled_limit(manifest.capacity.max_project_items, page_scale),
+        page_scale=page_scale,
     )
-    fitted.skills = _fit_skills(fitted.skills, manifest)
-    _fit_total_bullets(fitted, manifest.capacity.max_bullets_total)
+    fitted.skills = _fit_skills(fitted.skills, manifest, page_scale=page_scale)
+    _fit_total_bullets(
+        fitted, _scaled_limit(manifest.capacity.max_bullets_total, page_scale)
+    )
     fitted.metadata = {
         **fitted.metadata,
         "template_id": manifest.template_id,
         "template_capacity": manifest.capacity.model_dump(mode="json"),
+        "target_pages": manifest.target_pages or manifest.capacity.max_pages,
     }
     return fitted
+
+
+def _page_scale(manifest: TemplateManifest) -> int:
+    target = manifest.target_pages or manifest.capacity.max_pages or 1
+    return max(1, int(target))
+
+
+def _scaled_limit(value: int | None, page_scale: int) -> int | None:
+    if value is None:
+        return None
+    return value * page_scale
 
 
 def _fit_items(
@@ -63,11 +85,13 @@ def _fit_items(
     *,
     section: str,
     max_items: int | None,
+    page_scale: int = 1,
 ) -> list[ResumeItem]:
     if not _section_enabled(manifest, section):
         return []
 
-    max_item_count = _section_limit(manifest, section, "max_items", max_items or len(items))
+    base_item_cap = _section_limit(manifest, section, "max_items", max_items or len(items))
+    max_item_count = base_item_cap * max(1, page_scale)
     max_bullets = _section_limit(manifest, section, "max_bullets_per_item", 4)
     max_words = _section_limit(
         manifest,
@@ -86,15 +110,21 @@ def _fit_items(
     return fitted_items
 
 
-def _fit_skills(skills: dict[str, list[str]], manifest: TemplateManifest) -> dict[str, list[str]]:
+def _fit_skills(
+    skills: dict[str, list[str]],
+    manifest: TemplateManifest,
+    *,
+    page_scale: int = 1,
+) -> dict[str, list[str]]:
     if not _section_enabled(manifest, "skills"):
         return {}
-    max_lines = _section_limit(
+    base_lines = _section_limit(
         manifest,
         "skills",
         "max_lines",
         manifest.capacity.max_skill_lines or len(skills),
     )
+    max_lines = base_lines * max(1, page_scale)
     return {key: values for index, (key, values) in enumerate(skills.items()) if index < max_lines}
 
 

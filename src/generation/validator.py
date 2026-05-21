@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from math import ceil
 from pathlib import Path
 
 from src.documents.page_count import get_docx_page_count, get_pdf_page_count
-from src.generation.ir import ResumeDocument, ValidationIssue, ValidationResult
+from src.generation.ir import CoverLetterDocument, ResumeDocument, ValidationIssue, ValidationResult
 
 
 def validate_resume_document(
@@ -114,6 +115,7 @@ def validate_resume_document(
         )
 
     estimated_pages = _estimate_pages(document)
+    estimated_page_fill = _estimate_resume_page_fill(document)
     if estimated_pages > max_estimated_pages:
         issues.append(
             ValidationIssue(
@@ -129,6 +131,10 @@ def validate_resume_document(
         "experience_count": len(document.experiences),
         "project_count": len(document.projects),
         "estimated_pages": estimated_pages,
+        "estimated_resume_page_fill_ratio": estimated_page_fill,
+        "font_family": "Arial",
+        "body_font_size_pt": 9,
+        "page_margin_inches": {"top": 0.55, "bottom": 0.55, "left": 0.6, "right": 0.6},
         **coverage,
     }
     return ValidationResult(
@@ -145,8 +151,19 @@ def validate_resume_artifacts(
     pdf_path: Path | None = None,
     pdf_attempted: bool = False,
     max_pages: int = 1,
+    target_pages: int | None = None,
+    document_type: str = "resume",
 ) -> ValidationResult:
-    """Add deterministic renderer/file-system checks to an existing validation result."""
+    """Add deterministic renderer/file-system checks to an existing validation result.
+
+    ``target_pages`` (when supplied) drives the strict page-match check
+    used by the Template Library's "Expected pages" setting: a render
+    that produces more *or* fewer pages than configured raises an error
+    so the review queue can demand a regenerate. ``max_pages`` is kept
+    around for callers that only care about an upper bound (legacy
+    behaviour) and defaults to ``target_pages`` when both are passed.
+    """
+    target = target_pages if target_pages is not None else max_pages
     issues = list(validation.issues)
     metrics = dict(validation.metrics)
 
@@ -162,6 +179,8 @@ def validate_resume_artifacts(
             "pdf_generated": pdf_ok,
             "pdf_path": str(pdf_path) if pdf_path else None,
             "pdf_page_count": pdf_pages,
+            "target_pages": target,
+            **_docx_layout_metrics(docx_path, document_type=document_type),
         }
     )
 
@@ -186,7 +205,34 @@ def validate_resume_artifacts(
         )
 
     rendered_pages = pdf_pages or docx_pages
-    if rendered_pages is not None and rendered_pages > max_pages:
+    if rendered_pages is not None and target_pages is not None:
+        if rendered_pages > target:
+            issues.append(
+                ValidationIssue(
+                    type="rendered_page_overflow",
+                    severity="error",
+                    message=(
+                        f"Rendered document is {rendered_pages} pages but template "
+                        f"targets exactly {target}. Regenerate with less content."
+                    ),
+                    details={"page_count": rendered_pages, "target_pages": target},
+                )
+            )
+        elif rendered_pages < target:
+            issues.append(
+                ValidationIssue(
+                    type="rendered_page_underflow",
+                    severity="error",
+                    message=(
+                        f"Rendered document is {rendered_pages} pages but template "
+                        f"targets exactly {target}. Regenerate with more content."
+                    ),
+                    details={"page_count": rendered_pages, "target_pages": target},
+                )
+            )
+    elif rendered_pages is not None and rendered_pages > max_pages:
+        # Legacy callers that did not pass target_pages keep the
+        # softer warning so we do not change behaviour for them.
         issues.append(
             ValidationIssue(
                 type="rendered_page_overflow",
@@ -204,21 +250,178 @@ def validate_resume_artifacts(
 
 
 def validate_cover_letter_artifacts(
+    validation: ValidationResult | None = None,
     *,
     docx_path: Path | None,
     pdf_path: Path | None = None,
     pdf_attempted: bool = False,
     max_pages: int = 1,
+    target_pages: int | None = None,
 ) -> ValidationResult:
     """Validate rendered cover letter files."""
-    base = ValidationResult(ok=True, issues=[], metrics={})
+    base = validation or ValidationResult(ok=True, issues=[], metrics={})
     return validate_resume_artifacts(
         base,
         docx_path=docx_path,
         pdf_path=pdf_path,
         pdf_attempted=pdf_attempted,
         max_pages=max_pages,
+        target_pages=target_pages,
+        document_type="cover_letter",
     )
+
+
+def validate_cover_letter_document(
+    document: CoverLetterDocument,
+    *,
+    min_words: int = 260,
+    max_words: int = 430,
+    min_paragraphs: int = 4,
+    min_estimated_page_fill: float = 0.58,
+    target_pages: int = 1,
+) -> ValidationResult:
+    """Validate cover-letter content and rough page-fit before rendering."""
+    # Single-page cover letter is the canonical case. For 2-page
+    # templates expand the word/paragraph budget proportionally so the
+    # validator does not flag a deliberately long letter as too long.
+    scale = max(1, int(target_pages))
+    min_words = min_words * scale
+    max_words = max_words * scale
+    min_paragraphs = min_paragraphs if scale == 1 else max(min_paragraphs, 4 + (scale - 1) * 2)
+    issues: list[ValidationIssue] = []
+    paragraphs = [
+        paragraph.text.strip()
+        for paragraph in document.paragraphs
+        if paragraph.text.strip()
+    ]
+    body_text = "\n\n".join(paragraphs)
+    word_count = _word_count(body_text)
+    paragraph_count = len(paragraphs)
+    estimated_page_fill = _estimate_cover_letter_page_fill(document)
+
+    if not document.applicant.get("name"):
+        issues.append(
+            ValidationIssue(
+                type="missing_applicant_name",
+                severity="warning",
+                section="header",
+                message="Cover letter header is missing the applicant name.",
+            )
+        )
+    if paragraph_count < min_paragraphs:
+        issues.append(
+            ValidationIssue(
+                type="cover_letter_too_few_paragraphs",
+                severity="warning",
+                section="body",
+                message="Cover letter body has too few paragraphs.",
+                details={"paragraph_count": paragraph_count, "min_paragraphs": min_paragraphs},
+            )
+        )
+    if word_count < min_words:
+        issues.append(
+            ValidationIssue(
+                type="cover_letter_too_short",
+                severity="warning",
+                section="body",
+                message="Cover letter body is below the target word budget.",
+                details={"word_count": word_count, "min_words": min_words},
+            )
+        )
+    if word_count > max_words:
+        issues.append(
+            ValidationIssue(
+                type="cover_letter_too_long",
+                severity="warning",
+                section="body",
+                message="Cover letter body exceeds the target word budget.",
+                details={"word_count": word_count, "max_words": max_words},
+            )
+        )
+    if estimated_page_fill < min_estimated_page_fill:
+        issues.append(
+            ValidationIssue(
+                type="cover_letter_underfilled_page",
+                severity="warning",
+                section="layout",
+                message="Cover letter is likely to underfill a one-page document.",
+                details={
+                    "estimated_page_fill_ratio": estimated_page_fill,
+                    "min_estimated_page_fill_ratio": min_estimated_page_fill,
+                },
+            )
+        )
+    if re.search(r"\bAt\s+[^,]+,\s+[A-Z]", body_text):
+        issues.append(
+            ValidationIssue(
+                type="raw_evidence_dump",
+                severity="warning",
+                section="body",
+                message="Cover letter appears to include raw resume bullet phrasing.",
+            )
+        )
+
+    return ValidationResult(
+        ok=not any(issue.severity == "error" for issue in issues),
+        issues=issues,
+        metrics={
+            "cover_letter_word_count": word_count,
+            "cover_letter_paragraph_count": paragraph_count,
+            "estimated_page_fill_ratio": estimated_page_fill,
+            "font_family": "Times New Roman",
+            "font_size_pt": 11,
+            "page_margin_inches": 0.85,
+        },
+    )
+
+
+def _estimate_cover_letter_page_fill(document: CoverLetterDocument) -> float:
+    paragraphs = [
+        paragraph.text.strip()
+        for paragraph in document.paragraphs
+        if paragraph.text.strip()
+    ]
+    # Times New Roman 11pt, 0.85" margins: roughly 85-95 chars per line and
+    # 44-48 usable lines on a Letter page. Include fixed frame lines
+    # for name/contact/date/company/salutation/signature plus paragraph gaps.
+    body_lines = sum(max(1, ceil(len(text) / 90)) for text in paragraphs)
+    frame_lines = 7
+    paragraph_gap_lines = max(0, len(paragraphs) - 1)
+    return round(min(1.0, (frame_lines + paragraph_gap_lines + body_lines) / 46), 2)
+
+
+def _docx_layout_metrics(docx_path: Path | None, *, document_type: str) -> dict:
+    if not docx_path or not docx_path.exists():
+        return {}
+    try:
+        from docx import Document  # noqa: PLC0415
+    except ImportError:
+        return {}
+    try:
+        doc = Document(str(docx_path))
+    except Exception:
+        return {}
+
+    style_name = "CoverLetter.Body" if document_type == "cover_letter" else "Resume.Normal"
+    metrics: dict = {}
+    try:
+        style = doc.styles[style_name]
+        metrics["docx_body_style"] = style_name
+        metrics["docx_body_font_family"] = style.font.name
+        metrics["docx_body_font_size_pt"] = (
+            round(style.font.size.pt, 1) if style.font.size is not None else None
+        )
+    except KeyError:
+        metrics["docx_body_style"] = None
+
+    section = doc.sections[0]
+    metrics["docx_margins_inches"] = {
+        "top": round(section.top_margin.inches, 2),
+        "bottom": round(section.bottom_margin.inches, 2),
+        "left": round(section.left_margin.inches, 2),
+        "right": round(section.right_margin.inches, 2),
+    }
+    return metrics
 
 
 def validate_latex_artifacts(
@@ -228,6 +431,7 @@ def validate_latex_artifacts(
     pdf_path: Path | None = None,
     pdf_attempted: bool = False,
     max_pages: int = 1,
+    target_pages: int | None = None,
 ) -> ValidationResult:
     """Validate rendered LaTeX files without requiring a DOCX artifact."""
     validation = validation or ValidationResult(ok=True, issues=[], metrics={})
@@ -267,7 +471,34 @@ def validate_latex_artifacts(
             )
         )
 
-    if pdf_pages is not None and pdf_pages > max_pages:
+    target = target_pages if target_pages is not None else max_pages
+    metrics["target_pages"] = target
+    if pdf_pages is not None and target_pages is not None:
+        if pdf_pages > target:
+            issues.append(
+                ValidationIssue(
+                    type="rendered_page_overflow",
+                    severity="error",
+                    message=(
+                        f"Rendered document is {pdf_pages} pages but template "
+                        f"targets exactly {target}. Regenerate with less content."
+                    ),
+                    details={"page_count": pdf_pages, "target_pages": target},
+                )
+            )
+        elif pdf_pages < target:
+            issues.append(
+                ValidationIssue(
+                    type="rendered_page_underflow",
+                    severity="error",
+                    message=(
+                        f"Rendered document is {pdf_pages} pages but template "
+                        f"targets exactly {target}. Regenerate with more content."
+                    ),
+                    details={"page_count": pdf_pages, "target_pages": target},
+                )
+            )
+    elif pdf_pages is not None and pdf_pages > max_pages:
         issues.append(
             ValidationIssue(
                 type="rendered_page_overflow",
@@ -337,6 +568,14 @@ def _estimate_pages(document: ResumeDocument) -> int:
     skill_count = sum(len(values) for values in document.skills.values())
     estimated_lines = 5 + item_count * 2 + bullet_count * 2 + max(1, skill_count // 6)
     return max(1, (estimated_lines + 42) // 43)
+
+
+def _estimate_resume_page_fill(document: ResumeDocument) -> float:
+    bullet_count = sum(len(item.bullets) for item in [*document.experiences, *document.projects])
+    item_count = len(document.education) + len(document.experiences) + len(document.projects)
+    skill_count = sum(len(values) for values in document.skills.values())
+    estimated_lines = 5 + item_count * 2 + bullet_count * 2 + max(1, skill_count // 6)
+    return round(min(1.0, estimated_lines / 43), 2)
 
 
 def _normalize(value: str) -> str:

@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from src.core.config import PROJECT_ROOT
+from src.maintenance.atomic import atomic_write
 
 VERSIONS_DIR = PROJECT_ROOT / "data" / "output" / "versions"
 
@@ -22,7 +23,12 @@ def save_generation_version(
     validation: dict | None,
     requirements: dict | None,
 ) -> dict:
-    """Persist a generated material version and return version metadata."""
+    """Persist a generated material version and return version metadata.
+
+    Phase 18.4: writes go through ``atomic_write`` so a crash mid-write
+    can't leave a half-encoded JSON the artifact-cleanup classifier
+    would have to deal with.
+    """
     now = datetime.now(UTC)
     version_id = uuid4().hex
     payload = {
@@ -40,7 +46,10 @@ def save_generation_version(
     VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"{now.strftime('%Y%m%d_%H%M%S')}_{_slug(job)}_{material_type}_{version_id}.json"
     path = VERSIONS_DIR / filename
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    with atomic_write(path) as tmp_path:
+        tmp_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
     return {
         "id": version_id,

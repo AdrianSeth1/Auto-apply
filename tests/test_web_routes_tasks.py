@@ -8,7 +8,10 @@ Postgres, cleaning up rows on a per-test tenant prefix.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -109,6 +112,121 @@ def test_list_tasks_filters_by_status_and_kind(
     assert len(items) == 1
     assert items[0]["kind"] == "materials.generate"
     assert items[0]["status"] == "failed"
+
+
+def test_list_automation_plan_runs_hides_internal_tasks(
+    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "src.web.routes.tasks.load_automation_plans_data",
+        lambda: {"plans": [{"id": "daily-apply", "name": "Daily Apply"}]},
+    )
+    for kind, payload in [
+        ("materials.generate", {"automation_plan_id": "daily-apply"}),
+        ("orchestration.plan_run", {}),
+        ("orchestration.plan_run", {"automation_plan_id": "deleted-plan"}),
+        ("orchestration.plan_run", {"automation_plan_id": "daily-apply"}),
+    ]:
+        db_session.add(
+            TaskRecord(
+                tenant_id="test-web-plan-runs",
+                kind=kind,
+                queue="search",
+                status="succeeded",
+                payload=payload,
+            )
+        )
+    db_session.commit()
+
+    r = client.get(
+        "/api/automation-plans/runs",
+        headers={tenant_header_name(): "test-web-plan-runs"},
+    )
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert len(items) == 1
+    assert items[0]["kind"] == "orchestration.plan_run"
+    assert items[0]["payload"]["automation_plan_id"] == "daily-apply"
+
+
+def test_regenerate_enqueue_includes_legacy_job_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace Materials starts from a legacy Application/Job row.
+
+    The worker's ``materials.generate`` task can consume inline job payloads,
+    but only looks up ``JobPosting`` when no payload is present. Without this
+    bridge, regenerate tasks for direct AutoApply rows returned
+    ``posting_not_found`` and the UI kept showing the old resume.
+    """
+    import src.tasks.tasks  # noqa: F401 -- registers materials.generate
+    from src.web.routes import api as api_routes
+
+    app_id = uuid4()
+    job_id = uuid4()
+    captured: dict[str, Any] = {}
+
+    class FakeSession:
+        def get(self, model, ident):
+            if model.__name__ == "Application" and ident == app_id:
+                return SimpleNamespace(id=app_id, job_id=job_id)
+            if model.__name__ == "Job" and ident == job_id:
+                return SimpleNamespace(
+                    id=job_id,
+                    source="greenhouse",
+                    source_id="clearline-1",
+                    company="Clearline",
+                    title="Software Engineering Intern",
+                    location="Remote",
+                    employment_type="internship",
+                    seniority="internship",
+                    description="Build software.",
+                    requirements={},
+                    application_url="https://boards.greenhouse.io/clearline/jobs/1",
+                    ats_type="greenhouse",
+                    raw_data={},
+                    discovered_at=None,
+                    expires_at=None,
+                )
+            return None
+
+    @contextmanager
+    def fake_factory():
+        yield FakeSession()
+
+    def fake_enqueue(*, celery_task, session, spec):
+        captured["payload"] = spec.payload
+        captured["idempotency_key"] = spec.idempotency_key
+        return uuid4()
+
+    monkeypatch.setattr(
+        "src.core.database.get_session_factory", lambda *_args, **_kwargs: fake_factory
+    )
+    monkeypatch.setattr(
+        "src.application.material_defaults.resolve_material_choice",
+        lambda **_kwargs: {
+            "strategy": "patch_existing",
+            "template_id": None,
+            "document_id": str(uuid4()),
+            "patch_aggressiveness": "balanced",
+            "patch_allow_reorder_sections": True,
+            "patch_allow_add_remove_bullets": True,
+        },
+    )
+    monkeypatch.setattr("src.tasks.base.AutoApplyTask.enqueue", fake_enqueue)
+
+    payload = api_routes.RegenerateMaterialPayload(
+        material_type="resume_docx",
+        strategy="patch_existing",
+        source_document_id=str(uuid4()),
+    )
+    result = api_routes._enqueue_regenerate_material(app_id, payload)
+
+    assert result["status"] == "queued"
+    assert captured["payload"]["job_id"] == str(job_id)
+    assert captured["payload"]["job"]["title"] == "Software Engineering Intern"
+    assert captured["payload"]["resume_strategy"] == "patch_existing"
+    assert captured["idempotency_key"].startswith(
+        f"regenerate:{app_id}:resume_docx:"
+    )
 
 
 def test_get_task_returns_404_for_other_tenant(

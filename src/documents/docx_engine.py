@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -192,13 +193,30 @@ def _render_resume_sections(
     include_header: bool,
 ) -> None:
     rendered = set()
+    rendered_custom_titles: set[str] = set()
     for section in _resolved_section_order(document):
         if section == "header" and not include_header:
             continue
         if section in rendered:
             continue
         rendered.add(section)
+        if section.startswith("custom:"):
+            rendered_custom_titles.add(section.split(":", 1)[1].strip().lower())
+        elif section in ("custom", "custom_sections"):
+            for custom in getattr(document, "custom_sections", []) or []:
+                rendered_custom_titles.add(custom.title.strip().lower())
         _render_resume_section(section, sink, document, styles)
+
+    # Catch-all: any CustomSection that wasn't explicitly placed by
+    # ``section_order`` gets rendered at the end. This is what lets the
+    # candidate's VOLUNTEER / AWARDS / etc. survive without forcing the
+    # user to hand-tune section ordering -- the canonical sections still
+    # come first, the rest land below them in profile order.
+    for custom in getattr(document, "custom_sections", []) or []:
+        if custom.title.strip().lower() in rendered_custom_titles:
+            continue
+        _render_ir_custom_section(sink, custom, styles)
+        rendered_custom_titles.add(custom.title.strip().lower())
 
 
 def _render_resume_section(section: str, sink, document, styles: dict[str, str]) -> None:
@@ -212,6 +230,60 @@ def _render_resume_section(section: str, sink, document, styles: dict[str, str])
         _render_ir_experience(sink, document.experiences, styles)
     elif section == "projects":
         _render_ir_projects(sink, document.projects, styles)
+    elif section == "custom" or section == "custom_sections":
+        # Render every custom section the IR carries. Use this catch-all
+        # token in ``section_order`` to control where the block lands;
+        # otherwise the caller in ``_render_resume_sections`` will
+        # append them after the named sections.
+        for custom in getattr(document, "custom_sections", []) or []:
+            _render_ir_custom_section(sink, custom, styles)
+    elif section.startswith("custom:"):
+        # ``custom:VOLUNTEER EXPERIENCE`` in section_order pins a single
+        # named custom section at a specific position.
+        title = section.split(":", 1)[1].strip()
+        for custom in getattr(document, "custom_sections", []) or []:
+            if custom.title.strip().lower() == title.lower():
+                _render_ir_custom_section(sink, custom, styles)
+                break
+
+
+def _render_ir_custom_section(sink, custom, styles: dict[str, str]) -> None:
+    """Render one CustomSection block onto the sink.
+
+    Uses the same Resume.SectionHeading + Resume.ItemTitle / Subtitle
+    / Bullet styles as the canonical sections so a free-form section
+    visually matches the rest of the resume. Empty fields are skipped
+    (no "Organization: None" leaks).
+    """
+    entries = [
+        entry
+        for entry in getattr(custom, "entries", []) or []
+        if (entry.title or entry.organization or entry.details or entry.bullets)
+    ]
+    if not entries:
+        return
+    _add_section_heading(sink, custom.title, styles)
+    for entry in entries:
+        primary = _clean_field(entry.title) or _clean_field(entry.organization)
+        dates = _format_date_range(entry.start_date, entry.end_date)
+        if primary or dates:
+            _add_styled_paragraph(
+                sink, _join_tab(primary, dates), styles.get("item_title")
+            )
+        subtitle_parts = []
+        if entry.title and entry.organization and primary != entry.organization:
+            subtitle_parts.append(entry.organization)
+        if entry.location:
+            subtitle_parts.append(entry.location)
+        subtitle = _join_nonempty(subtitle_parts)
+        if subtitle:
+            _add_styled_paragraph(sink, subtitle, styles.get("item_subtitle"))
+        if entry.details:
+            _add_styled_paragraph(sink, entry.details, styles.get("item_meta"))
+        for bullet in entry.bullets:
+            cleaned = _clean_field(bullet)
+            if cleaned:
+                _add_resume_bullet(sink, cleaned, styles)
 
 
 def build_cover_letter_from_ir(
@@ -259,7 +331,11 @@ def _render_cover_letter_fallback(sink, document, styles: dict[str, str]) -> Non
     company = recipient.get("company")
     if company:
         _add_styled_paragraph(sink, str(company), styles.get("recipient"))
+    _add_styled_paragraph(sink, "Dear Hiring Manager,", styles.get("body"))
     _render_cover_letter_body(sink, document, styles)
+    _add_styled_paragraph(sink, "Sincerely,", styles.get("signature"))
+    if name:
+        _add_styled_paragraph(sink, str(name), styles.get("signature"))
 
 
 def _render_cover_letter_body(sink, document, styles: dict[str, str]) -> None:
@@ -351,9 +427,15 @@ def _cover_letter_template_variables(document) -> dict[str, str]:
     return {
         "applicant.name": str(name),
         "applicant.contact": contact,
+        "date": _cover_letter_date(),
         "recipient.company": str(recipient.get("company") or ""),
         "signature": str(name),
     }
+
+
+def _cover_letter_date() -> str:
+    today = datetime.now()
+    return f"{today:%B} {today.day}, {today:%Y}"
 
 
 def _resolved_section_order(document) -> list[str]:
@@ -398,7 +480,8 @@ def _render_ir_education(doc: Document, education: list[dict], styles: dict[str,
         dates = _format_date_range(edu.get("start_date", ""), edu.get("end_date", ""))
         _add_styled_paragraph(doc, _join_tab(institution, dates), styles.get("item_title"))
         degree = " ".join(part for part in [edu.get("degree", ""), edu.get("field", "")] if part)
-        details = _join_nonempty([degree, edu.get("location"), f"GPA: {edu.get('gpa')}"])
+        gpa = _gpa_label(edu.get("gpa"))
+        details = _join_nonempty([degree, edu.get("location"), gpa])
         if details:
             _add_styled_paragraph(doc, details, styles.get("item_meta"))
         courses = edu.get("relevant_courses", [])
@@ -502,8 +585,44 @@ def _format_date_range(start: str, end: str) -> str:
     return start or end or ""
 
 
+def _gpa_label(value) -> str:
+    """Return ``"GPA: 3.8"``-style label, or empty string when unset.
+
+    A blank profile field comes through as ``None`` / ``""`` / ``0``,
+    none of which belong on a resume. Centralising the formatting here
+    means downstream renderers cannot accidentally print "GPA: None"
+    by interpolating directly into an f-string.
+    """
+    text = _clean_field(value)
+    if not text:
+        return ""
+    if text.lower() in {"none", "n/a", "na", "null", "0", "0.0", "0.00"}:
+        return ""
+    return f"GPA: {text}"
+
+
+def _clean_field(value) -> str:
+    """Return a trimmed string, treating None / "None" / "null" as empty.
+
+    Profile fields imported from heterogeneous sources sometimes round-trip
+    through ``str(None)`` and arrive at the renderer as the literal text
+    "None". This helper keeps every renderer call site one line of code
+    away from doing the right thing.
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.lower() in {"none", "null", "n/a", "na", "nan"}:
+        return ""
+    return text
+
+
 def _join_nonempty(values: list) -> str:
-    return " | ".join(str(value) for value in values if value)
+    return " | ".join(
+        cleaned for cleaned in (_clean_field(value) for value in values) if cleaned
+    )
 
 
 def _join_tab(left: str, right: str) -> str:

@@ -257,7 +257,7 @@ def test_enqueue_uses_current_tenant_when_spec_omits_it() -> None:
 # ---- short_circuit_if_already_succeeded ------------------------------
 
 
-def test_short_circuit_returns_replayed_payload_when_prior_exists() -> None:
+def test_short_circuit_returns_replayed_result_when_prior_exists() -> None:
     prior = TaskRecord(
         id=uuid.uuid4(),
         tenant_id=TENANT_DEFAULT,
@@ -265,7 +265,8 @@ def test_short_circuit_returns_replayed_payload_when_prior_exists() -> None:
         queue="materials",
         status="succeeded",
         idempotency_key="k",
-        payload={"output": "ok"},
+        payload={"input": "old"},
+        result={"output": "ok"},
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )

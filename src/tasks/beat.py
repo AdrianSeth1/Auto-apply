@@ -16,8 +16,9 @@ Schedule design:
   machine's time decay (``project_by_time``: ``active→stale @ 24h``,
   ``stale→unknown @ 72h``, ``unknown→expired @ 7d``). Hourly granularity
   is sufficient since the decay tiers are hours / days.
-* ``application_status_sync`` -- polls submitted-but-pending outcomes
-  every 6 hours; the actual sync logic lives in 14.6 ``status.sync``.
+* ``application_status_sync`` -- currently unscheduled. Future work should
+  poll supported ATS / application portals first, then add email / HR-reply
+  ingestion.
 * ``linkedin_cookie_refresh`` -- daily refresh while the cookie is
   still warm.
 * ``cache_eviction`` -- hourly L1+L2 cache hygiene (drops keys whose
@@ -80,11 +81,11 @@ def get_schedule() -> dict[str, dict[str, object]]:
             "schedule": crontab(minute=0),  # every hour, on the hour
             "options": _MAINTENANCE_OPTS,
         },
-        "application_status_sync": {
-            "task": "maintenance.status_sync",
-            "schedule": crontab(hour="*/6", minute=15),
-            "options": _MAINTENANCE_OPTS,
-        },
+        # Phase 18.1: ``application_status_sync`` removed from Beat
+        # because ``maintenance.status_sync`` is explicitly
+        # ``not_implemented``. Restore it when ATS/application-portal
+        # polling lands; email / HR-reply ingestion can follow as a
+        # second status source.
         "linkedin_cookie_refresh": {
             "task": "maintenance.linkedin_cookie_refresh",
             "schedule": crontab(hour=3, minute=0),  # 03:00 UTC every day

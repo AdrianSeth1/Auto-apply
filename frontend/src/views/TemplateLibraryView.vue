@@ -245,14 +245,13 @@ const isLoading = computed(() => templatesState.loading && !templatesState.loade
                 </div>
                 <div class="flex shrink-0 flex-wrap items-center justify-end gap-1">
                   <Button
-                    v-if="isLatexTemplate(template)"
                     variant="ghost"
                     size="sm"
                     type="button"
                     @click="editTemplate(target.documentType, template.template_id)"
                   >
                     <Pencil class="h-4 w-4" />
-                    Edit
+                    {{ isLatexTemplate(template) ? "Edit" : "Edit Styles" }}
                   </Button>
                   <Button
                     variant="ghost"

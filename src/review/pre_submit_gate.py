@@ -17,8 +17,9 @@ Inputs come from two places:
 
 Outputs:
 
-* ``allowed=True``  -- the submit path is cleared. Caller proceeds to
-  ``mark_submitted`` + enqueue ``application.submit``.
+* ``allowed=True``  -- the submit path is cleared. Caller may enqueue
+  ``application.submit``, but must not mark rows submitted until the
+  external ATS click-submit worker confirms success.
 * ``allowed=False, action="refresh"`` -- snapshot is stale; the gate
   did NOT auto-refresh (snapshot refresh is an I/O-heavy operation we
   don't want to do inside a submit click). The entry has been moved to
@@ -120,8 +121,7 @@ def run_pre_submit_gate(
     Args:
         session: open SQLAlchemy session. The function does NOT commit;
             the caller is responsible (so a submit route can wrap the
-            gate + ``mark_submitted`` + the application.submit enqueue
-            in one transaction).
+            gate + application.submit enqueue in one transaction).
         entry_id: the review queue row to gate. Must already be in
             ``status="approved"`` for the gate to fire -- pending
             entries get an immediate ``missing_binding`` (approval

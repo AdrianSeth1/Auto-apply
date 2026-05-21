@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
@@ -54,6 +56,9 @@ from src.application.jobs import (
     update_material_template as update_material_template_usecase,
 )
 from src.application.jobs import (
+    update_material_template_styles as update_material_template_styles_usecase,
+)
+from src.application.jobs import (
     upload_material_template as upload_material_template_usecase,
 )
 from src.application.jobs import (
@@ -100,13 +105,38 @@ from src.application.tracking import (
     discard_paused_application,
     load_applications_data,
     load_dashboard_data,
+    soft_delete_application,
     submit_paused_application,
     update_application_outcome,
 )
 from src.core.config import PROJECT_ROOT
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["api"])
 MAX_TEMPLATE_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+_SYNC_DEPRECATION_LOGGED: set[str] = set()
+
+
+def _warn_sync_materials_deprecated(route: str) -> None:
+    """Phase 18.6: emit a one-time deprecation log per route when
+    ``AUTOAPPLY_SYNC_MATERIALS=1`` brings back the synchronous
+    materials path. The flag is a short soak / debug escape hatch;
+    the warning makes it obvious in logs so the operator doesn't
+    forget to flip it off."""
+    import logging
+
+    if route in _SYNC_DEPRECATION_LOGGED:
+        return
+    _SYNC_DEPRECATION_LOGGED.add(route)
+    logging.getLogger("autoapply.web.routes.api").warning(
+        "AUTOAPPLY_SYNC_MATERIALS=1 is set: %s is using the legacy "
+        "synchronous path. This escape hatch is dev-only and slated "
+        "for removal -- unset the env var to take the async (task_id) "
+        "path the UI ships with.",
+        route,
+    )
 
 
 class JobSearchPayload(BaseModel):
@@ -161,6 +191,28 @@ class TemplateUpdatePayload(BaseModel):
     content: str
     template_name: str = ""
     description: str = ""
+    target_pages: int | None = None
+    filename_pattern: str | None = None
+    filename_custom_label: str | None = None
+
+
+class TemplateStyleOverridePayload(BaseModel):
+    font: str | None = None
+    size: int | None = None
+    bold: bool | None = None
+    italic: bool | None = None
+    line_spacing: float | None = None
+    space_before_pt: float | None = None
+    space_after_pt: float | None = None
+
+
+class TemplateStylesPayload(BaseModel):
+    overrides: dict[str, TemplateStyleOverridePayload] = Field(default_factory=dict)
+    template_name: str = ""
+    description: str = ""
+    target_pages: int | None = None
+    filename_pattern: str | None = None
+    filename_custom_label: str | None = None
 
 
 class SearchProfilePayload(BaseModel):
@@ -399,25 +451,212 @@ async def manual_apply_target(payload: JobApplyPayload) -> dict:
 
 @router.post("/jobs/generate-material")
 async def generate_job_material(payload: JobMaterialPayload) -> dict:
-    result = await generate_material_for_job_usecase(
-        job_payload=payload.job,
-        material_type=payload.material_type,
-        use_llm=payload.use_llm,
-        template_id=payload.template_id,
-        profile_id=payload.profile_id,
-        strategy=payload.strategy,
-        source_document_id=payload.source_document_id,
-        patch_aggressiveness=payload.patch_aggressiveness,
-        patch_allow_reorder_sections=payload.patch_allow_reorder_sections,
-        patch_allow_add_remove_bullets=payload.patch_allow_add_remove_bullets,
-    )
-    if result["ok"]:
-        return result
+    """Phase 18.2: defaults to enqueue + return ``task_id``.
 
-    status_code = 400
-    if result["error_code"] == "material_generation_failed":
-        status_code = 500
-    raise HTTPException(status_code=status_code, detail=result["error"])
+    The browser tab can close mid-generation without losing work
+    (the worker keeps running) and ``GET /api/tasks/{task_id}``
+    streams progress + artifacts back via :class:`TaskRecord.result`.
+
+    The legacy synchronous path is preserved behind the
+    ``AUTOAPPLY_SYNC_MATERIALS`` env var for soak / local debugging;
+    Phase 18.6 retires that escape hatch.
+    """
+    import os
+
+    if os.environ.get("AUTOAPPLY_SYNC_MATERIALS") == "1":
+        _warn_sync_materials_deprecated("generate-material")
+        result = await generate_material_for_job_usecase(
+            job_payload=payload.job,
+            material_type=payload.material_type,
+            use_llm=payload.use_llm,
+            template_id=payload.template_id,
+            profile_id=payload.profile_id,
+            strategy=payload.strategy,
+            source_document_id=payload.source_document_id,
+            patch_aggressiveness=payload.patch_aggressiveness,
+            patch_allow_reorder_sections=payload.patch_allow_reorder_sections,
+            patch_allow_add_remove_bullets=payload.patch_allow_add_remove_bullets,
+        )
+        if result["ok"]:
+            return result
+
+        status_code = 400
+        if result["error_code"] == "material_generation_failed":
+            status_code = 500
+        raise HTTPException(status_code=status_code, detail=result["error"])
+
+    return _enqueue_materials_generate_from_web(payload)
+
+
+def _enqueue_materials_generate_from_web(payload: JobMaterialPayload) -> dict:
+    """Bridge the JobsView payload onto the Phase 14 enqueue contract.
+
+    The ``materials.generate`` task accepts either a stored
+    ``job_id`` (UUID) or an inline ``job`` dict; the JobsView path
+    has scraped search-result data that hasn't been persisted yet,
+    so we pass the dict through and let the task body skip the
+    JobPosting lookup. The audit row gets a deterministic identifier
+    from ``job.source_id`` (or a fresh UUID) so the operator can
+    still find the row in ``/tasks``.
+    """
+    from uuid import uuid4
+
+    from src.application.material_defaults import resolve_material_choice
+    from src.tasks.app import celery_app
+    from src.tasks.base import AutoApplyTask as _AutoApplyTask
+    from src.tasks.base import EnqueueSpec
+    from src.tasks.context import current_tenant_id
+
+    # Resolve overrides so the task body doesn't have to re-derive
+    # them. ``resolve_material_choice`` accepts ``None`` for missing
+    # overrides and falls back to the saved Settings default.
+    document_type = (
+        "cover_letter"
+        if payload.material_type.startswith("cover_letter")
+        else "resume"
+    )
+    try:
+        choice = resolve_material_choice(
+            document_type=document_type,
+            override_strategy=payload.strategy,
+            override_template_id=payload.template_id,
+            override_document_id=payload.source_document_id,
+            override_patch_aggressiveness=payload.patch_aggressiveness,
+            override_patch_allow_reorder_sections=payload.patch_allow_reorder_sections,
+            override_patch_allow_add_remove_bullets=payload.patch_allow_add_remove_bullets,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    job_id = str(payload.job.get("id") or payload.job.get("source_id") or uuid4())
+
+    task_payload: dict[str, Any] = {
+        "job_id": job_id,
+        "job": payload.job,
+        "profile_id": payload.profile_id,
+        "document_types": [
+            "cover_letter" if document_type == "cover_letter" else "resume"
+        ],
+    }
+    if document_type == "resume":
+        task_payload["resume_strategy"] = choice["strategy"]
+        task_payload["resume_template_id"] = choice["template_id"] or payload.template_id
+        task_payload["resume_source_document_id"] = choice["document_id"]
+        task_payload["resume_patch_aggressiveness"] = choice["patch_aggressiveness"]
+        task_payload["resume_patch_allow_reorder_sections"] = choice[
+            "patch_allow_reorder_sections"
+        ]
+        task_payload["resume_patch_allow_add_remove_bullets"] = choice[
+            "patch_allow_add_remove_bullets"
+        ]
+    else:
+        task_payload["cover_letter_strategy"] = choice["strategy"]
+        task_payload["cover_letter_template_id"] = (
+            choice["template_id"] or payload.template_id
+        )
+        task_payload["cover_letter_source_document_id"] = choice["document_id"]
+        task_payload["cover_letter_patch_aggressiveness"] = choice["patch_aggressiveness"]
+        task_payload["cover_letter_patch_allow_reorder_sections"] = choice[
+            "patch_allow_reorder_sections"
+        ]
+        task_payload["cover_letter_patch_allow_add_remove_bullets"] = choice[
+            "patch_allow_add_remove_bullets"
+        ]
+
+    # Codex review fix: same idempotency-collision concern as the
+    # regenerate path -- a user clicking "Generate" twice in a row
+    # with different overrides would otherwise short-circuit to the
+    # first run's artifact. Hash the effective choices into the key.
+    import hashlib
+    import json
+
+    # 2026-05-21 fix (v3): see the regenerate path for full rationale.
+    # Same template-manifest fingerprint + 5s time-bucket strategy so
+    # an explicit Generate click always fires when the user means it.
+    import time
+
+    from src.documents.templates import (  # noqa: PLC0415
+        DEFAULT_TEMPLATE_IDS,
+        load_template_package,
+    )
+
+    effective_template_id = (
+        task_payload.get("resume_template_id")
+        if document_type == "resume"
+        else task_payload.get("cover_letter_template_id")
+    ) or DEFAULT_TEMPLATE_IDS.get(document_type)
+    template_manifest_fingerprint: str | None = None
+    if effective_template_id:
+        try:
+            template_package = load_template_package(
+                document_type, effective_template_id
+            )
+            template_manifest_fingerprint = hashlib.sha256(
+                template_package.manifest.model_dump_json(
+                    exclude={"name", "description"}
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "materials.generate: failed to hash template manifest for %s/%s: %s",
+                document_type,
+                effective_template_id,
+                exc,
+            )
+
+    request_bucket = int(time.time()) // 5
+
+    choice_fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "version": 3,
+                "strategy": choice.get("strategy"),
+                "template_id": payload.template_id,
+                "template_manifest_fingerprint": template_manifest_fingerprint,
+                "source_document_id": choice.get("document_id"),
+                "patch_aggressiveness": choice.get("patch_aggressiveness"),
+                "patch_allow_reorder_sections": choice.get(
+                    "patch_allow_reorder_sections"
+                ),
+                "patch_allow_add_remove_bullets": choice.get(
+                    "patch_allow_add_remove_bullets"
+                ),
+                "request_bucket_5s": request_bucket,
+            },
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+
+    tenant = current_tenant_id() or "default"
+    spec = EnqueueSpec(
+        kind="materials.generate",
+        queue="materials",
+        payload=task_payload,
+        tenant_id=tenant,
+        idempotency_key=(
+            f"materials.generate:{job_id}:{payload.material_type}:"
+            f"{choice_fingerprint}"
+        ),
+    )
+
+    from src.core.config import load_config
+    from src.core.database import get_session_factory
+
+    factory = get_session_factory(load_config())
+    with factory() as session:
+        task_id = _AutoApplyTask.enqueue(
+            celery_task=celery_app.tasks["materials.generate"],
+            session=session,
+            spec=spec,
+        )
+    return {
+        "ok": True,
+        "status": "queued",
+        "task_id": str(task_id),
+        "material_type": payload.material_type,
+        "poll_url": f"/api/tasks/{task_id}",
+    }
 
 
 @router.get("/templates")
@@ -480,6 +719,35 @@ async def update_material_template(
         content=payload.content,
         template_name=payload.template_name or None,
         description=payload.description or None,
+        target_pages=payload.target_pages,
+        filename_pattern=payload.filename_pattern,
+        filename_custom_label=payload.filename_custom_label,
+    )
+    if result["ok"]:
+        return result
+    status_code = 400 if result["error_code"] != "template_update_failed" else 500
+    raise HTTPException(status_code=status_code, detail=result["error"])
+
+
+@router.put("/templates/{document_type}/{template_id}/styles")
+async def update_material_template_styles(
+    document_type: str,
+    template_id: str,
+    payload: TemplateStylesPayload,
+) -> dict:
+    overrides = {
+        key: value.model_dump(exclude_none=True)
+        for key, value in payload.overrides.items()
+    }
+    result = update_material_template_styles_usecase(
+        document_type=document_type,
+        template_id=template_id,
+        overrides=overrides,
+        template_name=payload.template_name or None,
+        description=payload.description or None,
+        target_pages=payload.target_pages,
+        filename_pattern=payload.filename_pattern,
+        filename_custom_label=payload.filename_custom_label,
     )
     if result["ok"]:
         return result
@@ -761,6 +1029,35 @@ async def update_outcome(application_id: str, payload: OutcomePayload) -> dict:
     return result
 
 
+@router.delete("/applications/{application_id}")
+async def delete_application(
+    application_id: str, cascade: bool = False
+) -> dict:
+    """Phase 18.4 soft-delete.
+
+    Marks the application's ``deleted_at`` column. Permanent purge
+    (artifacts + DB row) is the cleanup task's job and runs after
+    ``cleanup.soft_deleted_retention_days``. ``cascade=true`` moves
+    the linked resume / cover-letter artifact files into the cleanup
+    quarantine immediately instead of waiting for that window.
+    """
+    try:
+        from uuid import UUID
+
+        application_uuid = UUID(application_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid application ID") from exc
+
+    result = soft_delete_application(
+        application_id=application_uuid, cascade=cascade
+    )
+    if not result["ok"]:
+        if result["error_code"] == "application_not_found":
+            raise HTTPException(status_code=404, detail=result["error"])
+        raise HTTPException(status_code=500, detail=result["error"])
+    return result
+
+
 @router.post("/applications/{application_id}/submit")
 async def submit_application(application_id: str) -> dict:
     try:
@@ -776,6 +1073,8 @@ async def submit_application(application_id: str) -> dict:
             raise HTTPException(status_code=404, detail=result["error"])
         if result["error_code"] == "invalid_status":
             raise HTTPException(status_code=409, detail=result["error"])
+        if result["error_code"] == "submit_enqueue_failed":
+            raise HTTPException(status_code=503, detail=result["error"])
         raise HTTPException(status_code=500, detail=result["error"])
     return result
 
@@ -784,12 +1083,27 @@ async def submit_application(application_id: str) -> dict:
 async def regenerate_application_material_route(
     application_id: str, payload: RegenerateMaterialPayload
 ) -> dict:
+    """Phase 18.2: defaults to enqueue + return ``task_id``.
+
+    The synchronous path stays behind ``AUTOAPPLY_SYNC_MATERIALS=1``
+    (Phase 18.6 retires it). The async path enqueues
+    ``materials.generate`` against the application's ``job_id`` so
+    the task body re-uses the canonical generation pipeline + writes
+    artifacts onto the matching ReviewQueueEntry through the same
+    audit hooks every other generation uses.
+    """
+    import os
+
     try:
         from uuid import UUID
 
         application_uuid = UUID(application_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid application ID") from exc
+
+    if os.environ.get("AUTOAPPLY_SYNC_MATERIALS") != "1":
+        return _enqueue_regenerate_material(application_uuid, payload)
+    _warn_sync_materials_deprecated("regenerate-material")
 
     try:
         result = await regenerate_application_material(
@@ -1328,3 +1642,232 @@ async def cache_clear_namespace_endpoint(
         )
         raise HTTPException(status_code=status, detail=result)
     return result
+
+
+def _enqueue_regenerate_material(
+    application_uuid: Any, payload: RegenerateMaterialPayload
+) -> dict:
+    """Phase 18.2: enqueue ``materials.generate`` for an existing
+    application's job, returning ``{task_id, poll_url}`` so the SPA
+    can poll ``GET /api/tasks/{task_id}`` for the produced artifacts.
+
+    ``regenerate_application_material``'s logic (lookup the
+    Application, resolve the Job, pick the right
+    ``document_type`` from ``material_type``) is mirrored here at the
+    enqueue boundary; the post-completion writeback to
+    ``Application.resume_version`` / ``cover_letter_version`` is done
+    by the task body via the same code path
+    ``application.prepare`` uses.
+    """
+    from src.application.material_defaults import resolve_material_choice
+    from src.application.regenerate_materials import (
+        MATERIAL_TYPE_TO_DOCUMENT_TYPE,
+    )
+    from src.core.config import load_config
+    from src.core.database import get_session_factory
+    from src.core.models import Application
+    from src.tasks.app import celery_app
+    from src.tasks.base import AutoApplyTask as _AutoApplyTask
+    from src.tasks.base import EnqueueSpec
+    from src.tasks.context import current_tenant_id
+
+    document_type = MATERIAL_TYPE_TO_DOCUMENT_TYPE.get(payload.material_type)
+    if document_type is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported material_type {payload.material_type!r}.",
+        )
+
+    factory = get_session_factory(load_config())
+    job_payload: dict[str, Any] | None = None
+    with factory() as session:
+        app = session.get(Application, application_uuid)
+        if app is None:
+            raise HTTPException(status_code=404, detail="Application not found.")
+        job_id = str(app.job_id)
+        try:
+            from src.core.models import Job  # noqa: PLC0415
+
+            job = session.get(Job, app.job_id) if app.job_id else None
+            if job is not None:
+                job_payload = {
+                    "id": str(job.id),
+                    "source": job.source or "unknown",
+                    "source_id": job.source_id or str(job.id),
+                    "company": job.company,
+                    "title": job.title,
+                    "location": job.location,
+                    "employment_type": job.employment_type,
+                    "seniority": job.seniority,
+                    "description": job.description,
+                    "requirements": job.requirements or {},
+                    "application_url": job.application_url,
+                    "ats_type": job.ats_type or job.source or "unknown",
+                    "raw_data": job.raw_data or {},
+                }
+        except Exception:
+            job_payload = None
+
+    try:
+        choice = resolve_material_choice(
+            document_type=document_type,
+            override_strategy=payload.strategy,
+            override_template_id=payload.template_id,
+            override_document_id=payload.source_document_id,
+            override_patch_aggressiveness=payload.patch_aggressiveness,
+            override_patch_allow_reorder_sections=payload.patch_allow_reorder_sections,
+            override_patch_allow_add_remove_bullets=payload.patch_allow_add_remove_bullets,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    task_payload: dict[str, Any] = {
+        "job_id": job_id,
+        "application_id": str(application_uuid),
+        "document_types": [document_type],
+    }
+    if job_payload:
+        task_payload["job"] = job_payload
+    if document_type == "resume":
+        task_payload["resume_strategy"] = choice["strategy"]
+        task_payload["resume_template_id"] = choice["template_id"] or payload.template_id
+        task_payload["resume_source_document_id"] = choice["document_id"]
+        task_payload["resume_patch_aggressiveness"] = choice["patch_aggressiveness"]
+        task_payload["resume_patch_allow_reorder_sections"] = choice[
+            "patch_allow_reorder_sections"
+        ]
+        task_payload["resume_patch_allow_add_remove_bullets"] = choice[
+            "patch_allow_add_remove_bullets"
+        ]
+    else:
+        task_payload["cover_letter_strategy"] = choice["strategy"]
+        task_payload["cover_letter_template_id"] = (
+            choice["template_id"] or payload.template_id
+        )
+        task_payload["cover_letter_source_document_id"] = choice["document_id"]
+        task_payload["cover_letter_patch_aggressiveness"] = choice["patch_aggressiveness"]
+        task_payload["cover_letter_patch_allow_reorder_sections"] = choice[
+            "patch_allow_reorder_sections"
+        ]
+        task_payload["cover_letter_patch_allow_add_remove_bullets"] = choice[
+            "patch_allow_add_remove_bullets"
+        ]
+
+    # Codex review fix: an idempotency key keyed only on
+    # ``application_id + material_type`` made every subsequent
+    # regenerate short-circuit to the first successful run, so a
+    # user who switched template / strategy / source_document after
+    # the first regenerate would silently get the old artifact back.
+    # Fingerprint the effective generation choices so each distinct
+    # request still hits the broker, while duplicate identical clicks
+    # still short-circuit. Include a version because older regenerate
+    # tasks omitted inline legacy Job payloads and could persist
+    # ``posting_not_found`` as a Celery-successful result under the old
+    # key; those stale rows must not block the fixed enqueue payload.
+    import hashlib
+    import json
+
+    # 2026-05-21 fix (v4): a user-initiated **Regenerate** click is an
+    # explicit intent to re-run. The previous fingerprint-only model
+    # blocked the click whenever the configuration looked identical,
+    # even when:
+    #   * the same template's content was edited (style overrides /
+    #     target_pages / filename pattern) but the template_id stayed
+    #     the same,
+    #   * the rendered template_id was the seeded default (None on the
+    #     task payload because the user never explicitly picked one),
+    #     so the manifest hash never even made it into the fingerprint.
+    #
+    # The fix has two pieces:
+    #   1. Resolve the *effective* template_id by falling back to the
+    #      seeded default when the payload has no explicit pick. This
+    #      is the template the renderer will actually load, so it is
+    #      the one whose manifest should fingerprint the run.
+    #   2. Include a 5-second time bucket in the fingerprint. Real
+    #      double-clicks (network retry, accidental dup) land in the
+    #      same bucket and still dedupe; a user who waits long enough
+    #      to actually want a re-run lands in a fresh bucket and gets
+    #      one. This is the right tradeoff: the idempotency guard is
+    #      meant to catch automation-level duplicates, not to lock
+    #      humans out of their own button.
+    import time
+
+    from src.documents.templates import (  # noqa: PLC0415
+        DEFAULT_TEMPLATE_IDS,
+        load_template_package,
+    )
+
+    effective_template_id = (
+        task_payload.get(f"{document_type}_template_id")
+        or DEFAULT_TEMPLATE_IDS.get(document_type)
+    )
+    template_manifest_fingerprint: str | None = None
+    if effective_template_id:
+        try:
+            template_package = load_template_package(
+                document_type, effective_template_id
+            )
+            template_manifest_fingerprint = hashlib.sha256(
+                template_package.manifest.model_dump_json(
+                    exclude={"name", "description"}
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "regenerate: failed to hash template manifest for %s/%s: %s",
+                document_type,
+                effective_template_id,
+                exc,
+            )
+
+    request_bucket = int(time.time()) // 5
+
+    choice_fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "regenerate_enqueue_version": 4,
+                "strategy": choice.get("strategy"),
+                "template_id": effective_template_id,
+                "template_manifest_fingerprint": template_manifest_fingerprint,
+                "legacy_job_payload": bool(job_payload),
+                "job_id": job_id,
+                "source_document_id": choice.get("document_id"),
+                "patch_aggressiveness": choice.get("patch_aggressiveness"),
+                "patch_allow_reorder_sections": choice.get(
+                    "patch_allow_reorder_sections"
+                ),
+                "patch_allow_add_remove_bullets": choice.get(
+                    "patch_allow_add_remove_bullets"
+                ),
+                "request_bucket_5s": request_bucket,
+            },
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+
+    tenant = current_tenant_id() or "default"
+    spec = EnqueueSpec(
+        kind="materials.generate",
+        queue="materials",
+        payload=task_payload,
+        tenant_id=tenant,
+        idempotency_key=(
+            f"regenerate:{application_uuid}:{payload.material_type}:"
+            f"{choice_fingerprint}"
+        ),
+    )
+    with factory() as session:
+        task_id = _AutoApplyTask.enqueue(
+            celery_task=celery_app.tasks["materials.generate"],
+            session=session,
+            spec=spec,
+        )
+    return {
+        "ok": True,
+        "status": "queued",
+        "task_id": str(task_id),
+        "material_type": payload.material_type,
+        "application_id": str(application_uuid),
+        "poll_url": f"/api/tasks/{task_id}",
+    }

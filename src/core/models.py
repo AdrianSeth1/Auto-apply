@@ -19,6 +19,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -95,6 +96,10 @@ class Application(Base):
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     outcome: Mapped[str | None] = mapped_column(String(30))  # pending/rejected/oa/interview/offer
     outcome_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Phase 18.4: soft-delete column for the cascade artifact-cleanup
+    # API. ``DELETE /api/applications/{id}`` flips this; permanent
+    # deletion happens after ``cleanup.soft_deleted_retention_days``.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ApplicantProfile(Base):
@@ -273,6 +278,15 @@ class TaskRecord(Base):
         Index("ix_tasks_celery_task_id", "celery_task_id"),
         Index("ix_tasks_tenant_status", "tenant_id", "status", "created_at"),
         Index("ix_tasks_kind", "tenant_id", "kind"),
+        # Phase 18.3: partial DLQ index for the "Stuck / failed" tab.
+        # Mirrors the migration; declared here so schema-introspection
+        # tests can pin the contract.
+        Index(
+            "ix_tasks_dlq",
+            "tenant_id",
+            "dead_lettered_at",
+            postgresql_where=text("status = 'dead_lettered'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
@@ -291,9 +305,21 @@ class TaskRecord(Base):
     )
     trace_id: Mapped[str | None] = mapped_column(String(64))
     last_error: Mapped[str | None] = mapped_column(Text)
+    # Phase 18.2: structured task return value (artifact paths, ids,
+    # error summaries) persisted by the postrun signal handler so
+    # GET /api/tasks/{id} can hand the result back to async callers.
+    result: Mapped[dict | None] = mapped_column(JSONB)
     scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Phase 18.3: dead-letter queue plumbing. ``last_attempted_at``
+    # mirrors the most-recent attempt start so the operator can tell
+    # at a glance how long a row has been parked. ``dead_lettered_at``
+    # + ``dlq_reason`` are populated when the task exhausts
+    # ``max_retries`` instead of letting the row sit at ``failed``.
+    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dead_lettered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dlq_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
@@ -526,3 +552,77 @@ class QABank(Base):
     variants: Mapped[dict | None] = mapped_column(JSONB)
     confidence: Mapped[str] = mapped_column(String(20), default="high")
     needs_review: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class CleanupRun(Base):
+    """Phase 18.4: per-invocation audit row for artifact cleanup.
+
+    A row is created every time :func:`src.maintenance.artifacts.clean`
+    or :func:`purge_quarantine` actually runs (manual ``autoapply
+    cleanup`` invocations share this table with the
+    ``maintenance.cache_eviction`` Beat task). Individual file
+    decisions live in :class:`CleanupItem` keyed by ``run_id``.
+    """
+
+    __tablename__ = "cleanup_runs"
+    __table_args__ = (
+        Index("ix_cleanup_runs_tenant_started", "tenant_id", "started_at"),
+        Index("ix_cleanup_runs_mode", "mode"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    # ``scan`` (dry-run) / ``clean`` (move to quarantine) /
+    # ``purge_quarantine`` (permanent delete from quarantine) /
+    # ``restore`` (move back from quarantine).
+    mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Where the run was kicked off from -- ``scheduled`` (Beat),
+    # ``manual`` (CLI), ``api`` (web). Recorded for forensic value
+    # only; the rules are identical regardless of trigger.
+    trigger: Mapped[str] = mapped_column(String(20), nullable=False, default="manual")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    scanned_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    protected_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    quarantined_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    purged_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    restored_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    bytes_reclaimed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    summary: Mapped[dict | None] = mapped_column(JSONB)
+
+
+class CleanupItem(Base):
+    """Phase 18.4: per-path audit row tied to a :class:`CleanupRun`.
+
+    One row per candidate file the run looked at. ``action`` is the
+    decision (``skip_protected`` / ``skip_recent`` / ``quarantined`` /
+    ``purged`` / ``restored`` / ``error``) and ``category`` is the
+    classifier verdict (``protected`` / ``tmp`` / ``orphan_output`` /
+    ``screenshot`` / ``version_log`` / ``unknown``). Storing both lets
+    a future "show me what cleanup did last Tuesday" UI walk the rows
+    without re-running the classifier.
+    """
+
+    __tablename__ = "cleanup_items"
+    __table_args__ = (
+        Index("ix_cleanup_items_run", "run_id"),
+        Index("ix_cleanup_items_action_category", "action", "category"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("cleanup_runs.id", name="fk_cleanup_items_run", ondelete="CASCADE"),
+        nullable=False,
+    )
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    quarantine_path: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String(40), nullable=False)
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    size_bytes: Mapped[int | None] = mapped_column(Integer)
+    mtime: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    quarantined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

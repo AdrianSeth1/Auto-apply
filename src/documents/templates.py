@@ -60,6 +60,28 @@ class TemplateCapacity(BaseModel):
     max_skill_lines: int | None = None
 
 
+class TemplateStyleOverride(BaseModel):
+    """User-editable font/spacing tweaks for one named DOCX style.
+
+    Stored on the manifest so the Template Editor can let users adjust
+    font family, size, bold, line spacing, and paragraph spacing
+    without leaving the browser. Re-applied to ``template.docx`` on
+    every manifest save so the next render picks up the new look.
+    """
+
+    font: str | None = None
+    size: int | None = None
+    bold: bool | None = None
+    italic: bool | None = None
+    line_spacing: float | None = None
+    # Paragraph spacing in points -- "space before this paragraph" and
+    # "space after this paragraph". Pre-render defaults vary per style
+    # (e.g. Resume.SectionHeading has space_before=6pt to give air
+    # between sections); overrides let users tighten or relax that.
+    space_before_pt: float | None = None
+    space_after_pt: float | None = None
+
+
 LatexEngine = Literal["pdflatex", "xelatex", "lualatex"]
 
 
@@ -150,6 +172,23 @@ class TemplateManifest(BaseModel):
     # Phase 15.3: LaTeX-specific options live in their own sub-model
     # so DOCX-only packages do not need to know about it.
     latex: LatexConfig | None = None
+    # User-editable per-style font/size/spacing overrides for DOCX
+    # templates. Keys are the same logical style keys used in
+    # ``styles`` (e.g. "name", "normal", "body"). Empty for LaTeX
+    # templates -- the .tex source owns the look there.
+    style_overrides: dict[str, TemplateStyleOverride] = Field(default_factory=dict)
+    # Target page count: fitting expands content to roughly fill this,
+    # and the post-render validator errors when the produced PDF
+    # differs. Kept in sync with ``capacity.max_pages`` so older code
+    # paths reading the legacy field still get the right value.
+    target_pages: int = 1
+    # Filename pattern preset used when materializing artifacts. See
+    # :data:`src.documents.file_manager.FILENAME_PATTERNS` for the
+    # supported values.
+    filename_pattern: str = "company_role_date"
+    # Label substituted into ``type_custom_seq`` pattern; ignored by
+    # other patterns.
+    filename_custom_label: str = ""
 
 
 class TemplatePackage(BaseModel):
@@ -334,11 +373,19 @@ def get_template_package_detail(
     """Return template metadata plus editable content for text-based templates."""
     package = load_template_package(document_type, template_id, template_root=template_root)
     serialized = serialize_template_package(package)
+    is_latex = package.manifest.renderer == "latex"
     serialized["content"] = (
-        package.template_path.read_text(encoding="utf-8")
-        if package.manifest.renderer == "latex"
-        else None
+        package.template_path.read_text(encoding="utf-8") if is_latex else None
     )
+    if not is_latex:
+        serialized["editable_styles"] = editable_style_options(document_type)
+        serialized["style_overrides"] = {
+            key: override.model_dump(mode="json")
+            for key, override in package.manifest.style_overrides.items()
+        }
+    else:
+        serialized["editable_styles"] = []
+        serialized["style_overrides"] = {}
     return serialized
 
 
@@ -371,6 +418,255 @@ def delete_template_package(
     shutil.rmtree(package_dir)
 
 
+# Default font/size/bold/line-spacing values applied by
+# ``_ensure_default_styles`` -- mirrored here so the UI can show what a
+# style looks like out of the box (and so an empty override falls back
+# to a predictable baseline rather than whatever happens to be in the
+# DOCX). Keep in sync with ``_ensure_default_styles``.
+# Keep this table in lockstep with ``_ensure_default_styles`` so what the
+# UI shows as the baseline is exactly what the renderer applies when no
+# override is present. Adding a property here also surfaces it in the
+# Template Editor's per-style row -- the frontend reads
+# ``supports_line_spacing`` etc. to decide which inputs to render.
+_EDITABLE_RESUME_STYLES: tuple[tuple[str, str, dict], ...] = (
+    (
+        "name",
+        "Resume.Name",
+        {"font": "Arial", "size": 16, "bold": True, "line_spacing": 1.0,
+         "space_before_pt": 0, "space_after_pt": 0},
+    ),
+    (
+        "contact",
+        "Resume.Contact",
+        {"font": "Arial", "size": 9, "bold": False, "line_spacing": 1.0,
+         "space_before_pt": 0, "space_after_pt": 0},
+    ),
+    (
+        "section_heading",
+        "Resume.SectionHeading",
+        {"font": "Arial", "size": 11, "bold": True, "line_spacing": 1.0,
+         "space_before_pt": 6, "space_after_pt": 0},
+    ),
+    (
+        "item_title",
+        "Resume.ItemTitle",
+        {"font": "Arial", "size": 10, "bold": True, "line_spacing": 1.0,
+         "space_before_pt": 0, "space_after_pt": 0},
+    ),
+    (
+        "item_subtitle",
+        "Resume.ItemSubtitle",
+        {"font": "Arial", "size": 9, "bold": False, "line_spacing": 1.0,
+         "space_before_pt": 0, "space_after_pt": 0},
+    ),
+    (
+        "item_meta",
+        "Resume.ItemMeta",
+        {"font": "Arial", "size": 9, "bold": False, "line_spacing": 1.0,
+         "space_before_pt": 0, "space_after_pt": 0},
+    ),
+    (
+        "normal",
+        "Resume.Normal",
+        {"font": "Arial", "size": 9, "bold": False, "line_spacing": 1.0,
+         "space_before_pt": 0, "space_after_pt": 0},
+    ),
+    (
+        "bullet",
+        "Resume.Bullet",
+        {"font": "Arial", "size": 9, "bold": False, "line_spacing": 1.0,
+         "space_before_pt": 0, "space_after_pt": 0},
+    ),
+    (
+        "skill_category",
+        "Resume.SkillCategory",
+        {"font": "Arial", "size": 9, "bold": True, "line_spacing": 1.0,
+         "space_before_pt": 0, "space_after_pt": 0},
+    ),
+    (
+        "skill_line",
+        "Resume.SkillLine",
+        {"font": "Arial", "size": 9, "bold": False, "line_spacing": 1.0,
+         "space_before_pt": 0, "space_after_pt": 0},
+    ),
+)
+
+_EDITABLE_COVER_LETTER_STYLES: tuple[tuple[str, str, dict], ...] = (
+    (
+        "header",
+        "CoverLetter.Header",
+        {"font": "Times New Roman", "size": 11, "bold": True, "line_spacing": 1.0,
+         "space_before_pt": 0, "space_after_pt": 0},
+    ),
+    (
+        "date",
+        "CoverLetter.Date",
+        {"font": "Times New Roman", "size": 11, "bold": False, "line_spacing": 1.0,
+         "space_before_pt": 10, "space_after_pt": 0},
+    ),
+    (
+        "recipient",
+        "CoverLetter.Recipient",
+        {"font": "Times New Roman", "size": 11, "bold": False, "line_spacing": 1.0,
+         "space_before_pt": 0, "space_after_pt": 10},
+    ),
+    (
+        "body",
+        "CoverLetter.Body",
+        {"font": "Times New Roman", "size": 11, "bold": False, "line_spacing": 1.05,
+         "space_before_pt": 0, "space_after_pt": 7},
+    ),
+    (
+        "signature",
+        "CoverLetter.Signature",
+        {"font": "Times New Roman", "size": 11, "bold": False, "line_spacing": 1.0,
+         "space_before_pt": 7, "space_after_pt": 0},
+    ),
+)
+
+
+def editable_style_options(document_type: DocumentType) -> list[dict]:
+    """Return the UI-friendly editable-style table for a document type.
+
+    Used by the Template Editor to render a row per named DOCX style.
+    Each entry carries the manifest ``styles`` key, the Word style name
+    it maps to, a human label, and the baseline defaults the editor
+    uses when ``style_overrides`` is empty. Every style row supports
+    every property in the override schema -- the renderer simply leaves
+    a property at the default when the user did not touch it.
+    """
+    if document_type not in DEFAULT_TEMPLATE_IDS:
+        raise ValueError("Unsupported template document type.")
+    table = (
+        _EDITABLE_RESUME_STYLES
+        if document_type == "resume"
+        else _EDITABLE_COVER_LETTER_STYLES
+    )
+    return [
+        {
+            "key": key,
+            "style_name": style_name,
+            "label": key.replace("_", " ").title(),
+            "defaults": dict(defaults),
+            # Kept for back-compat with the older Vue template, but all
+            # editable styles now support line_spacing + paragraph spacing.
+            "supports_line_spacing": True,
+            "supports_paragraph_spacing": True,
+            "supports_italic": True,
+        }
+        for key, style_name, defaults in table
+    ]
+
+
+def update_docx_template_styles(
+    *,
+    document_type: DocumentType,
+    template_id: str,
+    overrides: dict[str, dict],
+    template_name: str | None = None,
+    description: str | None = None,
+    target_pages: int | None = None,
+    filename_pattern: str | None = None,
+    filename_custom_label: str | None = None,
+    template_root: Path = TEMPLATE_ROOT,
+) -> dict:
+    """Apply user-edited font/size/spacing overrides to a DOCX template.
+
+    Persists the overrides on ``manifest.json`` and re-applies them to
+    ``template.docx`` so the next render uses the new look. Refuses
+    LaTeX templates -- their look lives in the .tex source which the
+    text editor already exposes.
+    """
+    package = load_template_package(document_type, template_id, template_root=template_root)
+    if package.manifest.renderer != "docx":
+        raise ValueError("Only DOCX templates accept style overrides.")
+
+    editable_keys = {entry["key"] for entry in editable_style_options(document_type)}
+    parsed_overrides: dict[str, TemplateStyleOverride] = {}
+    for key, payload in (overrides or {}).items():
+        if key not in editable_keys:
+            raise ValueError(f"Unknown style key: {key}")
+        if not isinstance(payload, dict):
+            raise ValueError(f"Invalid override payload for {key}.")
+        parsed_overrides[key] = TemplateStyleOverride.model_validate(payload)
+
+    manifest_updates: dict = {
+        "style_overrides": parsed_overrides,
+        "name": (
+            template_name.strip() if template_name is not None else package.manifest.name
+        ),
+        "description": (
+            description.strip() if description is not None else package.manifest.description
+        ),
+    }
+    _apply_template_settings_updates(
+        manifest_updates,
+        package.manifest,
+        target_pages=target_pages,
+        filename_pattern=filename_pattern,
+        filename_custom_label=filename_custom_label,
+    )
+    manifest = package.manifest.model_copy(update=manifest_updates)
+    package.manifest_path.write_text(
+        json.dumps(manifest.model_dump(mode="json"), indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    doc = Document(str(package.template_path))
+    _ensure_default_styles(doc, document_type)
+    _apply_style_overrides(doc, document_type, parsed_overrides)
+    doc.save(str(package.template_path))
+
+    package = load_template_package(document_type, template_id, template_root=template_root)
+    _write_sample_assets(package)
+    return get_template_package_detail(
+        document_type, template_id, template_root=template_root
+    )
+
+
+def _apply_style_overrides(
+    doc: Document,
+    document_type: DocumentType,
+    overrides: dict[str, TemplateStyleOverride],
+) -> None:
+    """Layer user font/size/bold/italic/line-spacing/paragraph-spacing
+    overrides on top of the existing style definitions left by
+    ``_ensure_default_styles``.
+
+    Touches only the fields the user actually set so layout-affecting
+    properties not exposed in the UI (tab stops, base style) survive.
+    """
+    table = (
+        _EDITABLE_RESUME_STYLES
+        if document_type == "resume"
+        else _EDITABLE_COVER_LETTER_STYLES
+    )
+    style_name_by_key = {key: style_name for key, style_name, _ in table}
+    for key, override in overrides.items():
+        style_name = style_name_by_key.get(key)
+        if style_name is None:
+            continue
+        try:
+            style = doc.styles[style_name]
+        except KeyError:
+            continue
+        if override.font:
+            style.font.name = override.font
+        if override.size:
+            style.font.size = Pt(override.size)
+        if override.bold is not None:
+            style.font.bold = override.bold
+        if override.italic is not None:
+            style.font.italic = override.italic
+        if override.line_spacing is not None:
+            style.paragraph_format.line_spacing = override.line_spacing
+        if override.space_before_pt is not None:
+            style.paragraph_format.space_before = Pt(override.space_before_pt)
+        if override.space_after_pt is not None:
+            style.paragraph_format.space_after = Pt(override.space_after_pt)
+
+
 def update_latex_template_package(
     *,
     document_type: DocumentType,
@@ -378,6 +674,9 @@ def update_latex_template_package(
     content: str,
     template_name: str | None = None,
     description: str | None = None,
+    target_pages: int | None = None,
+    filename_pattern: str | None = None,
+    filename_custom_label: str | None = None,
     template_root: Path = TEMPLATE_ROOT,
 ) -> dict:
     """Update editable LaTeX template content and metadata."""
@@ -388,14 +687,20 @@ def update_latex_template_package(
         raise ValueError("Template content is required.")
 
     package.template_path.write_text(content, encoding="utf-8", newline="\n")
-    manifest = package.manifest.model_copy(
-        update={
-            "name": template_name.strip() if template_name is not None else package.manifest.name,
-            "description": (
-                description.strip() if description is not None else package.manifest.description
-            ),
-        }
+    manifest_updates: dict = {
+        "name": template_name.strip() if template_name is not None else package.manifest.name,
+        "description": (
+            description.strip() if description is not None else package.manifest.description
+        ),
+    }
+    _apply_template_settings_updates(
+        manifest_updates,
+        package.manifest,
+        target_pages=target_pages,
+        filename_pattern=filename_pattern,
+        filename_custom_label=filename_custom_label,
     )
+    manifest = package.manifest.model_copy(update=manifest_updates)
     package.manifest_path.write_text(
         json.dumps(manifest.model_dump(mode="json"), indent=2) + "\n",
         encoding="utf-8",
@@ -403,7 +708,41 @@ def update_latex_template_package(
     )
     package = load_template_package(document_type, template_id, template_root=template_root)
     _write_sample_assets(package)
-    return serialize_template_package(package)
+    return get_template_package_detail(
+        document_type, template_id, template_root=template_root
+    )
+
+
+def _apply_template_settings_updates(
+    updates: dict,
+    manifest: TemplateManifest,
+    *,
+    target_pages: int | None,
+    filename_pattern: str | None,
+    filename_custom_label: str | None,
+) -> None:
+    """Apply optional template-level settings into a model_copy(update=...) dict.
+
+    Keeps capacity.max_pages in lockstep with target_pages so legacy
+    callers (e.g. validators using capacity.max_pages directly) keep
+    working without a migration.
+    """
+    from src.documents.file_manager import FILENAME_PATTERNS  # noqa: PLC0415
+
+    if target_pages is not None:
+        if target_pages < 1 or target_pages > 5:
+            raise ValueError("target_pages must be between 1 and 5.")
+        updates["target_pages"] = target_pages
+        new_capacity = manifest.capacity.model_copy(update={"max_pages": target_pages})
+        updates["capacity"] = new_capacity
+    if filename_pattern is not None:
+        if filename_pattern not in FILENAME_PATTERNS:
+            raise ValueError(
+                f"filename_pattern must be one of {FILENAME_PATTERNS}."
+            )
+        updates["filename_pattern"] = filename_pattern
+    if filename_custom_label is not None:
+        updates["filename_custom_label"] = filename_custom_label.strip()
 
 
 def _save_uploaded_docx_template_package(
@@ -731,7 +1070,7 @@ Sincerely,\\
 
 def _create_default_resume_template(path: Path) -> None:
     doc = Document()
-    _set_page(doc)
+    _set_page(doc, "resume")
     _ensure_default_styles(doc, "resume")
     doc.add_paragraph("{{full_name}}", style="Resume.Name")
     doc.add_paragraph("{{contact}}", style="Resume.Contact")
@@ -743,12 +1082,15 @@ def _create_default_resume_template(path: Path) -> None:
 
 def _create_default_cover_letter_template(path: Path) -> None:
     doc = Document()
-    _set_page(doc)
+    _set_page(doc, "cover_letter")
     _ensure_default_styles(doc, "cover_letter")
     doc.add_paragraph("{{applicant.name}}", style="CoverLetter.Header")
     doc.add_paragraph("{{applicant.contact}}", style="CoverLetter.Header")
+    doc.add_paragraph("{{date}}", style="CoverLetter.Date")
     doc.add_paragraph("{{recipient.company}}", style="CoverLetter.Recipient")
+    doc.add_paragraph("Dear Hiring Manager,", style="CoverLetter.Body")
     doc.add_paragraph("{{cover_letter.body}}", style="CoverLetter.Body")
+    doc.add_paragraph("Sincerely,", style="CoverLetter.Signature")
     doc.add_paragraph("{{signature}}", style="CoverLetter.Signature")
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(path))
@@ -763,6 +1105,8 @@ def _ensure_style(
     base: str | None = None,
     space_before: int = 0,
     space_after: int = 0,
+    font: str = "Arial",
+    line_spacing: float | None = None,
     right_tab: bool = False,
 ) -> None:
     try:
@@ -774,11 +1118,13 @@ def _ensure_style(
             style.base_style = doc.styles[base]
         except KeyError:
             pass
-    style.font.name = "Arial"
+    style.font.name = font
     style.font.size = Pt(size)
     style.font.bold = bold
     style.paragraph_format.space_before = Pt(space_before)
     style.paragraph_format.space_after = Pt(space_after)
+    if line_spacing is not None:
+        style.paragraph_format.line_spacing = line_spacing
     if right_tab:
         style.paragraph_format.tab_stops.add_tab_stop(Inches(7.0), WD_TAB_ALIGNMENT.RIGHT)
 
@@ -796,15 +1142,24 @@ def _ensure_default_styles(doc: Document, document_type: str) -> None:
         _ensure_style(doc, "Resume.SkillLine", size=9)
         _ensure_style(doc, "Resume.Bullet", size=9, base="List Bullet")
         return
-    _ensure_style(doc, "CoverLetter.Header", size=10)
-    _ensure_style(doc, "CoverLetter.Date", size=10)
-    _ensure_style(doc, "CoverLetter.Recipient", size=10)
-    _ensure_style(doc, "CoverLetter.Body", size=10, space_after=8)
-    _ensure_style(doc, "CoverLetter.Signature", size=10, space_before=8)
+    cover_font = "Times New Roman"
+    _ensure_style(doc, "CoverLetter.Header", size=11, bold=True, font=cover_font)
+    _ensure_style(doc, "CoverLetter.Date", size=11, font=cover_font, space_before=10)
+    _ensure_style(doc, "CoverLetter.Recipient", size=11, font=cover_font, space_after=10)
+    _ensure_style(
+        doc, "CoverLetter.Body", size=11, font=cover_font, space_after=7, line_spacing=1.05
+    )
+    _ensure_style(doc, "CoverLetter.Signature", size=11, font=cover_font, space_before=7)
 
 
-def _set_page(doc: Document) -> None:
+def _set_page(doc: Document, document_type: str = "resume") -> None:
     section = doc.sections[0]
+    if document_type == "cover_letter":
+        section.top_margin = Inches(0.85)
+        section.bottom_margin = Inches(0.85)
+        section.left_margin = Inches(0.85)
+        section.right_margin = Inches(0.85)
+        return
     section.top_margin = Inches(0.55)
     section.bottom_margin = Inches(0.55)
     section.left_margin = Inches(0.6)
@@ -845,8 +1200,27 @@ def _ensure_required_markers(package: TemplatePackage) -> None:
         doc = Document(str(package.template_path))
     except Exception:
         return
+    if (
+        package.document_type == "cover_letter"
+        and package.template_id == DEFAULT_TEMPLATE_IDS["cover_letter"]
+    ):
+        _set_page(doc, "cover_letter")
+        _ensure_default_styles(doc, "cover_letter")
+    # Re-apply persisted user style edits after the idempotent default
+    # pass above. Without this, ``ensure_template_package`` (called from
+    # every regenerate path) would silently undo the Template Library's
+    # Edit Styles changes on the next render.
+    if package.manifest.style_overrides:
+        _apply_style_overrides(
+            doc, package.document_type, package.manifest.style_overrides
+        )
     text = _document_text(doc)
     changed = False
+    if (
+        package.document_type == "cover_letter"
+        and package.template_id == DEFAULT_TEMPLATE_IDS["cover_letter"]
+    ):
+        changed = True
     if package.document_type == "resume":
         style = package.manifest.styles.get("normal")
     else:
@@ -855,8 +1229,100 @@ def _ensure_required_markers(package: TemplatePackage) -> None:
         if marker and marker not in text:
             _add_marker_paragraph(doc, marker, style)
             changed = True
+    if package.document_type == "cover_letter":
+        changed = _ensure_cover_letter_frame(doc, package.manifest.styles) or changed
     if changed:
         doc.save(str(package.template_path))
+
+
+def _ensure_cover_letter_frame(doc: Document, styles: dict[str, str]) -> bool:
+    """Repair old default cover-letter templates that only had body text.
+
+    Existing ``classic_v1`` packages were created before the renderer
+    guaranteed a salutation and sign-off. Add those lines around the
+    body marker so generated DOCX/PDF artifacts are complete letters.
+    """
+    paragraphs = list(doc.paragraphs)
+    texts = [(paragraph.text or "").strip() for paragraph in paragraphs]
+    marker_idx = next(
+        (idx for idx, text in enumerate(texts) if "{{cover_letter.body}}" in text),
+        None,
+    )
+    if marker_idx is None:
+        return False
+
+    changed = False
+    has_date = any("{{date}}" in text for text in texts)
+    if not has_date:
+        insert_before = paragraphs[marker_idx]
+        company_idx = next(
+            (idx for idx, text in enumerate(texts) if "{{recipient.company}}" in text),
+            None,
+        )
+        if company_idx is not None:
+            insert_before = paragraphs[company_idx]
+        _insert_template_paragraph_before(
+            insert_before,
+            "{{date}}",
+            styles.get("date"),
+        )
+        changed = True
+
+    has_salutation = any(text.lower().startswith("dear ") for text in texts)
+    if not has_salutation:
+        _insert_template_paragraph_before(
+            paragraphs[marker_idx],
+            "Dear Hiring Manager,",
+            styles.get("body"),
+        )
+        changed = True
+
+    texts = [(paragraph.text or "").strip().lower().rstrip(",") for paragraph in doc.paragraphs]
+    has_closing = any(text in {"sincerely", "best regards", "kind regards"} for text in texts)
+    if not has_closing:
+        marker_para = next(
+            paragraph
+            for paragraph in doc.paragraphs
+            if "{{cover_letter.body}}" in (paragraph.text or "")
+        )
+        _insert_template_paragraph_after(
+            marker_para,
+            "Sincerely,",
+            styles.get("signature"),
+        )
+        changed = True
+    return changed
+
+
+def _insert_template_paragraph_before(paragraph, text: str, style: str | None) -> None:
+    from docx.oxml import OxmlElement  # noqa: PLC0415
+    from docx.text.paragraph import Paragraph  # noqa: PLC0415
+
+    new_element = OxmlElement("w:p")
+    paragraph._p.addprevious(new_element)
+    new_paragraph = Paragraph(new_element, paragraph._parent)
+    _style_template_paragraph(new_paragraph, style)
+    new_paragraph.add_run(text)
+
+
+def _insert_template_paragraph_after(paragraph, text: str, style: str | None) -> None:
+    from docx.oxml import OxmlElement  # noqa: PLC0415
+    from docx.text.paragraph import Paragraph  # noqa: PLC0415
+
+    new_element = OxmlElement("w:p")
+    paragraph._p.addnext(new_element)
+    new_paragraph = Paragraph(new_element, paragraph._parent)
+    _style_template_paragraph(new_paragraph, style)
+    new_paragraph.add_run(text)
+
+
+def _style_template_paragraph(paragraph, style: str | None) -> None:
+    if not style:
+        return
+    try:
+        paragraph.style = style
+    except KeyError:
+        pass
 
 
 def _add_marker_paragraph(doc: Document, marker: str, style: str | None) -> None:

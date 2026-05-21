@@ -86,6 +86,38 @@ def find_by_celery_id(session: Session, celery_task_id: str) -> TaskRecord | Non
     ).scalar_one_or_none()
 
 
+def _coerce_result_for_storage(retval: Any) -> dict[str, Any] | None:
+    """Best-effort coercion of a task return value into JSONB-safe dict.
+
+    The audit row stores the worker's return value in
+    ``TaskRecord.result`` (Phase 18.2). The column is JSONB and the
+    surrounding API serialises it to JSON, so we coerce to a plain
+    dict and stringify anything that doesn't round-trip through
+    ``json.dumps`` naturally. Non-dict returns are wrapped in
+    ``{"value": ...}`` so callers can always treat ``result`` as a
+    mapping. ``None`` stays ``None``."""
+    import json
+    import logging
+
+    logger_local = logging.getLogger(__name__)
+
+    if retval is None:
+        return None
+    if not isinstance(retval, dict):
+        retval = {"value": retval}
+    try:
+        json.dumps(retval)
+        return retval
+    except (TypeError, ValueError):
+        try:
+            return json.loads(json.dumps(retval, default=str))
+        except Exception:  # noqa: BLE001
+            logger_local.warning(
+                "task result was not JSON-serialisable; storing repr fallback"
+            )
+            return {"value": repr(retval)[:4000]}
+
+
 def find_succeeded_for_idempotency(
     session: Session, tenant_id: str, idempotency_key: str
 ) -> TaskRecord | None:
@@ -267,8 +299,12 @@ def task_prerun_handler(
             return
         row.status = "running"
         row.attempts = (row.attempts or 0) + 1
+        attempt_start = _utcnow()
         if row.started_at is None:
-            row.started_at = _utcnow()
+            row.started_at = attempt_start
+        # Phase 18.3: mirror the most-recent attempt start so the
+        # operator can spot "stuck running" rows at a glance.
+        row.last_attempted_at = attempt_start
 
     _safe_update(task_id or "", _mutate)
 
@@ -277,14 +313,25 @@ def task_prerun_handler(
 def task_postrun_handler(
     task_id: str | None = None,
     state: str | None = None,
+    retval: Any = None,
     **_kwargs: Any,
 ) -> None:  # pragma: no cover
     if state == "SUCCESS":
+        # Phase 18.2: persist the worker's return value so the async
+        # API (``GET /api/tasks/{id}``) can hand it back to callers.
+        # The value lands as JSONB so payload shape stays flexible;
+        # non-serialisable returns degrade to ``None`` rather than
+        # blocking the lifecycle transition.
+        coerced_result = _coerce_result_for_storage(retval)
+
         def _mutate(row: TaskRecord) -> None:
             # Do not flip out of waiting_human even if Celery thinks
             # the task "succeeded" because the AutoApplyTask base
-            # class returned needs_human (Phase 14.4 contract).
+            # class returned needs_human (Phase 14.4 contract). We
+            # still persist ``result`` so the operator can see the
+            # gate payload alongside the row.
             if row.status == "waiting_human":
+                row.result = coerced_result
                 return
             # P2 second-round codex fix: a row already cancelled by
             # the operator (cancel route or CLI) is terminal. Even if
@@ -298,6 +345,7 @@ def task_postrun_handler(
             row.status = "succeeded"
             row.finished_at = _utcnow()
             row.last_error = None
+            row.result = coerced_result
 
         _safe_update(task_id or "", _mutate)
 
@@ -306,18 +354,28 @@ def task_postrun_handler(
 def task_failure_handler(
     task_id: str | None = None,
     exception: BaseException | None = None,
+    sender: Any = None,
     **_kwargs: Any,
 ) -> None:  # pragma: no cover
     summary = repr(exception)[:1000] if exception else None
+    # Phase 18.3: if the task exhausted ``max_retries``, the row goes
+    # to ``dead_lettered`` instead of ``failed``. ``sender`` is the
+    # Celery Task instance; we read its ``max_retries`` to compare
+    # against the row's attempt count.
+    max_retries = getattr(sender, "max_retries", None)
 
     def _mutate(row: TaskRecord) -> None:
-        # cancelled is terminal -- a failed body after the operator
-        # cancelled does not promote the row out of cancelled (see
-        # task_postrun_handler for the full rationale).
         if row.status == "cancelled":
             return
-        row.status = "failed"
-        row.finished_at = _utcnow()
+        now = _utcnow()
+        attempts = row.attempts or 0
+        if max_retries is not None and attempts > max_retries:
+            row.status = "dead_lettered"
+            row.dead_lettered_at = now
+            row.dlq_reason = (summary or "max_retries exhausted")[:1000]
+        else:
+            row.status = "failed"
+        row.finished_at = now
         if summary:
             row.last_error = summary
 

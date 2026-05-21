@@ -144,7 +144,6 @@ const materialOptions = [
   { type: "resume_docx", label: "Resume DOCX" },
   { type: "cover_letter_pdf", label: "Cover Letter PDF" },
   { type: "cover_letter_docx", label: "Cover Letter DOCX" },
-  { type: "cover_letter_txt", label: "Cover Letter TXT" },
 ]
 
 const materialModal = reactive({
@@ -611,6 +610,11 @@ function applyFilterProfile(profile) {
 }
 
 async function applyToJob(job) {
+  if (isApplied(job)) {
+    goToReview(job)
+    return
+  }
+
   state.applyState[job.id] = { loading: true, message: "" }
 
   try {
@@ -622,16 +626,41 @@ async function applyToJob(job) {
       applicationId: response.application_id || "",
       result: response.result || null,
     }
+    if (response.status === "review" || response.status === "submitted") {
+      job.raw_data = {
+        ...(job.raw_data || {}),
+        autoapply_status: response.status,
+        autoapply_application_id: response.application_id || "",
+      }
+    }
   } catch (error) {
     state.applyState[job.id] = { loading: false, message: error.message, status: "error" }
   }
+}
+
+function isApplied(job) {
+  const status = state.applyState[job.id]?.status || job.raw_data?.autoapply_status
+  return status === "review" || status === "submitted"
+}
+
+function applyButtonLabel(job) {
+  if (state.applyState[job.id]?.loading) return "Applying…"
+  return isApplied(job) ? "Review" : "AutoApply"
+}
+
+function goToReview(job) {
+  const applicationId =
+    state.applyState[job.id]?.applicationId || job.raw_data?.autoapply_application_id || ""
+  router.push({
+    path: "/review",
+    query: applicationId ? { application: applicationId } : {},
+  })
 }
 
 function materialOptionLabel(materialType) {
   return (
     materialOptions.find((option) => option.type === materialType)?.label ||
     {
-      cover_letter_txt: "Cover Letter TXT",
       resume_pdf: "Resume PDF",
       resume_docx: "Resume DOCX",
       cover_letter_pdf: "Cover Letter PDF",
@@ -1487,6 +1516,10 @@ function buildPageButtons(total, current) {
                   <span v-if="chipLabel(job.location_type)" class="chip">{{ chipLabel(job.location_type) }}</span>
                   <span v-if="job.raw_data?.search_mode === 'public_guest'" class="chip subtle">Guest</span>
                   <span v-if="job.raw_data?.disqualified" class="chip danger">Review</span>
+                  <span v-if="isApplied(job)" class="chip success">
+                    <CheckCircle2 class="mr-1 h-3.5 w-3.5" />
+                    Applied
+                  </span>
                   <button
                     v-if="job.raw_data?.disqualified"
                     type="button"
@@ -1542,7 +1575,7 @@ function buildPageButtons(total, current) {
                   :disabled="state.applyState[job.id]?.loading || !job.application_url"
                 >
                   <Loader2 v-if="state.applyState[job.id]?.loading" class="h-3.5 w-3.5 animate-spin" />
-                  {{ state.applyState[job.id]?.loading ? "Applying…" : "AutoApply" }}
+                  {{ applyButtonLabel(job) }}
                 </button>
               </div>
             </div>
@@ -1552,7 +1585,7 @@ function buildPageButtons(total, current) {
               <RouterLink
                 v-if="state.applyState[job.id]?.applicationId"
                 class="link-inline"
-                :to="`/applications?status=REVIEW_REQUIRED&application=${state.applyState[job.id].applicationId}`"
+                :to="`/review?application=${state.applyState[job.id].applicationId}`"
               >
                 Open review
               </RouterLink>

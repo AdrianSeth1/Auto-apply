@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import mimetypes
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 WEB_DIR = Path(__file__).parent
+PROJECT_ROOT = WEB_DIR.parents[1]
 FRONTEND_DIST_DIR = WEB_DIR / "static" / "spa"
 FRONTEND_ASSETS_DIR = FRONTEND_DIST_DIR / "assets"
 FRONTEND_INDEX = FRONTEND_DIST_DIR / "index.html"
+FRONTEND_FAVICON = PROJECT_ROOT / "frontend" / "favicon.svg"
+FRONTEND_LOGO = PROJECT_ROOT / "docs" / "logo" / "AutoApply_logo.svg"
 
 
 def _frontend_html() -> FileResponse | HTMLResponse:
@@ -72,6 +76,8 @@ async def _lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
+    mimetypes.add_type("image/svg+xml", ".svg")
+
     app = FastAPI(
         title="AutoApply",
         description="AI-powered job application automation web API",
@@ -98,6 +104,22 @@ def create_app() -> FastAPI:
     @app.get("/", include_in_schema=False)
     async def spa_root():
         return _frontend_html()
+
+    @app.get("/favicon.svg", include_in_schema=False)
+    async def favicon_svg():
+        if FRONTEND_FAVICON.exists():
+            return FileResponse(FRONTEND_FAVICON, media_type="image/svg+xml")
+        return HTMLResponse("Not Found", status_code=404)
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon_ico():
+        return RedirectResponse("/favicon.svg")
+
+    @app.get("/logo.svg", include_in_schema=False)
+    async def logo_svg():
+        if FRONTEND_LOGO.exists():
+            return FileResponse(FRONTEND_LOGO, media_type="image/svg+xml")
+        return HTMLResponse("Not Found", status_code=404)
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_routes(full_path: str):

@@ -12,8 +12,8 @@ Surface area (kept narrow on purpose):
 * :func:`get_entry` -- entry detail (used by 17.3 popover).
 * :func:`approve` / :func:`reject` -- single-item transitions.
 * :func:`bulk_approve` / :func:`bulk_reject` -- Phase 17.4.
-* :func:`mark_submitted` -- called by ``application.submit`` task
-  after the Phase 17.5 pre-submit gate passes.
+* :func:`mark_submitted` -- reserved for the real submit worker after
+  external ATS click-submit succeeds.
 * :func:`mark_stale` -- called by the pre-submit gate when the JD
   snapshot is too stale to submit against.
 * :func:`refresh_stale` -- transitions ``stale -> pending`` after an

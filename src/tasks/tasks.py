@@ -1,4 +1,4 @@
-"""Phase 14.6: AutoApply task kinds.
+"""Phase 14.6 task kinds, Phase 18.1 worker stub closeout.
 
 Each task is a thin Celery wrapper over an existing application-layer
 function. The wrapper's job is to:
@@ -10,11 +10,34 @@ function. The wrapper's job is to:
 * Short-circuit via the idempotency key when applicable.
 * Let Celery own retry / backoff / ack-late semantics.
 
-Six concrete task names land here. Three Beat-driven helpers
-(``daily_fanout``, ``jd_health_check``, ``cache_eviction``,
-``linkedin_cookie_refresh``, ``status_sync``, ``gate_expire_sweep``)
-also live here because the 14.5 schedule references them by string;
-they are stubs today and grow real bodies in Phase 17.
+Phase 18.1 replaced the fake-success ``status="scheduled"`` /
+``status="stubbed"`` returns with real call chains:
+
+* ``materials.generate`` invokes :func:`generate_material_for_job`
+  for each requested document_type, atomically writes artifacts via
+  :mod:`src.maintenance.atomic`, and stitches the result back onto
+  the Application + ReviewQueueEntry rows.
+* ``jobs.enrich`` calls :func:`enrich_posting` against the latest
+  stored snapshot so the Phase 19 content-changed listener chain
+  fires when the underlying content has drifted.
+* ``application.prepare`` walks the Application row's invariants and
+  links the latest materials onto the matching ReviewQueueEntry.
+* ``application.fill`` / ``maintenance.status_sync`` return explicit
+  ``status="not_implemented"`` because their browser / outcome-sync
+  implementations sit behind a later phase; the names + payload
+  contract stay so callers don't get a registration error.
+* ``application.submit`` runs the Phase 17.5 pre-submit gate
+  (``should_refresh(..., "before_submit")``) and parks the row at
+  ``waiting_human`` via :mod:`src.tasks.gate` if the gate refuses,
+  or returns ``not_implemented`` on the actual click-submit step.
+* ``maintenance.gate_expire_sweep`` flips ``gate_queue`` rows past
+  their TTL to ``expired``.
+* ``maintenance.jd_health_check`` walks ``job_postings`` and applies
+  :func:`project_by_time` so freshness decays without a manual nudge.
+* ``maintenance.linkedin_cookie_refresh`` probes the LinkedIn
+  session and records pass/fail in the audit row.
+* ``maintenance.cache_eviction`` (Phase 18.4) drives the artifact
+  cleanup + quarantine pipeline.
 """
 
 from __future__ import annotations
@@ -45,6 +68,18 @@ class JobEnrichPayload(BaseModel):
 
 class MaterialsGeneratePayload(BaseModel):
     job_id: str
+    # Phase 18.2: optional inline job dict for callers (e.g. the
+    # JobsView "Generate" button) that have search-result data but
+    # haven't persisted a JobPosting yet. When present, the task body
+    # uses this payload directly and skips the JobPosting / JobSnapshot
+    # lookup. ``job_id`` is still required so the audit row carries a
+    # stable identifier.
+    job: dict[str, Any] | None = None
+    # Phase 18.2: when set, the regenerate flow asks the worker to
+    # write the produced artifact paths back onto the Application
+    # row so the kanban / outcome views see the new draft without
+    # the operator having to re-poll.
+    application_id: str | None = None
     profile_id: str | None = None
     template_id: str | None = None
     document_types: list[str] = Field(default_factory=lambda: ["resume", "cover_letter"])
@@ -78,14 +113,10 @@ class ApplicationSubmitPayload(BaseModel):
 
 
 class OrchestrationPlanRunPayload(BaseModel):
-    """Phase 17.1 plan_run task payload.
+    """Phase 17.1 plan_run task payload."""
 
-    Mirrors :func:`src.orchestration.plan_run.run_plan` -- all
-    fields default-friendly so a Beat tick can fire the task with no
-    kwargs and still produce a useful run for the active applicant
-    profile.
-    """
-
+    automation_plan_id: str | None = None
+    automation_plan_name: str | None = None
     profile_id: str = "default"
     search_profile_id: str | None = None
     top_n: int = 10
@@ -132,28 +163,59 @@ def _coerce(model_cls: type[BaseModel], data: dict[str, Any] | None) -> BaseMode
 def search_refresh(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
     """Re-scrape a saved search and update its ``search_results``
     links. Phase 13.4's ``cached_search`` does the real work; this is
-    just the bounded entry point for the worker."""
+    the bounded entry point for the worker.
+
+    Phase 18.1: the saved-search fan-out and the per-source refresh
+    plumbing live in :mod:`src.application.jobs.search_jobs` / Phase
+    13.4 ``cached_search``. Manual ``search.refresh`` enqueues from
+    the operator UI / CLI still expect the task to exist; the actual
+    per-saved-search invocation lands here once the saved-search
+    registry surfaces query-id → kwargs (the rest of the Phase 18
+    surface drives the orchestrator, which already calls search_jobs
+    directly).
+    """
     args = _coerce(SearchRefreshPayload, payload)
-    # Phase 17 wires this into application/jobs.search_jobs. For now
-    # we record what we *would* do so the trace + audit trail is
-    # complete and CLI smoke tests can drive the task end to end.
     logger.info(
-        "search.refresh queued query_id=%s source=%s", args.query_id, args.source
+        "search.refresh query_id=%s source=%s max_pages=%s",
+        args.query_id,
+        args.source,
+        args.max_pages,
     )
     return {
         "task": "search.refresh",
         "query_id": args.query_id,
         "source": args.source,
-        "status": "scheduled",
+        "max_pages": args.max_pages,
+        "status": "not_implemented",
+        "detail": (
+            "search.refresh body is registered for Phase 18 audit + "
+            "Beat compatibility. The actual saved-search refresh "
+            "currently runs through orchestration.plan_run / direct "
+            "search_jobs CLI calls; lighting up a query_id->kwargs "
+            "registry path is tracked by the Phase 18+ saved-search "
+            "follow-up."
+        ),
     }
 
 
 @celery_app.task(name="search.daily_fanout", base=AutoApplyTask, bind=True)
 def search_daily_fanout(self: AutoApplyTask) -> dict[str, Any]:
     """Beat-driven saved-search fan-out. Phase 17 explodes this into
-    per-source ``search.refresh`` children."""
+    per-source ``search.refresh`` children once the saved-search
+    registry surfaces source / kwargs lookup; until then the Beat
+    tick is a no-op marker that lands an audit row + trace so the
+    operator can confirm Beat is running."""
     logger.info("search.daily_fanout tick")
-    return {"task": "search.daily_fanout", "status": "stubbed"}
+    return {
+        "task": "search.daily_fanout",
+        "status": "not_implemented",
+        "detail": (
+            "search.daily_fanout is currently a no-op tick. "
+            "orchestration.plan_run owns the production search path; "
+            "this slot exists so a future saved-search registry can "
+            "hook in without changing the Beat schedule."
+        ),
+    }
 
 
 # ---- Tasks: orchestration --------------------------------------------
@@ -161,16 +223,7 @@ def search_daily_fanout(self: AutoApplyTask) -> dict[str, Any]:
 
 @celery_app.task(name="notifications.morning_digest", base=AutoApplyTask, bind=True)
 def notifications_morning_digest(self: AutoApplyTask) -> dict[str, Any]:
-    """Phase 17.6: 08:00 morning digest tick.
-
-    Computes the structured digest payload + (Phase 17.6 hook) emits
-    it. The desktop-notification side is out of scope here; what the
-    Beat tick produces is the same JSON the dashboard banner pulls
-    via ``GET /api/digest``, so the only effect of this task in this
-    sub-phase is to log the headline + return the payload (lands on
-    the audit row so an operator can grep the task history for
-    historical digests).
-    """
+    """Phase 17.6: 08:00 morning digest tick."""
     import asyncio  # noqa: PLC0415
 
     from src.core.database import get_session_factory  # noqa: PLC0415
@@ -191,21 +244,8 @@ def notifications_morning_digest(self: AutoApplyTask) -> dict[str, Any]:
 def orchestration_plan_run(
     self: AutoApplyTask, **payload: Any
 ) -> dict[str, Any]:
-    """Phase 17.1: top-level batch application automation task.
-
-    Search → score → enqueue ``materials.generate`` +
-    ``application.prepare`` for the top-N qualified jobs. Never enqueues
-    ``application.submit`` -- approval happens in the Phase 17.3 review
-    queue UI and the Phase 17.5 pre-submit gate runs at that point.
-
-    The real work lives in :func:`src.orchestration.plan_run.run_plan`;
-    this wrapper is the AutoApplyTask boundary: payload validation +
-    tenant context (via ``before_start``) + the return dict that lands
-    on the audit row.
-    """
+    """Phase 17.1: top-level batch application automation task."""
     args = _coerce(OrchestrationPlanRunPayload, payload)
-    # Lazy import + asyncio.run keep this task body light when the
-    # orchestrator package isn't loaded (e.g. in unrelated tests).
     import asyncio  # noqa: PLC0415
 
     from src.orchestration.plan_run import run_plan  # noqa: PLC0415
@@ -243,11 +283,6 @@ def orchestration_plan_run(
             cover_letter_patch_allow_add_remove_bullets=args.cover_letter_patch_allow_add_remove_bullets,
         )
     )
-    # Phase 17.6: persist the report under data/plan_runs/ so the
-    # 08:00 morning digest can aggregate over it. Failure here is
-    # non-fatal -- a missing report file just means the digest will
-    # under-count for this run, which is preferable to the task
-    # itself failing and re-queueing.
     try:
         from src.orchestration.digest import persist_plan_run_report  # noqa: PLC0415
 
@@ -263,14 +298,90 @@ def orchestration_plan_run(
 
 @celery_app.task(name="jobs.enrich", base=AutoApplyTask, bind=True)
 def jobs_enrich(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
-    """Re-scrape a single posting and content-hash it. Real work lives
-    in :func:`src.jobs.enrich.enrich_posting`."""
+    """Re-feed the latest stored snapshot through :func:`enrich_posting`.
+
+    Phase 18.1: the task previously logged + returned ``scheduled``.
+    It now does a real call into ``src.jobs.enrich.enrich_posting``
+    against the latest JobSnapshot for ``posting_id``. The function
+    is idempotent (same content -> existing snapshot, content
+    changed -> new snapshot + ``ContentChangedEvent``), which is
+    what the Phase 19 ``posting.tag`` listener chain needs.
+
+    The task body intentionally does NOT do a network scrape -- the
+    LinkedIn / ATS scrape paths require Playwright and are owned by
+    the orchestrator's search step. ``jobs.enrich`` is the
+    refresh-and-snapshot primitive that runs after fresh content is
+    available.
+    """
     args = _coerce(JobEnrichPayload, payload)
-    logger.info("jobs.enrich queued posting_id=%s", args.posting_id)
+    logger.info("jobs.enrich posting_id=%s", args.posting_id)
+
+    from uuid import UUID  # noqa: PLC0415
+
+    from src.core.database import get_session_factory  # noqa: PLC0415
+    from src.core.models import JobPosting, JobSnapshot  # noqa: PLC0415
+    from src.jobs.enrich import enrich_posting  # noqa: PLC0415
+    from src.jobs.store import JobIndexStore  # noqa: PLC0415
+
+    try:
+        posting_uuid = UUID(args.posting_id)
+    except ValueError:
+        return {
+            "task": "jobs.enrich",
+            "posting_id": args.posting_id,
+            "status": "invalid_posting_id",
+        }
+
+    factory = get_session_factory()
+    with factory() as session, session.begin():
+        posting = session.get(JobPosting, posting_uuid)
+        if posting is None:
+            return {
+                "task": "jobs.enrich",
+                "posting_id": args.posting_id,
+                "status": "posting_not_found",
+            }
+        if posting.latest_snapshot_id is None:
+            return {
+                "task": "jobs.enrich",
+                "posting_id": args.posting_id,
+                "status": "no_snapshot",
+                "detail": "Posting has no JobSnapshot yet; a search/scrape must run first.",
+            }
+        snapshot = session.get(JobSnapshot, posting.latest_snapshot_id)
+        if snapshot is None:
+            return {
+                "task": "jobs.enrich",
+                "posting_id": args.posting_id,
+                "status": "snapshot_missing",
+            }
+
+        content = {
+            "title": snapshot.title,
+            "location": snapshot.location,
+            "employment_type": snapshot.employment_type,
+            "seniority": snapshot.seniority,
+            "description": snapshot.description,
+            "requirements": snapshot.requirements,
+            "application_url": snapshot.application_url,
+            "raw_data": snapshot.raw_data,
+        }
+        store = JobIndexStore(session)
+        result = enrich_posting(
+            store=store,
+            source=posting.source,
+            source_id=posting.source_id,
+            company=posting.company,
+            content=content,
+        )
+
     return {
         "task": "jobs.enrich",
-        "posting_id": args.posting_id,
-        "status": "scheduled",
+        "posting_id": str(posting_uuid),
+        "snapshot_id": str(result.snapshot_id),
+        "content_changed": result.content_changed,
+        "state": result.state,
+        "status": "ok",
     }
 
 
@@ -279,21 +390,260 @@ def jobs_enrich(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
 
 @celery_app.task(name="materials.generate", base=AutoApplyTask, bind=True)
 def materials_generate(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
-    """Generate resume + cover letter against a JD snapshot. Real
-    generators live in :mod:`src.generation`. Phase 15 will swap the
-    body for the agent-driven path; the task name + payload contract
-    stays the same."""
+    """Phase 18.1: full materials generation from a JobPosting.
+
+    Loads the posting + its latest snapshot, builds the web-shaped
+    job payload that :func:`generate_material_for_job` expects, then
+    runs generation for each requested document_type. Artifact paths
+    are written onto any matching :class:`ReviewQueueEntry` (so the
+    review-queue kanban can render the produced files) and the
+    structured artifact map is returned to the audit row.
+
+    Phase 18.2 will surface the same map through
+    ``GET /api/tasks/{task_id}`` via :class:`TaskRecord.result`; the
+    18.1 body just returns the shape so that wire-up is a pure read.
+    """
     args = _coerce(MaterialsGeneratePayload, payload)
     logger.info(
-        "materials.generate queued job_id=%s document_types=%s",
+        "materials.generate job_id=%s document_types=%s",
         args.job_id,
         args.document_types,
     )
+
+    import asyncio  # noqa: PLC0415
+    from uuid import UUID  # noqa: PLC0415
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from src.application.jobs import generate_material_for_job  # noqa: PLC0415
+    from src.core.database import get_session_factory  # noqa: PLC0415
+    from src.core.models import (  # noqa: PLC0415
+        JobPosting,
+        JobSnapshot,
+        ReviewQueueEntry,
+    )
+    from src.tasks.context import current_tenant_id  # noqa: PLC0415
+
+    tenant_id = current_tenant_id() or "default"
+
+    # Phase 18.2: if the caller passed an inline ``job`` dict (the
+    # JobsView "Generate" button hands us scraped data that isn't
+    # persisted yet), use it verbatim. Otherwise fall through to the
+    # JobPosting + JobSnapshot lookup.
+    job_payload: dict[str, Any] = {}
+    job_uuid = None
+    if isinstance(args.job, dict) and args.job:
+        job_payload = dict(args.job)
+    else:
+        try:
+            job_uuid = UUID(args.job_id)
+        except ValueError:
+            return {
+                "task": "materials.generate",
+                "job_id": args.job_id,
+                "document_types": args.document_types,
+                "status": "invalid_job_id",
+            }
+
+        factory = get_session_factory()
+        with factory() as session:
+            posting = session.get(JobPosting, job_uuid)
+            if posting is None:
+                return {
+                    "task": "materials.generate",
+                    "job_id": args.job_id,
+                    "document_types": args.document_types,
+                    "status": "posting_not_found",
+                }
+            snapshot = (
+                session.get(JobSnapshot, posting.latest_snapshot_id)
+                if posting.latest_snapshot_id
+                else None
+            )
+            job_payload = {
+                "id": str(posting.id),
+                "source": posting.source,
+                "source_id": posting.source_id,
+                "company": posting.company,
+                "title": snapshot.title if snapshot else "",
+                "location": snapshot.location if snapshot else None,
+                "employment_type": snapshot.employment_type if snapshot else None,
+                "seniority": snapshot.seniority if snapshot else None,
+                "description": snapshot.description if snapshot else None,
+                "requirements": snapshot.requirements if snapshot else None,
+                "application_url": snapshot.application_url if snapshot else None,
+                "ats_type": posting.source,
+                "raw_data": snapshot.raw_data if snapshot else None,
+            }
+
+    if not job_payload.get("title"):
+        return {
+            "task": "materials.generate",
+            "job_id": args.job_id,
+            "document_types": args.document_types,
+            "status": "no_snapshot",
+            "detail": "Posting has no JobSnapshot; run jobs.enrich first.",
+        }
+
+    document_types = args.document_types or ["resume", "cover_letter"]
+    artifacts: dict[str, dict[str, Any]] = {}
+    errors: list[dict[str, str]] = []
+
+    def _resolve_overrides(doc_type: str) -> tuple[str, dict[str, Any]] | None:
+        if doc_type.startswith("resume"):
+            return "resume_docx", {
+                "strategy": args.resume_strategy,
+                "template_id": args.resume_template_id,
+                "source_document_id": args.resume_source_document_id,
+                "patch_aggressiveness": args.resume_patch_aggressiveness,
+                "patch_allow_reorder_sections": args.resume_patch_allow_reorder_sections,
+                "patch_allow_add_remove_bullets": args.resume_patch_allow_add_remove_bullets,
+            }
+        if doc_type.startswith("cover_letter"):
+            return "cover_letter_docx", {
+                "strategy": args.cover_letter_strategy,
+                "template_id": args.cover_letter_template_id,
+                "source_document_id": args.cover_letter_source_document_id,
+                "patch_aggressiveness": args.cover_letter_patch_aggressiveness,
+                "patch_allow_reorder_sections": args.cover_letter_patch_allow_reorder_sections,
+                "patch_allow_add_remove_bullets": args.cover_letter_patch_allow_add_remove_bullets,
+            }
+        return None
+
+    async def _generate_one(doc_type: str) -> tuple[str, dict[str, Any] | None, dict | None]:
+        resolved = _resolve_overrides(doc_type)
+        if resolved is None:
+            return doc_type, None, {
+                "document_type": doc_type,
+                "error": "unknown_document_type",
+            }
+        material_type, overrides = resolved
+        try:
+            result = await generate_material_for_job(
+                job_payload=job_payload,
+                material_type=material_type,
+                use_llm=False,
+                template_id=overrides["template_id"],
+                profile_id=args.profile_id,
+                strategy=overrides["strategy"],
+                source_document_id=overrides["source_document_id"],
+                patch_aggressiveness=overrides["patch_aggressiveness"],
+                patch_allow_reorder_sections=overrides["patch_allow_reorder_sections"],
+                patch_allow_add_remove_bullets=overrides["patch_allow_add_remove_bullets"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("materials.generate: %s failed", material_type)
+            return doc_type, None, {"document_type": doc_type, "error": str(exc)}
+
+        if not result.get("ok"):
+            return doc_type, None, {
+                "document_type": doc_type,
+                "error": result.get("error") or "generation_failed",
+                "error_code": result.get("error_code") or "generation_failed",
+            }
+        artifact = result.get("artifact") or {}
+        return (
+            doc_type,
+            {
+                "material_type": result.get("material_type"),
+                "path": artifact.get("path"),
+                "filename": artifact.get("filename"),
+                "artifacts": result.get("artifacts"),
+                "strategy": result.get("strategy"),
+                "strategy_notes": result.get("strategy_notes"),
+            },
+            None,
+        )
+
+    # Phase 18.5: resume + cover-letter for a single job run
+    # concurrently via asyncio.gather. The two generators share the
+    # same job + profile data but produce independent artifacts, so
+    # the only contention is on the global / per-provider LLM gate
+    # in :mod:`src.utils.parallelism` (which is the whole point of
+    # running them in parallel -- the gate caps provider load while
+    # local concurrency cuts wall-clock).
+    async def _generate_all() -> None:
+        results = await asyncio.gather(
+            *[_generate_one(dt) for dt in document_types]
+        )
+        for doc_type, artifact_payload, error in results:
+            if error is not None:
+                errors.append(error)
+            if artifact_payload is not None:
+                artifacts[doc_type] = artifact_payload
+
+    asyncio.run(_generate_all())
+
+    # Link the produced files onto any pending review-queue entry for
+    # this posting so the kanban can preview them without re-running
+    # the generator. We pick the most recent pending entry by
+    # created_at; there should normally be only one because of the
+    # partial-unique-pending index.
+    resume_path = (
+        artifacts.get("resume", {}).get("path")
+        or artifacts.get("resume_docx", {}).get("path")
+    )
+    cover_letter_path = (
+        artifacts.get("cover_letter", {}).get("path")
+        or artifacts.get("cover_letter_docx", {}).get("path")
+    )
+    application_updates: dict[str, str] = {}
+    if artifacts and job_uuid is not None:
+        try:
+            factory = get_session_factory()
+            with factory() as session, session.begin():
+                stmt = (
+                    select(ReviewQueueEntry)
+                    .where(ReviewQueueEntry.tenant_id == tenant_id)
+                    .where(ReviewQueueEntry.job_id == job_uuid)
+                    .where(ReviewQueueEntry.status == "pending")
+                    .order_by(ReviewQueueEntry.created_at.desc())
+                    .limit(1)
+                )
+                row = session.execute(stmt).scalar_one_or_none()
+                if row is not None and resume_path:
+                    row.materials_path = resume_path
+        except Exception as exc:  # noqa: BLE001 -- never bounce a successful generation
+            logger.warning(
+                "materials.generate: linking artifacts to review entry failed: %s", exc
+            )
+
+    # Phase 18.2: when the regenerate flow named an application, write
+    # the new artifact paths back onto that row so the kanban + outcome
+    # views see the new draft. We keep this best-effort so a partial
+    # generation (resume succeeded, cover-letter failed) still updates
+    # what it can.
+    if args.application_id and artifacts:
+        try:
+            from src.core.models import Application  # noqa: PLC0415
+
+            app_uuid = UUID(args.application_id)
+            factory = get_session_factory()
+            with factory() as session, session.begin():
+                app_row = session.get(Application, app_uuid)
+                if app_row is not None:
+                    if resume_path:
+                        app_row.resume_version = resume_path
+                        application_updates["resume_version"] = resume_path
+                    if cover_letter_path:
+                        app_row.cover_letter_version = cover_letter_path
+                        application_updates["cover_letter_version"] = cover_letter_path
+        except (ValueError, Exception) as exc:  # noqa: BLE001
+            logger.warning(
+                "materials.generate: application writeback failed: %s", exc
+            )
+
     return {
         "task": "materials.generate",
         "job_id": args.job_id,
-        "document_types": args.document_types,
-        "status": "scheduled",
+        "document_types": document_types,
+        "artifacts": artifacts,
+        "errors": errors,
+        "application_id": args.application_id,
+        "application_updates": application_updates,
+        "resume_path": resume_path,
+        "cover_letter_path": cover_letter_path,
+        "status": "ok" if not errors else ("partial" if artifacts else "failed"),
     }
 
 
@@ -302,40 +652,198 @@ def materials_generate(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
 
 @celery_app.task(name="application.prepare", base=AutoApplyTask, bind=True)
 def application_prepare(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
+    """Phase 18.1: bind the latest materials onto the matching
+    ReviewQueueEntry so the review kanban can render previews.
+
+    The orchestrator already persists pending review entries; this
+    task body is the seam between the materials task's artifacts and
+    the kanban row. ``application_id`` is interpreted as either an
+    ``applications.id`` or a ``job_postings.id`` (the orchestrator
+    uses the latter today; tracking-app callers use the former).
+    Missing rows are treated as a non-error ``not_found`` so a stale
+    Beat enqueue doesn't bounce the queue.
+    """
     args = _coerce(ApplicationPreparePayload, payload)
-    logger.info("application.prepare queued application_id=%s", args.application_id)
+    logger.info("application.prepare application_id=%s", args.application_id)
+
+    from uuid import UUID  # noqa: PLC0415
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from src.core.database import get_session_factory  # noqa: PLC0415
+    from src.core.models import Application, ReviewQueueEntry  # noqa: PLC0415
+    from src.tasks.context import current_tenant_id  # noqa: PLC0415
+
+    tenant_id = current_tenant_id() or "default"
+
+    try:
+        target_uuid = UUID(args.application_id)
+    except ValueError:
+        return {
+            "task": "application.prepare",
+            "application_id": args.application_id,
+            "status": "invalid_id",
+        }
+
+    factory = get_session_factory()
+    with factory() as session, session.begin():
+        app = session.get(Application, target_uuid)
+        entry_q = (
+            select(ReviewQueueEntry)
+            .where(ReviewQueueEntry.tenant_id == tenant_id)
+            .where(ReviewQueueEntry.status == "pending")
+        )
+        if app is not None:
+            entry_q = entry_q.where(ReviewQueueEntry.job_id == app.job_id)
+        else:
+            entry_q = entry_q.where(ReviewQueueEntry.job_id == target_uuid)
+        entry = session.execute(
+            entry_q.order_by(ReviewQueueEntry.created_at.desc()).limit(1)
+        ).scalar_one_or_none()
+
+        if app is not None and entry is not None:
+            preferred = app.resume_version or app.cover_letter_version
+            if preferred and not entry.materials_path:
+                entry.materials_path = preferred
+
     return {
         "task": "application.prepare",
-        "application_id": args.application_id,
-        "status": "scheduled",
+        "application_id": str(target_uuid),
+        "review_entry_id": str(entry.id) if entry is not None else None,
+        "application_status": app.status if app is not None else None,
+        "materials_path": entry.materials_path if entry is not None else None,
+        "status": "ok",
     }
 
 
 @celery_app.task(name="application.fill", base=AutoApplyTask, bind=True)
 def application_fill(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
+    """Phase 18.1: the form-fill leg of the application pipeline.
+
+    The actual browser automation lives in :mod:`src.execution` and is
+    driven from the agent loop, not from this Celery task -- we keep
+    the task registered (so the Phase 14 audit + Phase 17.5 gate
+    plumbing both work) but explicitly return ``not_implemented`` so
+    the wire isn't a fake success.
+    """
     args = _coerce(ApplicationFillPayload, payload)
-    logger.info("application.fill queued application_id=%s", args.application_id)
+    logger.info("application.fill application_id=%s", args.application_id)
     return {
         "task": "application.fill",
         "application_id": args.application_id,
-        "status": "scheduled",
+        "status": "not_implemented",
+        "detail": (
+            "Browser-driven form-fill is owned by src.execution.form_filler "
+            "and the agent loop; the task is registered for audit + Beat "
+            "wiring but the worker body does not execute Playwright."
+        ),
     }
 
 
 @celery_app.task(name="application.submit", base=AutoApplyTask, bind=True)
 def application_submit(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
-    """The most dangerous task: actually clicks Submit. The Phase 17
-    pre-submit gate (``should_refresh(job, "before_submit")``) blocks
-    or refreshes if the JD snapshot is > 6h stale or the job is
-    ``expired``. For now the body is a stub; Phase 17 owns the gate
-    wiring."""
+    """Phase 18.1: pre-submit gate + ``waiting_human`` parking.
+
+    The pre-submit gate (Phase 17.5) re-runs
+    ``should_refresh(..., "before_submit")``. If the JD is stale,
+    the task opens a HITL :class:`GateRequest` and parks the task at
+    ``waiting_human`` so the operator decides whether to refresh and
+    proceed. If the gate passes we still return ``not_implemented``
+    on the actual click-submit step (that's the browser path owned by
+    :mod:`src.execution`); the audit row records the gate verdict and
+    artifacts so the failure mode is "explicit hand-off", not
+    "submitted silently".
+    """
     args = _coerce(ApplicationSubmitPayload, payload)
-    logger.info("application.submit queued application_id=%s", args.application_id)
-    return {
-        "task": "application.submit",
-        "application_id": args.application_id,
-        "status": "scheduled",
-    }
+    logger.info("application.submit application_id=%s", args.application_id)
+
+    from uuid import UUID  # noqa: PLC0415
+
+    from src.core.database import get_session_factory  # noqa: PLC0415
+    from src.core.models import Application, JobPosting, TaskRecord  # noqa: PLC0415
+    from src.jobs.freshness import should_refresh  # noqa: PLC0415
+    from src.tasks import gate  # noqa: PLC0415
+    from src.tasks.context import current_tenant_id  # noqa: PLC0415
+
+    tenant_id = current_tenant_id() or "default"
+
+    try:
+        application_uuid = UUID(args.application_id)
+    except ValueError:
+        return {
+            "task": "application.submit",
+            "application_id": args.application_id,
+            "status": "invalid_id",
+        }
+
+    factory = get_session_factory()
+    with factory() as session, session.begin():
+        app = session.get(Application, application_uuid)
+        if app is None:
+            return {
+                "task": "application.submit",
+                "application_id": str(application_uuid),
+                "status": "application_not_found",
+            }
+        posting = session.get(JobPosting, app.job_id) if app.job_id else None
+        verdict = (
+            should_refresh(posting, context="before_submit")
+            if posting is not None
+            else None
+        )
+
+        gate_id: str | None = None
+        if verdict is not None and verdict.should_refresh:
+            # Park at waiting_human via the Postgres-backed gate. The
+            # operator's approve/reject re-enqueues a follow-up task
+            # under the same idempotency key (Phase 14.4 contract).
+            celery_task_id = getattr(self.request, "id", None)
+            task_row = None
+            if celery_task_id:
+                from src.tasks.audit import find_by_celery_id  # noqa: PLC0415
+
+                task_row = find_by_celery_id(session, celery_task_id)
+            gate_row = gate.open_request(
+                session,
+                kind="application.submit:freshness",
+                summary=(
+                    f"Pre-submit gate refused for application {application_uuid}: "
+                    f"{verdict.reason}"
+                ),
+                payload={
+                    "application_id": str(application_uuid),
+                    "reason": verdict.reason,
+                    "age_hours": verdict.age_hours,
+                    "budget_hours": verdict.budget_hours,
+                },
+                task_id=task_row.id if isinstance(task_row, TaskRecord) else None,
+                tenant_id=tenant_id,
+            )
+            gate_id = str(gate_row.id)
+
+        return {
+            "task": "application.submit",
+            "application_id": str(application_uuid),
+            "gate": {
+                "should_refresh": bool(verdict.should_refresh) if verdict else None,
+                "reason": verdict.reason if verdict else None,
+                "age_hours": verdict.age_hours if verdict else None,
+                "budget_hours": verdict.budget_hours if verdict else None,
+            }
+            if verdict is not None
+            else None,
+            "gate_request_id": gate_id,
+            "status": "waiting_human" if gate_id else "not_implemented",
+            "detail": (
+                "Pre-submit gate parked the task at waiting_human; "
+                "approval/rejection enqueues a follow-up."
+            )
+            if gate_id
+            else (
+                "Pre-submit gate cleared; click-submit is owned by "
+                "src.execution and not invoked from this worker body."
+            ),
+        }
 
 
 # ---- Tasks: maintenance ----------------------------------------------
@@ -343,35 +851,207 @@ def application_submit(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
 
 @celery_app.task(name="maintenance.status_sync", base=AutoApplyTask, bind=True)
 def status_sync(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
+    """Phase 18.1: outcome-sync is not yet wired. We accept the
+    payload (so audit-rows stay consistent) and return
+    ``not_implemented`` instead of pretending. The Beat schedule no
+    longer references this task; the entry survives so manual CLI
+    invocations don't get a registration error."""
     args = _coerce(StatusSyncPayload, payload)
-    logger.info("status_sync sweep app_id=%s", args.application_id)
-    return {"task": "maintenance.status_sync", "status": "stubbed"}
+    logger.info("status_sync application_id=%s", args.application_id)
+    return {
+        "task": "maintenance.status_sync",
+        "application_id": args.application_id,
+        "status": "not_implemented",
+        "detail": (
+            "Application-outcome sync should start with supported ATS / "
+            "application-portal polling, then add HR-reply / rejection-email "
+            "ingestion. Task body is intentionally a no-op so manual "
+            "invocations audit honestly."
+        ),
+    }
 
 
 @celery_app.task(name="maintenance.jd_health_check", base=AutoApplyTask, bind=True)
 def jd_health_check(self: AutoApplyTask) -> dict[str, Any]:
-    """Drives the Phase 13.3 freshness state machine's time decay."""
-    logger.info("jd_health_check tick")
-    return {"task": "maintenance.jd_health_check", "status": "stubbed"}
+    """Phase 18.1: drive the Phase 13.3 freshness state machine's
+    time decay.
+
+    Walks every non-terminal ``JobPosting``, applies
+    :func:`project_by_time`, and writes the projected state back if
+    it differs. The query is bounded -- ``new`` / ``expired`` /
+    ``archived`` don't decay further, and ``last_checked_at IS NULL``
+    rows are skipped.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from src.core.database import get_session_factory  # noqa: PLC0415
+    from src.core.models import JobPosting  # noqa: PLC0415
+    from src.jobs.state import project_by_time  # noqa: PLC0415
+    from src.tasks.context import current_tenant_id  # noqa: PLC0415
+
+    tenant_id = current_tenant_id() or "default"
+    now = datetime.now(UTC)
+    transitions: dict[str, int] = {}
+    examined = 0
+
+    factory = get_session_factory()
+    with factory() as session, session.begin():
+        stmt = (
+            select(JobPosting)
+            .where(JobPosting.tenant_id == tenant_id)
+            .where(JobPosting.state.in_(("active", "stale", "unknown")))
+        )
+        for posting in session.execute(stmt).scalars():
+            examined += 1
+            verdict = project_by_time(
+                posting.state,
+                last_checked_at=posting.last_checked_at,
+                now=now,
+            )
+            if verdict.state != posting.state:
+                transitions[f"{posting.state}->{verdict.state}"] = (
+                    transitions.get(f"{posting.state}->{verdict.state}", 0) + 1
+                )
+                posting.state = verdict.state
+
+    return {
+        "task": "maintenance.jd_health_check",
+        "examined": examined,
+        "transitions": transitions,
+        "status": "ok",
+    }
 
 
 @celery_app.task(name="maintenance.linkedin_cookie_refresh", base=AutoApplyTask, bind=True)
 def linkedin_cookie_refresh(self: AutoApplyTask) -> dict[str, Any]:
-    logger.info("linkedin_cookie_refresh tick")
-    return {"task": "maintenance.linkedin_cookie_refresh", "status": "stubbed"}
+    """Phase 18.1: probe the LinkedIn session and record pass/fail.
+
+    The probe is forced (bypasses the in-process cache) so the daily
+    Beat tick gives the operator an up-to-date signal. We don't try
+    to re-login here -- that requires user interaction. The session
+    object's own cache is updated by the probe so subsequent web-UI
+    mounts read the same fresh result.
+    """
+    import asyncio  # noqa: PLC0415
+
+    from src.intake.linkedin import get_linkedin_session_status  # noqa: PLC0415
+
+    try:
+        result = asyncio.run(get_linkedin_session_status(force_refresh=True))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("linkedin_cookie_refresh probe failed")
+        return {
+            "task": "maintenance.linkedin_cookie_refresh",
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    return {
+        "task": "maintenance.linkedin_cookie_refresh",
+        "authenticated": result.get("authenticated"),
+        "has_session_data": result.get("has_session_data"),
+        "message": result.get("message"),
+        "checked_at": result.get("checked_at"),
+        "status": "ok" if result.get("ok") else "error",
+    }
 
 
 @celery_app.task(name="maintenance.cache_eviction", base=AutoApplyTask, bind=True)
 def cache_eviction(self: AutoApplyTask) -> dict[str, Any]:
-    logger.info("cache_eviction tick")
-    return {"task": "maintenance.cache_eviction", "status": "stubbed"}
+    """Phase 18.4: drive the artifact cleanup + quarantine pipeline.
+
+    The Beat schedule fires this hourly on the :30 minute. Each tick:
+
+    1. Walks ``data/output`` and moves eligible orphan / tmp / failed
+       artifacts to ``data/quarantine/<run_id>/`` (writes a
+       :class:`CleanupRun` + per-file :class:`CleanupItem` audit).
+    2. Then purges any quarantine entries older than
+       ``cleanup.quarantine_days`` so the recovered-bytes accounting
+       stays accurate.
+
+    The name (``cache_eviction``) is preserved from Phase 14 for Beat
+    schedule continuity; the body is now the real cleanup, not a stub.
+    DB / FS errors are caught + recorded into the task return value so
+    the audit row can still surface them without bouncing the worker.
+    """
+    from src.core.database import get_session_factory  # noqa: PLC0415
+    from src.maintenance.artifacts import (  # noqa: PLC0415
+        clean,
+        purge_quarantine,
+    )
+    from src.tasks.context import current_tenant_id  # noqa: PLC0415
+
+    tenant_id = current_tenant_id() or "default"
+    factory = get_session_factory()
+
+    summaries: dict[str, dict[str, Any]] = {}
+    try:
+        with factory() as session, session.begin():
+            clean_report = clean(
+                session, tenant_id=tenant_id, trigger="scheduled"
+            )
+            summaries["clean"] = clean_report.to_summary()
+        with factory() as session, session.begin():
+            purge_report = purge_quarantine(
+                session, tenant_id=tenant_id, trigger="scheduled"
+            )
+            summaries["purge_quarantine"] = purge_report.to_summary()
+    except Exception as exc:  # noqa: BLE001 -- never crash the worker
+        logger.exception("cache_eviction: cleanup pipeline failed")
+        summaries["error"] = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "task": "maintenance.cache_eviction",
+        "status": "ok" if "error" not in summaries else "error",
+        "summaries": summaries,
+    }
 
 
 @celery_app.task(name="maintenance.gate_expire_sweep", base=AutoApplyTask, bind=True)
 def gate_expire_sweep(self: AutoApplyTask) -> dict[str, Any]:
-    """Flips ``gate_queue`` rows past their TTL to ``expired``."""
-    logger.info("gate_expire_sweep tick")
-    return {"task": "maintenance.gate_expire_sweep", "status": "stubbed"}
+    """Phase 18.1: flip ``gate_queue`` rows past their TTL to
+    ``expired``.
+
+    Walks pending rows whose ``ttl_seconds`` is set and whose
+    ``requested_at + ttl_seconds`` is in the past. Each transition
+    routes through :func:`src.tasks.gate.expire` so the linked
+    ``TaskRecord.last_error`` stays accurate.
+    """
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from src.core.database import get_session_factory  # noqa: PLC0415
+    from src.core.models import GateRequest  # noqa: PLC0415
+    from src.tasks import gate  # noqa: PLC0415
+    from src.tasks.context import current_tenant_id  # noqa: PLC0415
+
+    tenant_id = current_tenant_id() or "default"
+    now = datetime.now(UTC)
+    expired_ids: list[str] = []
+
+    factory = get_session_factory()
+    with factory() as session, session.begin():
+        stmt = (
+            select(GateRequest)
+            .where(GateRequest.tenant_id == tenant_id)
+            .where(GateRequest.status == gate.STATUS_PENDING)
+            .where(GateRequest.ttl_seconds.is_not(None))
+        )
+        for row in session.execute(stmt).scalars():
+            deadline = row.requested_at + timedelta(seconds=int(row.ttl_seconds or 0))
+            if deadline <= now:
+                gate.expire(session, row.id)
+                expired_ids.append(str(row.id))
+
+    return {
+        "task": "maintenance.gate_expire_sweep",
+        "expired": len(expired_ids),
+        "expired_ids": expired_ids,
+        "status": "ok",
+    }
 
 
 # ---- Helper: discovery list for CLI introspection -------------------

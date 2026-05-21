@@ -113,6 +113,10 @@ class TestDirectCLIInvocation:
         cmd = mock_run.call_args[0][0]
         assert cmd[0] == r"C:\Users\me\AppData\Roaming\npm\codex.cmd"
         assert "--output-last-message" in cmd
+        assert "--full-auto" not in cmd
+        assert "--sandbox" in cmd
+        assert "workspace-write" in cmd
+        assert "--skip-git-repo-check" in cmd
 
     def test_codex_returns_last_message_file_when_available(self):
         from src.utils.llm import codex_generate

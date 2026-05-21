@@ -5,6 +5,8 @@ Uses SQLAlchemy 2.0 async-compatible patterns with psycopg3.
 
 from __future__ import annotations
 
+import os
+
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -20,7 +22,16 @@ def get_engine(config: dict | None = None):
     if config is None:
         config = load_config()
     url = get_db_url(config)
-    return create_engine(url, echo=False, pool_pre_ping=True)
+    try:
+        connect_timeout = int(os.environ.get("AUTOAPPLY_DB_CONNECT_TIMEOUT", "5"))
+    except ValueError:
+        connect_timeout = 5
+    return create_engine(
+        url,
+        echo=False,
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": max(connect_timeout, 1)},
+    )
 
 
 def get_session_factory(config: dict | None = None) -> sessionmaker[Session]:

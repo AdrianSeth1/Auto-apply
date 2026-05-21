@@ -335,6 +335,396 @@ class TestResumeIR:
             "Built backend REST APIs with Python and FastAPI"
         )
 
+    def test_resume_fit_planner_drops_custom_sections_and_trims(self, tmp_path):
+        """The Fit Planner replaces per-bullet rewrites with a single LLM
+        decision: keep / drop / trim each section. This regression
+        verifies the apply step honours the plan -- it drops sections
+        marked ``keep: false`` (low relevance for the JD), trims to
+        ``max_items``, and never silently dumps required sections."""
+        from unittest.mock import patch
+
+        from src.documents.templates import default_manifest
+        from src.generation.ir import (
+            CustomSection,
+            CustomSectionEntry,
+            ResumeBullet,
+            ResumeDocument,
+            ResumeItem,
+        )
+        from src.generation.resume_builder import (
+            _apply_fit_plan,
+            _render_resume_to_target_pages,
+        )
+
+        manifest = default_manifest("resume")
+        document = ResumeDocument(
+            target_role="Backend Engineer",
+            company="Acme",
+            header={"full_name": "Jane Doe"},
+            experiences=[
+                ResumeItem(
+                    source_id="exp:0",
+                    source_type="experience",
+                    name="Acme",
+                    title="SWE",
+                    organization="Acme",
+                    bullets=[
+                        ResumeBullet(
+                            text=f"Bullet {i}",
+                            score=float(10 - i),
+                            source_id=f"e0:{i}",
+                            source_entity="Acme",
+                        )
+                        for i in range(4)
+                    ],
+                ),
+                ResumeItem(
+                    source_id="exp:1",
+                    source_type="experience",
+                    name="BetaCo",
+                    title="Intern",
+                    organization="BetaCo",
+                    bullets=[
+                        ResumeBullet(
+                            text="Older",
+                            score=2.0,
+                            source_id="e1:0",
+                            source_entity="BetaCo",
+                        )
+                    ],
+                ),
+            ],
+            custom_sections=[
+                CustomSection(
+                    title="INTERESTS",
+                    entries=[CustomSectionEntry(details="climbing, jazz piano")],
+                ),
+                CustomSection(
+                    title="VOLUNTEER EXPERIENCE",
+                    entries=[
+                        CustomSectionEntry(
+                            title="Tutor",
+                            organization="Library",
+                            bullets=["Mentored students"],
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        # Plan: drop INTERESTS (filler for a backend role), keep
+        # VOLUNTEER (relevant), trim experiences to 1 item.
+        plan = {
+            "reasoning": "INTERESTS is filler for a backend role.",
+            "sections": {
+                "experiences": {"keep": True, "max_items": 1, "bullets_mode": "keep"},
+                "projects": {"keep": True, "max_items": None, "bullets_mode": "keep"},
+                "education": {"keep": True, "max_items": None, "bullets_mode": "keep"},
+                "skills": {"keep": True, "max_items": None, "bullets_mode": "keep"},
+                "custom:0:INTERESTS": {"keep": False, "max_items": None, "bullets_mode": "keep"},
+                "custom:1:VOLUNTEER EXPERIENCE": {
+                    "keep": True,
+                    "max_items": None,
+                    "bullets_mode": "keep",
+                },
+            },
+        }
+
+        applied = _apply_fit_plan(document, plan)
+
+        # Experiences trimmed to 1; BetaCo (older, lower score) dropped first.
+        assert len(applied.experiences) == 1
+        assert applied.experiences[0].name == "Acme"
+
+        # INTERESTS dropped, VOLUNTEER survives.
+        titles = [s.title for s in applied.custom_sections]
+        assert "INTERESTS" not in titles
+        assert "VOLUNTEER EXPERIENCE" in titles
+
+        # Now exercise the full renderer loop: simulate "2 pages, drop
+        # INTERESTS -> 1 page" via mocks. Verifies the planner is called
+        # exactly once before convergence (not N times per bullet).
+        render_history: list[int] = []
+        planner_calls = 0
+
+        def fake_render(*, template_path, document, output_path, manifest):
+            render_history.append(len(document.custom_sections))
+            output_path.write_text("docx", encoding="utf-8")
+            return output_path
+
+        def fake_pdf(docx_path, pdf_output):
+            pdf_output.write_text("pdf", encoding="utf-8")
+            return pdf_output
+
+        def fake_page_count(path):
+            # Once INTERESTS is dropped, the page fits.
+            return 1 if render_history[-1] < 2 else 2
+
+        def fake_planner(**kwargs):
+            nonlocal planner_calls
+            planner_calls += 1
+            return plan
+
+        with (
+            patch("src.generation.resume_builder.build_resume_from_ir", side_effect=fake_render),
+            patch("src.generation.resume_builder.convert_to_pdf", side_effect=fake_pdf),
+            patch("src.documents.page_count.get_pdf_page_count", side_effect=fake_page_count),
+            patch(
+                "src.generation.resume_builder._generate_resume_fit_plan",
+                side_effect=fake_planner,
+            ),
+        ):
+            final_doc, *_ = _render_resume_to_target_pages(
+                resume_document=document,
+                template_path=tmp_path / "template.docx",
+                template_manifest=manifest,
+                docx_output=tmp_path / "out.docx",
+                pdf_output=tmp_path / "out.pdf",
+                target_pages=1,
+            )
+
+        assert planner_calls == 1, (
+            "Expected exactly one Fit Planner LLM call before convergence; "
+            f"got {planner_calls}. The point of the new architecture is to "
+            "avoid the N-LLM-calls-per-bullet pattern that blew past the "
+            "front-end's poll budget."
+        )
+        # The applied plan persisted: INTERESTS gone.
+        titles = [s.title for s in final_doc.custom_sections]
+        assert "INTERESTS" not in titles
+
+    def test_resume_calls_llm_to_shorten_bullets_before_dropping(self, tmp_path):
+        """页数超出时应该先让 LLM 把 bullet 改短，而不是直接删 bullet。"""
+        from unittest.mock import patch
+
+        from src.documents.templates import default_manifest
+        from src.generation.ir import ResumeBullet, ResumeDocument, ResumeItem
+        from src.generation.resume_builder import _render_resume_to_target_pages
+
+        manifest = default_manifest("resume")
+        document = ResumeDocument(
+            target_role="SWE",
+            company="Acme",
+            header={"full_name": "Jane Doe"},
+            experiences=[
+                ResumeItem(
+                    source_id="exp:0",
+                    source_type="experience",
+                    name="Acme",
+                    title="SWE",
+                    organization="Acme",
+                    bullets=[
+                        ResumeBullet(
+                            text=(
+                                "Built backend REST APIs for billing pipelines with Python "
+                                "and FastAPI"
+                            ),
+                            score=10.0,
+                            source_id="bullet:0",
+                            source_entity="Acme",
+                        ),
+                        ResumeBullet(
+                            text="Designed PostgreSQL schema and reduced query latency",
+                            score=8.0,
+                            source_id="bullet:1",
+                            source_entity="Acme",
+                        ),
+                    ],
+                )
+            ],
+        )
+
+        # First render: 2 pages (too long). The Fit Planner asks for
+        # shorter experience bullets; after that rewrite we report 1
+        # page. The test asserts the LLM rewriter was invoked instead
+        # of the old "just delete bullets" behaviour.
+        render_calls: list[int] = []
+        llm_calls: list[str] = []
+        planner_calls = 0
+
+        def fake_render(*, template_path, document, output_path, manifest):
+            words = sum(
+                len(b.text.split())
+                for item in document.experiences
+                for b in item.bullets
+            )
+            render_calls.append(words)
+            output_path.write_text("docx", encoding="utf-8")
+            return output_path
+
+        def fake_pdf(docx_path, pdf_output):
+            pdf_output.write_text("pdf", encoding="utf-8")
+            return pdf_output
+
+        def fake_page_count(path):
+            # After the LLM shrinks the words we say it fits one page.
+            return 1 if render_calls[-1] <= 10 else 2
+
+        def fake_planner(**kwargs):
+            nonlocal planner_calls
+            planner_calls += 1
+            return {
+                "reasoning": "Shorten experience bullets before trimming.",
+                "sections": {
+                    "experiences": {
+                        "keep": True,
+                        "max_items": None,
+                        "bullets_mode": "shorter",
+                    }
+                },
+            }
+
+        def fake_rewrite(bullet, *, direction, target_words):
+            llm_calls.append(direction)
+            return "Short"
+
+        with (
+            patch("src.generation.resume_builder.build_resume_from_ir", side_effect=fake_render),
+            patch("src.generation.resume_builder.convert_to_pdf", side_effect=fake_pdf),
+            patch("src.documents.page_count.get_pdf_page_count", side_effect=fake_page_count),
+            patch(
+                "src.generation.resume_builder._generate_resume_fit_plan",
+                side_effect=fake_planner,
+            ),
+            patch(
+                "src.generation.resume_builder._rewrite_bullet_for_length",
+                side_effect=fake_rewrite,
+            ),
+        ):
+            final_doc, *_ = _render_resume_to_target_pages(
+                resume_document=document,
+                template_path=tmp_path / "template.docx",
+                template_manifest=manifest,
+                docx_output=tmp_path / "out.docx",
+                pdf_output=tmp_path / "out.pdf",
+                target_pages=1,
+            )
+
+        assert planner_calls == 1
+        assert llm_calls == ["shorter", "shorter"], llm_calls
+        # Both bullets are still present -- LLM shortening, not deletion.
+        assert len(final_doc.experiences[0].bullets) == 2
+        assert all(b.text == "Short" for b in final_doc.experiences[0].bullets)
+
+    def test_resume_trims_bullets_when_rendered_pdf_overflows_page_target(self, tmp_path):
+        """渲染后页数超过 target 时，应该删除最弱 bullet 重渲染直到收敛。"""
+        from unittest.mock import patch
+
+        from src.documents.templates import default_manifest
+        from src.generation.ir import ResumeBullet, ResumeDocument, ResumeItem
+        from src.generation.resume_builder import _render_resume_to_target_pages
+
+        manifest = default_manifest("resume")
+        document = ResumeDocument(
+            target_role="SWE",
+            company="Acme",
+            header={"full_name": "Jane Doe"},
+            experiences=[
+                ResumeItem(
+                    source_id="exp:0",
+                    source_type="experience",
+                    name="Acme",
+                    title="SWE",
+                    organization="Acme",
+                    bullets=[
+                        ResumeBullet(
+                            text=f"Bullet {i}",
+                            score=float(10 - i),
+                            source_id=f"bullet:{i}",
+                            source_entity="Acme",
+                        )
+                        for i in range(6)
+                    ],
+                )
+            ],
+        )
+
+        # Simulate a renderer/converter that returns 2 pages until 3
+        # bullets have been removed, then 1 page. This is the page-count
+        # convergence the user complained about: pre-render fitting alone
+        # cannot tell that the chosen font/size actually overflows.
+        page_history: list[int] = []
+
+        def fake_render(*, template_path, document, output_path, manifest):
+            page_history.append(
+                sum(len(item.bullets) for item in document.experiences)
+            )
+            output_path.write_text("docx", encoding="utf-8")
+            return output_path
+
+        def fake_pdf(docx_path, pdf_output):
+            pdf_output.write_text("pdf", encoding="utf-8")
+            return pdf_output
+
+        def fake_page_count(path):
+            current_bullets = page_history[-1]
+            return 1 if current_bullets <= 3 else 2
+
+        with (
+            patch("src.generation.resume_builder.build_resume_from_ir", side_effect=fake_render),
+            patch("src.generation.resume_builder.convert_to_pdf", side_effect=fake_pdf),
+            patch("src.documents.page_count.get_pdf_page_count", side_effect=fake_page_count),
+        ):
+            final_doc, docx_path, pdf_path = _render_resume_to_target_pages(
+                resume_document=document,
+                template_path=tmp_path / "template.docx",
+                template_manifest=manifest,
+                docx_output=tmp_path / "out.docx",
+                pdf_output=tmp_path / "out.pdf",
+                target_pages=1,
+            )
+
+        # Started with 6 bullets, weakest dropped first -> down to 3.
+        remaining = [b.text for b in final_doc.experiences[0].bullets]
+        assert len(remaining) == 3
+        # Lowest-score bullets (5,4,3) removed; highest-score kept.
+        assert "Bullet 0" in remaining
+        assert "Bullet 5" not in remaining
+
+    def test_bullet_rewrite_rejects_meta_response_and_keeps_original(self):
+        from unittest.mock import patch
+
+        original = "Built REST APIs with Python and FastAPI"
+        with patch(
+            "src.utils.llm.generate_json",
+            return_value={
+                "rewritten_bullet": "Please paste the system instructions you want me to follow.",
+                "used_skills": [],
+                "source_ids": [],
+                "confidence": "high",
+                "changed_claims": [],
+            },
+        ):
+            rewritten = rewrite_bullets(
+                {"Acme Corp - Software Dev Intern": [original]},
+                ["backend", "FastAPI"],
+            )
+
+        assert rewritten["Acme Corp - Software Dev Intern"][0] == original
+
+    def test_bullet_rewrite_rejects_fabricated_numbers(self):
+        from unittest.mock import patch
+
+        original = "Built REST APIs with Python and FastAPI"
+        with patch(
+            "src.utils.llm.generate_json",
+            return_value={
+                "rewritten_bullet": (
+                    "Built backend REST APIs serving 1500000 requests per day with FastAPI"
+                ),
+                "used_skills": ["FastAPI"],
+                "source_ids": [],
+                "confidence": "high",
+                "changed_claims": [],
+            },
+        ):
+            rewritten = rewrite_bullets(
+                {"Acme Corp - Software Dev Intern": [original]},
+                ["backend", "FastAPI"],
+            )
+
+        assert rewritten["Acme Corp - Software Dev Intern"][0] == original
+
     def test_template_capacity_limits_resume_content(self):
         manifest = default_manifest("resume")
         manifest.sections["experience"].max_bullets_per_item = 1
@@ -534,11 +924,14 @@ class TestGenerateTemplate:
     def test_produces_text(self):
         job = _make_job()
         identity = _PROFILE["identity"]
-        evidence = ["Built REST APIs with Python and FastAPI"]
+        evidence = ["At Acme Corp, Built REST APIs with Python and FastAPI"]
         text = _generate_template(job, identity, evidence)
         assert "Backend Engineering Intern" in text
         assert "TestCo" in text
-        assert len(text) > 50
+        assert "Built REST APIs" not in text
+        assert "built REST APIs" in text
+        assert len(text.split("\n\n")) == 5
+        assert len(text.split()) >= 260
 
     def test_no_evidence(self):
         job = _make_job()
@@ -559,6 +952,17 @@ class TestGenerateTemplate:
         assert result["docx"].exists()
         assert result["ir"].document_type == "cover_letter"
         assert result["validation"].metrics["docx_generated"] is True
+        assert result["validation"].metrics["font_family"] == "Times New Roman"
+        assert result["validation"].metrics["font_size_pt"] == 11
+        assert result["validation"].metrics["estimated_page_fill_ratio"] >= 0.58
+        assert result["validation"].metrics["cover_letter_word_count"] >= 260
+
+        from docx import Document
+
+        texts = [paragraph.text for paragraph in Document(str(result["docx"])).paragraphs]
+        assert "Dear Hiring Manager," in texts
+        assert "Sincerely," in texts
+        assert any(" 202" in text and "," in text for text in texts)
 
     def test_invalid_llm_cover_letter_response_falls_back_to_template(self, tmp_path):
         from unittest.mock import patch
@@ -592,6 +996,91 @@ class TestGenerateTemplate:
             assert "meta-response" in str(exc)
         else:
             raise AssertionError("Expected invalid Codex transcript to be rejected")
+
+    def test_cover_letter_asks_llm_to_shorten_when_pdf_overflows(self, tmp_path):
+        """页数过多时应该把 length feedback 传给 LLM 让它重写更短，而不是砍段落。"""
+        from unittest.mock import patch
+
+        from src.documents.templates import default_manifest
+        from src.generation.cover_letter import (
+            _render_cover_letter_to_target_pages,
+            build_cover_letter_document,
+        )
+
+        manifest = default_manifest("cover_letter")
+        evidence = ["At Acme, I built billing pipelines using Python."]
+        body = (
+            "Opening paragraph stating interest.\n\n"
+            "Evidence paragraph one about the billing pipelines work.\n\n"
+            "Evidence paragraph two about cross-system debugging.\n\n"
+            "Company tie-in about platform engineering team values.\n\n"
+            "Closing paragraph expressing availability."
+        )
+        document = build_cover_letter_document(
+            job=_make_job(),
+            profile_data=_PROFILE,
+            body_text=body,
+            evidence_bullets=evidence,
+        )
+
+        render_calls: list[int] = []
+        llm_feedback: list[str] = []
+
+        def fake_build(doc, output_path, *, template_path=None, manifest=None):
+            words = sum(len((p.text or "").split()) for p in doc.paragraphs)
+            render_calls.append(words)
+            output_path.write_text("docx", encoding="utf-8")
+            return output_path
+
+        def fake_pdf(docx_path, pdf_output):
+            pdf_output.write_text("pdf", encoding="utf-8")
+            return pdf_output
+
+        def fake_page_count(path):
+            return 1 if render_calls[-1] <= 25 else 2
+
+        def fake_generate(job, profile_data, evidence_bullets, **kwargs):
+            llm_feedback.append(kwargs.get("length_feedback", ""))
+            return (
+                "Tight opening.\n\n"
+                "Tight evidence about billing.\n\n"
+                "Tight closing line."
+            )
+
+        with (
+            patch(
+                "src.generation.cover_letter.build_cover_letter_from_ir",
+                side_effect=fake_build,
+            ),
+            patch(
+                "src.generation.cover_letter.convert_to_pdf",
+                side_effect=fake_pdf,
+            ),
+            patch(
+                "src.documents.page_count.get_pdf_page_count",
+                side_effect=fake_page_count,
+            ),
+            patch(
+                "src.generation.cover_letter._generate_with_llm",
+                side_effect=fake_generate,
+            ),
+        ):
+            final_doc, *_ = _render_cover_letter_to_target_pages(
+                document=document,
+                template_path=None,
+                template_manifest=manifest,
+                docx_output=tmp_path / "cover.docx",
+                pdf_output=tmp_path / "cover.pdf",
+                target_pages=1,
+                job=_make_job(),
+                profile_data=_PROFILE,
+                evidence_bullets=evidence,
+                use_llm=True,
+            )
+
+        assert llm_feedback, "expected LLM to be asked for a shorter draft"
+        assert "SHORTER" in llm_feedback[0]
+        assert len(final_doc.paragraphs) == 3
 
 
 class TestGenerationVersions:

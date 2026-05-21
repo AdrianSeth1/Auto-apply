@@ -23,7 +23,6 @@ MATERIAL_TYPES = {
     "cover_letter_pdf",
     "cover_letter_docx",
     "cover_letter_tex",
-    "cover_letter_txt",
 }
 ATS_TYPES = {
     "greenhouse",
@@ -1149,6 +1148,9 @@ def update_material_template(
     content: str,
     template_name: str | None = None,
     description: str | None = None,
+    target_pages: int | None = None,
+    filename_pattern: str | None = None,
+    filename_custom_label: str | None = None,
 ) -> dict:
     """Update an editable LaTeX material template package."""
     from src.documents.templates import update_latex_template_package
@@ -1166,6 +1168,48 @@ def update_material_template(
             content=content,
             template_name=template_name,
             description=description,
+            target_pages=target_pages,
+            filename_pattern=filename_pattern,
+            filename_custom_label=filename_custom_label,
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "error_code": "invalid_template"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "error_code": "template_update_failed"}
+
+    return {"ok": True, "template": template, **list_material_templates()}
+
+
+def update_material_template_styles(
+    *,
+    document_type: str,
+    template_id: str,
+    overrides: dict,
+    template_name: str | None = None,
+    description: str | None = None,
+    target_pages: int | None = None,
+    filename_pattern: str | None = None,
+    filename_custom_label: str | None = None,
+) -> dict:
+    """Apply DOCX style overrides (font/size/bold/line-spacing) to a template."""
+    from src.documents.templates import update_docx_template_styles
+
+    if document_type not in {"resume", "cover_letter"}:
+        return {
+            "ok": False,
+            "error": "Unsupported template document type.",
+            "error_code": "invalid_document_type",
+        }
+    try:
+        template = update_docx_template_styles(
+            document_type=document_type,
+            template_id=template_id,
+            overrides=overrides or {},
+            template_name=template_name,
+            description=description,
+            target_pages=target_pages,
+            filename_pattern=filename_pattern,
+            filename_custom_label=filename_custom_label,
         )
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "error_code": "invalid_template"}
@@ -1908,7 +1952,6 @@ def _empty_material_artifacts() -> dict:
         "cover_letter_pdf": None,
         "cover_letter_docx": None,
         "cover_letter_tex": None,
-        "cover_letter_txt": None,
     }
 
 
@@ -2117,6 +2160,8 @@ def _generate_selected_material(
             # in both branches. The default ``"balanced"`` matches
             # the historical behaviour.
             rewrite_mode=patch_aggressiveness,
+            rewrite=strategy == "patch_existing",
+            use_llm=strategy == "patch_existing",
         )
         artifacts["resume_pdf"] = resume_files.get("pdf")
         artifacts["resume_docx"] = resume_files.get("docx")
@@ -2206,10 +2251,10 @@ def _generate_selected_material(
         profile_data=profile_data,
         output_dir=output_dir,
         template_id=template_package.template_id,
+        use_llm=True,
     )
     artifacts["cover_letter_pdf"] = cover_files.get("pdf")
     artifacts["cover_letter_docx"] = cover_files.get("docx")
-    artifacts["cover_letter_txt"] = cover_files.get("txt")
 
     if strategy == "patch_existing" and source_document_id:
         patched_path, patch_note = _try_patch_cover_letter_from_library(
@@ -2298,17 +2343,31 @@ def _try_patch_docx_from_library(
                 )
             source_path = resolve_storage_path(row)
 
+        source_text = _visible_docx_text(source_path)
         output_path = output_dir / f"patched_resume_{uuid.uuid4().hex}.docx"
+        from src.maintenance.atomic import atomic_write  # noqa: PLC0415
+
         try:
-            patch_resume_docx(
-                source_path,
-                ir,
-                output_path=output_path,
-                allow_reorder_sections=allow_reorder_sections,
-                allow_add_remove_bullets=allow_add_remove_bullets,
-            )
+            # Phase 18.4: write to a .tmp sibling and atomically rename
+            # on success so a crash mid-patch can't leave a half-written
+            # ``patched_resume_<uuid>.docx`` on disk.
+            with atomic_write(output_path) as tmp_path:
+                patch_resume_docx(
+                    source_path,
+                    ir,
+                    output_path=tmp_path,
+                    allow_reorder_sections=allow_reorder_sections,
+                    allow_add_remove_bullets=allow_add_remove_bullets,
+                )
         except PatchFallback as exc:
             return None, f"Couldn't patch your library document ({exc}); generated fresh instead."
+        patched_text = _visible_docx_text(output_path)
+        if source_text and patched_text == source_text:
+            output_path.unlink(missing_ok=True)
+            return None, (
+                "Patch produced no visible resume changes; generated a fresh "
+                "tailored document instead."
+            )
         return output_path, None
     except Exception as exc:  # noqa: BLE001
         logger.exception("patch_existing fell over for document %s", document_id)
@@ -2363,15 +2422,29 @@ def _try_patch_cover_letter_from_library(
                 )
             source_path = resolve_storage_path(row)
 
+        source_text = _visible_docx_text(source_path)
         output_path = (
             output_dir / f"patched_cover_letter_{uuid.uuid4().hex}.docx"
         )
+        from src.maintenance.atomic import atomic_write  # noqa: PLC0415
+
         try:
-            patch_cover_letter_docx(source_path, ir, output_path=output_path)
+            # Phase 18.4: atomic_write rename so we never leave a
+            # half-written ``patched_cover_letter_<uuid>.docx`` on
+            # disk if the underlying patcher raises mid-write.
+            with atomic_write(output_path) as tmp_path:
+                patch_cover_letter_docx(source_path, ir, output_path=tmp_path)
         except PatchFallback as exc:
             return None, (
                 f"Couldn't patch your library cover letter ({exc}); "
                 "generated fresh instead."
+            )
+        patched_text = _visible_docx_text(output_path)
+        if source_text and patched_text == source_text:
+            output_path.unlink(missing_ok=True)
+            return None, (
+                "Patch produced no visible cover letter changes; generated "
+                "a fresh tailored document instead."
             )
         return output_path, None
     except Exception as exc:  # noqa: BLE001
@@ -2380,6 +2453,30 @@ def _try_patch_cover_letter_from_library(
             document_id,
         )
         return None, f"Cover letter patch failed ({exc}); generated fresh instead."
+
+
+def _visible_docx_text(path) -> str:
+    try:
+        from docx import Document  # noqa: PLC0415
+    except ImportError:
+        return ""
+    try:
+        doc = Document(str(path))
+    except Exception:
+        return ""
+    parts: list[str] = []
+    for paragraph in doc.paragraphs:
+        text = " ".join((paragraph.text or "").split())
+        if text:
+            parts.append(text)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    text = " ".join((paragraph.text or "").split())
+                    if text:
+                        parts.append(text)
+    return "\n".join(parts)
 
 
 def _copy_library_document_to_output(
@@ -2447,7 +2544,12 @@ def _copy_library_document_to_output(
         f"{expected_doc_type}_uselib_{uuid.uuid4().hex}{source_path.suffix.lower()}"
     )
     target_path = output_dir / target_name
-    shutil.copy2(source_path, target_path)
+    from src.maintenance.atomic import atomic_write  # noqa: PLC0415
+
+    # Phase 18.4: copy via atomic_write so a crash mid-copy can't leave
+    # a half-written ``*_uselib_<uuid>.docx`` orphan in data/output.
+    with atomic_write(target_path) as tmp_path:
+        shutil.copy2(source_path, tmp_path)
 
     # Re-fetch a fresh ``row``-like object so the caller can still
     # read original_filename / source_type without re-opening the
@@ -2619,7 +2721,7 @@ async def _generate_materials(
     resume_path = resume_files.get("pdf") or resume_files.get("docx")
 
     cover_files = generate_cover_letter(job=job, profile_data=profile_data, output_dir=output_dir)
-    cover_letter_path = cover_files.get("txt")
+    cover_letter_path = cover_files.get("pdf") or cover_files.get("docx") or cover_files.get("txt")
 
     qa_entries = [
         entry

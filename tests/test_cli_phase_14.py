@@ -10,6 +10,7 @@ from __future__ import annotations
 from click.testing import CliRunner
 
 from src.cli.cmd_schedule import schedule_cmd
+from src.cli.cmd_start import start_cmd
 from src.cli.cmd_tasks import tasks_cmd
 from src.cli.cmd_worker import beat_cmd, worker_cmd
 
@@ -21,6 +22,7 @@ def test_worker_check_prints_invocation_with_default_queues() -> None:
     assert "celery -A src.tasks worker" in result.output
     assert "search,materials,application,maintenance" in result.output
     assert "-c 2" in result.output
+    assert "--pool" in result.output
 
 
 def test_worker_check_respects_queue_subset() -> None:
@@ -44,6 +46,19 @@ def test_beat_check_uses_redbeat_scheduler() -> None:
     assert "redbeat.RedBeatScheduler" in result.output
 
 
+def test_start_check_prints_unified_runtime_steps() -> None:
+    result = CliRunner().invoke(start_cmd, ["--check", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert "AUTOAPPLY_DB_HOST_PORT=" in result.output
+    assert "docker compose up -d" in result.output
+    assert "AUTOAPPLY_DB_PORT=" in result.output
+    assert "alembic upgrade head" in result.output
+    assert "REDIS_URL=" in result.output
+    assert "celery -A src.tasks worker" in result.output
+    assert "celery -A src.tasks beat" in result.output
+    assert "uvicorn src.web.app:create_app" in result.output
+
+
 def test_tasks_kinds_lists_every_known_name() -> None:
     from src.tasks.tasks import KNOWN_TASK_NAMES
 
@@ -65,10 +80,12 @@ def test_tasks_list_handles_empty_state() -> None:
 def test_schedule_list_renders_all_six_entries() -> None:
     result = CliRunner().invoke(schedule_cmd, ["list"])
     assert result.exit_code == 0
+    # Phase 18.1: ``application_status_sync`` was removed from Beat
+    # because ``maintenance.status_sync`` is explicit
+    # ``not_implemented`` until ATS/application-portal polling lands.
     for name in (
         "daily_search",
         "jd_health_check",
-        "application_status_sync",
         "linkedin_cookie_refresh",
         "cache_eviction",
         "gate_expire_sweep",
@@ -96,4 +113,4 @@ def test_main_cli_registers_new_commands() -> None:
     from src.cli.main import cli
 
     names = {c.name for c in cli.commands.values()}
-    assert {"worker", "beat", "tasks", "schedule"} <= names
+    assert {"start", "worker", "beat", "tasks", "schedule"} <= names

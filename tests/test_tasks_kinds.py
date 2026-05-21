@@ -98,19 +98,65 @@ def test_application_submit_round_trip() -> None:
 # ---- Beat-driven stubs --------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "task_fn",
-    [
-        task_kinds.search_daily_fanout,
-        task_kinds.jd_health_check,
-        task_kinds.linkedin_cookie_refresh,
-        task_kinds.cache_eviction,
-        task_kinds.gate_expire_sweep,
-    ],
-)
-def test_beat_driven_stubs_return_stubbed_status(task_fn: Any) -> None:
-    out = task_fn.apply().get()
-    assert out["status"] == "stubbed"
+def test_search_daily_fanout_returns_not_implemented() -> None:
+    """Phase 18.1: search.daily_fanout is intentionally a no-op tick
+    until the saved-search registry surfaces query-id -> kwargs
+    lookup. The task is still registered for Beat audit."""
+    out = task_kinds.search_daily_fanout.apply().get()
+    assert out["status"] == "not_implemented"
+    assert out["task"] == "search.daily_fanout"
+
+
+def test_cache_eviction_runs_cleanup_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 18.4: ``maintenance.cache_eviction`` is no longer a stub.
+
+    It opens a DB session and drives :func:`src.maintenance.artifacts.clean`
+    plus :func:`purge_quarantine`. Here we stub out the engine + cleanup
+    primitives so the eager-mode worker exercises the wiring and
+    nothing else.
+    """
+    from contextlib import contextmanager
+
+    calls: dict[str, int] = {"clean": 0, "purge": 0}
+
+    @contextmanager
+    def fake_session():
+        class _Session:
+            def begin(self):
+                @contextmanager
+                def _ctx():
+                    yield
+                return _ctx()
+        yield _Session()
+
+    monkeypatch.setattr(
+        "src.core.database.get_session_factory",
+        lambda *args, **kwargs: fake_session,
+    )
+
+    class _Report:
+        def to_summary(self):
+            return {"ok": True}
+
+    def fake_clean(*_args, **_kwargs):
+        calls["clean"] += 1
+        return _Report()
+
+    def fake_purge(*_args, **_kwargs):
+        calls["purge"] += 1
+        return _Report()
+
+    monkeypatch.setattr("src.maintenance.artifacts.clean", fake_clean)
+    monkeypatch.setattr("src.maintenance.artifacts.purge_quarantine", fake_purge)
+
+    out = task_kinds.cache_eviction.apply().get()
+    assert out["status"] == "ok"
+    assert out["task"] == "maintenance.cache_eviction"
+    assert calls == {"clean": 1, "purge": 1}
+    assert "clean" in out["summaries"]
+    assert "purge_quarantine" in out["summaries"]
 
 
 def test_status_sync_accepts_optional_application_id() -> None:

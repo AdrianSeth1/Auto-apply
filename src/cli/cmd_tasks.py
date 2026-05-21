@@ -11,12 +11,18 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import click
-from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from src.application.task_control import (
+    TaskControlError,
+    cancel_task_record,
+    list_task_records,
+    resolve_task_record,
+    retry_task_record,
+)
 from src.core.config import load_config
 from src.core.database import get_engine
-from src.core.models import TaskRecord
+from src.core.models import TENANT_DEFAULT, TaskRecord
 from src.tasks.tasks import KNOWN_TASK_NAMES
 
 
@@ -40,22 +46,28 @@ def tasks_cmd() -> None:
     default=None,
 )
 @click.option("--kind", default=None, help="Filter by task kind (e.g. materials.generate).")
+@click.option("--tenant", default=TENANT_DEFAULT, help="Tenant id to inspect.")
 @click.option("--since", default=None, help="ISO timestamp or '24h' / '7d' shorthand.")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 def tasks_list(
-    limit: int, status: str | None, kind: str | None, since: str | None, as_json: bool
+    limit: int,
+    status: str | None,
+    kind: str | None,
+    tenant: str,
+    since: str | None,
+    as_json: bool,
 ) -> None:
     """Show recent task rows from the audit table."""
     session = _session()
     try:
-        stmt = select(TaskRecord).order_by(TaskRecord.created_at.desc()).limit(limit)
-        if status:
-            stmt = stmt.where(TaskRecord.status == status)
-        if kind:
-            stmt = stmt.where(TaskRecord.kind == kind)
-        if since:
-            stmt = stmt.where(TaskRecord.created_at >= _parse_since(since))
-        rows = list(session.execute(stmt).scalars())
+        rows = list_task_records(
+            session,
+            tenant_id=(tenant or TENANT_DEFAULT).strip() or TENANT_DEFAULT,
+            limit=limit,
+            status=status,
+            kind=kind,
+            since=_parse_since(since) if since else None,
+        )
     finally:
         session.close()
 
@@ -78,7 +90,7 @@ def tasks_inspect(task_id: str) -> None:
     """Show the full audit row for one task (by UUID or celery_task_id)."""
     session = _session()
     try:
-        row = _resolve(session, task_id)
+        row = resolve_task_record(session, task_id)
         if row is None:
             click.echo(f"no task matches '{task_id}'", err=True)
             raise SystemExit(1)
@@ -91,33 +103,20 @@ def tasks_inspect(task_id: str) -> None:
 @click.argument("task_id")
 def tasks_retry(task_id: str) -> None:
     """Re-enqueue a failed task using its original payload."""
-    from src.tasks import celery_app
-
     session = _session()
     try:
-        row = _resolve(session, task_id)
+        row = resolve_task_record(session, task_id)
         if row is None:
             click.echo(f"no task matches '{task_id}'", err=True)
             raise SystemExit(1)
-        if row.status not in {"failed", "cancelled"}:
+        try:
+            retry_task_record(row)
+        except TaskControlError as exc:
             click.echo(
-                f"refusing to retry a task in status {row.status}; "
-                "only failed/cancelled tasks may be retried",
+                f"refusing to retry task {row.id}: {exc}",
                 err=True,
             )
             raise SystemExit(2)
-        # The ``before_task_publish`` signal handler (Phase 14.2,
-        # codex-review P2 fix) writes a new audit row for this
-        # dispatch because we deliberately do NOT set the
-        # x-autoapply-audit-ok header. The old row stays as-is so the
-        # history is intact; the new attempt is visible in
-        # ``autoapply tasks list``.
-        celery_app.send_task(
-            row.kind,
-            kwargs=row.payload or {},
-            queue=row.queue,
-            headers={"x-autoapply-tenant": row.tenant_id},
-        )
         click.echo(f"retried {row.id} ({row.kind})")
     finally:
         session.close()
@@ -130,27 +129,18 @@ def tasks_cancel(task_id: str) -> None:
     is already ``running`` (use Celery revoke for that)."""
     session = _session()
     try:
-        row = _resolve(session, task_id)
+        row = resolve_task_record(session, task_id)
         if row is None:
             click.echo(f"no task matches '{task_id}'", err=True)
             raise SystemExit(1)
-        if row.status != "queued":
+        try:
+            cancel_task_record(row)
+        except TaskControlError as exc:
             click.echo(
-                f"only queued tasks may be cancelled via CLI; got {row.status}",
+                str(exc),
                 err=True,
             )
             raise SystemExit(2)
-        # P1 codex fix: revoke the broker message so a worker cannot
-        # still claim it (see /api/tasks/{id}/cancel for the rationale).
-        if row.celery_task_id:
-            try:
-                from src.tasks import celery_app
-
-                celery_app.control.revoke(row.celery_task_id, terminate=False)
-            except Exception:  # noqa: BLE001
-                pass
-        row.status = "cancelled"
-        row.updated_at = datetime.now(UTC)
         session.commit()
         click.echo(f"cancelled {row.id}")
     finally:
@@ -162,21 +152,6 @@ def tasks_kinds() -> None:
     """List every task name a worker is willing to execute."""
     for name in KNOWN_TASK_NAMES:
         click.echo(name)
-
-
-def _resolve(session: Session, ident: str) -> TaskRecord | None:
-    import uuid
-
-    try:
-        uid = uuid.UUID(ident)
-        row = session.get(TaskRecord, uid)
-        if row is not None:
-            return row
-    except ValueError:
-        pass
-    # Fall back to celery_task_id
-    stmt = select(TaskRecord).where(TaskRecord.celery_task_id == ident).limit(1)
-    return session.execute(stmt).scalar_one_or_none()
 
 
 def _parse_since(value: str) -> datetime:

@@ -47,6 +47,11 @@ logger = logging.getLogger("autoapply.generation.resume_builder")
 DEFAULT_TEMPLATE_DIR = Path("data/templates")
 DEFAULT_OUTPUT_DIR = Path("data/output")
 
+# Upper bound on render/trim attempts when squeezing into the page target.
+# Each round drops one bullet (or item, once bullets run out), so 8 covers
+# most cases even with very dense source data.
+_MAX_TRIM_ATTEMPTS = 8
+
 
 def generate_resume(
     job: RawJob,
@@ -97,12 +102,14 @@ def generate_resume(
         use_llm=use_llm,
         template_id=template_manifest.template_id,
         template_manifest=template_manifest,
+        rewrite_mode=rewrite_mode,
     )
+    target_pages = template_manifest.target_pages or template_manifest.capacity.max_pages
     validation = validate_resume_document(
         resume_document,
         jd_tags=resume_document.metadata.get("jd_tags", []),
         max_bullet_words=template_manifest.capacity.max_words_per_bullet or 32,
-        max_estimated_pages=template_manifest.capacity.max_pages,
+        max_estimated_pages=target_pages,
     )
     if not validation.ok:
         logger.warning(
@@ -117,22 +124,26 @@ def generate_resume(
         company=job.company,
         role=job.title,
         output_dir=output_dir,
+        pattern=template_manifest.filename_pattern,
+        profile_name=profile_data.get("identity", {}).get("full_name", ""),
+        custom_label=template_manifest.filename_custom_label,
+        template_id=template_manifest.template_id,
     )
 
-    # Build docx from validated IR
-    docx_path = build_resume_from_ir(
+    # Render + iterate: if the rendered PDF is over the page target,
+    # drop the weakest bullet and re-render. This is the only reliable
+    # way to honour the user's "exactly N pages" setting because the
+    # pre-render fitter only knows item caps -- font size, line spacing
+    # and margin changes from Template Library edits can push content
+    # over the line in ways the IR can't predict.
+    resume_document, docx_path, pdf_path = _render_resume_to_target_pages(
+        resume_document=resume_document,
         template_path=template_path,
-        document=resume_document,
-        output_path=paths["resume_docx"],
-        manifest=template_manifest,
+        template_manifest=template_manifest,
+        docx_output=paths["resume_docx"],
+        pdf_output=paths["resume_pdf"],
+        target_pages=target_pages,
     )
-
-    # Convert to PDF
-    pdf_path = None
-    try:
-        pdf_path = convert_to_pdf(docx_path, paths["resume_pdf"])
-    except Exception as e:
-        logger.warning("PDF conversion failed: %s", e)
 
     validation = validate_resume_artifacts(
         validation,
@@ -140,6 +151,7 @@ def generate_resume(
         pdf_path=pdf_path,
         pdf_attempted=True,
         max_pages=template_manifest.capacity.max_pages,
+        target_pages=target_pages,
     )
 
     result = {
@@ -183,17 +195,22 @@ def generate_resume_latex(
         template_id=package.template_id,
         template_manifest=package.manifest,
     )
+    target_pages = package.manifest.target_pages or package.manifest.capacity.max_pages
     validation = validate_resume_document(
         resume_document,
         jd_tags=resume_document.metadata.get("jd_tags", []),
         max_bullet_words=package.manifest.capacity.max_words_per_bullet or 32,
-        max_estimated_pages=package.manifest.capacity.max_pages,
+        max_estimated_pages=target_pages,
     )
 
     paths = get_output_paths(
         company=job.company,
         role=job.title,
         output_dir=output_dir,
+        pattern=package.manifest.filename_pattern,
+        profile_name=profile_data.get("identity", {}).get("full_name", ""),
+        custom_label=package.manifest.filename_custom_label,
+        template_id=package.manifest.template_id,
     )
     tex_path = build_resume_tex_from_ir(
         template_path=package.template_path,
@@ -214,6 +231,7 @@ def generate_resume_latex(
         pdf_path=pdf_path,
         pdf_attempted=True,
         max_pages=package.manifest.capacity.max_pages,
+        target_pages=target_pages,
     )
 
     result = {
@@ -236,6 +254,7 @@ def build_resume_document(
     use_llm: bool = False,
     template_id: str = "ats_single_column_v1",
     template_manifest: TemplateManifest | None = None,
+    rewrite_mode: str = "balanced",
 ) -> ResumeDocument:
     """Plan a renderer-agnostic resume IR for a target job."""
     template_manifest = template_manifest or default_manifest("resume")
@@ -273,6 +292,7 @@ def build_resume_document(
         education=profile_data.get("education", []),
         experiences=_build_experience_items(profile_data, grouped),
         projects=_build_project_items(profile_data, grouped),
+        custom_sections=_build_custom_sections(profile_data),
         section_order=template_manifest.section_order or _plan_section_order(job, profile_data),
         metadata={
             "jd_tags": jd_tags,
@@ -280,6 +300,89 @@ def build_resume_document(
         },
     )
     return fit_resume_document_to_template(document, template_manifest)
+
+
+def _build_custom_sections(profile_data: dict[str, Any]) -> list:
+    """Load free-form sections (VOLUNTEER / AWARDS / AFFILIATIONS / ...)
+    from the profile and project them onto the IR.
+
+    Accepts either of two layouts (both produced by various profile
+    sources we've shipped over the project's life):
+
+      A) ``custom_sections: [{title, entries: [...]}, ...]`` -- the
+         canonical schema the resume importer now emits.
+      B) ``custom_sections: {Title1: [entries], Title2: [entries], ...}``
+         -- a dict-of-sections shape we accept defensively so a
+         hand-edited YAML keeps working.
+
+    Returns an empty list when the field is missing or malformed. We do
+    NOT raise: a bad custom-section payload should degrade gracefully
+    rather than block the entire resume from rendering.
+    """
+    from src.generation.ir import CustomSection, CustomSectionEntry  # noqa: PLC0415
+
+    raw = profile_data.get("custom_sections")
+    if not raw:
+        return []
+
+    sections: list[CustomSection] = []
+
+    def _coerce_entries(entries_raw) -> list[CustomSectionEntry]:
+        entries: list[CustomSectionEntry] = []
+        if not isinstance(entries_raw, list):
+            return entries
+        for entry in entries_raw:
+            if not isinstance(entry, dict):
+                # Plain string in the entry list (e.g. INTERESTS &
+                # ACTIVITIES is often just a comma-separated line).
+                text = str(entry).strip()
+                if text:
+                    entries.append(CustomSectionEntry(details=text))
+                continue
+            bullets_raw = entry.get("bullets") or []
+            bullets: list[str] = []
+            for bullet in bullets_raw:
+                if isinstance(bullet, dict):
+                    text = str(bullet.get("text") or "").strip()
+                elif bullet is None:
+                    text = ""
+                else:
+                    text = str(bullet).strip()
+                if text:
+                    bullets.append(text)
+            entries.append(
+                CustomSectionEntry(
+                    title=str(entry.get("title") or "").strip(),
+                    organization=str(entry.get("organization") or "").strip(),
+                    location=str(entry.get("location") or "").strip(),
+                    start_date=str(entry.get("start_date") or "").strip(),
+                    end_date=str(entry.get("end_date") or "").strip(),
+                    details=str(entry.get("details") or entry.get("description") or "").strip(),
+                    bullets=bullets,
+                )
+            )
+        return entries
+
+    if isinstance(raw, list):
+        for section in raw:
+            if not isinstance(section, dict):
+                continue
+            title = str(section.get("title") or "").strip()
+            if not title:
+                continue
+            sections.append(
+                CustomSection(title=title, entries=_coerce_entries(section.get("entries")))
+            )
+    elif isinstance(raw, dict):
+        for title, entries_raw in raw.items():
+            title = str(title or "").strip()
+            if not title:
+                continue
+            sections.append(CustomSection(title=title, entries=_coerce_entries(entries_raw)))
+
+    # Strip empty sections so a heading with no entries doesn't leave
+    # a dangling section title on the rendered resume.
+    return [s for s in sections if s.entries]
 
 
 def _evidence_from_selected_bullets(
@@ -382,9 +485,7 @@ def _rewrite_grouped_evidence(
     for entity, items in grouped.items():
         texts = rewritten_text.get(entity, [])
         rewritten[entity] = [
-            item.model_copy(update={"render_text": texts[index]})
-            if index < len(texts)
-            else item
+            item.model_copy(update={"render_text": texts[index]}) if index < len(texts) else item
             for index, item in enumerate(items)
         ]
     return rewritten
@@ -647,33 +748,58 @@ def rewrite_bullets(
     for the patch_existing strategy. For regenerate the caller may
     leave ``mode`` at the default; aggressiveness is meaningful mainly
     when there's an original document the user wants to "preserve".
+
+    Phase 18.5: bullets within one ``rewrite_bullets`` call run
+    concurrently via :mod:`asyncio` capped by
+    ``parallelism.bullet_rewrites.max_concurrent_per_task``. Provider
+    abuse is bounded by the global / per-provider semaphores in
+    :mod:`src.utils.parallelism` so increasing the per-task cap does
+    NOT translate into unbounded LLM concurrency across workers.
     """
-    from src.utils.llm import LLMError
+    import asyncio  # noqa: PLC0415
+
+    return asyncio.run(_rewrite_bullets_async(selected_bullets, jd_tags, mode=mode))
+
+
+async def _rewrite_bullets_async(
+    selected_bullets: dict[str, list[str]],
+    jd_tags: list[str],
+    *,
+    mode: str = "balanced",
+) -> dict[str, list[str]]:
+    """Phase 18.5 implementation behind :func:`rewrite_bullets`."""
+    import asyncio  # noqa: PLC0415
+
+    from src.utils.llm import LLMError  # noqa: PLC0415
+    from src.utils.parallelism import bullet_rewrite_cap  # noqa: PLC0415
 
     keywords_str = ", ".join(jd_tags[:15])
+    cap = max(1, bullet_rewrite_cap())
+    sem = asyncio.Semaphore(cap)
 
-    rewritten: dict[str, list[str]] = {}
-    for entity, bullets in selected_bullets.items():
-        new_bullets = []
-        for bullet in bullets:
+    async def _one(bullet: str) -> str:
+        async with sem:
             try:
-                rewrite = _rewrite_single_bullet(bullet, keywords_str, mode=mode)
+                rewrite = await asyncio.to_thread(
+                    _rewrite_single_bullet, bullet, keywords_str, mode=mode
+                )
                 new_text = rewrite.rewritten_bullet
-                # Fact-drift check: rewritten bullet should be similar length
                 if (
                     rewrite.changed_claims
                     or len(new_text) > len(bullet) * 2
                     or len(new_text) < len(bullet) * 0.3
                 ):
                     logger.warning("Rewrite drift detected for bullet, keeping original")
-                    new_bullets.append(bullet)
-                else:
-                    new_bullets.append(new_text)
-            except (LLMError, Exception) as e:
-                logger.debug("Rewrite failed for bullet: %s", e)
-                new_bullets.append(bullet)
-        rewritten[entity] = new_bullets
+                    return bullet
+                return new_text
+            except (LLMError, Exception) as exc:  # noqa: BLE001
+                logger.debug("Rewrite failed for bullet: %s", exc)
+                return bullet
 
+    rewritten: dict[str, list[str]] = {}
+    for entity, bullets in selected_bullets.items():
+        results = await asyncio.gather(*[_one(b) for b in bullets])
+        rewritten[entity] = list(results)
     return rewritten
 
 
@@ -725,14 +851,73 @@ _REWRITE_RULES_BY_MODE: dict[str, str] = {
 
 
 def _rewrite_system_for(mode: str) -> str:
-    rules = _REWRITE_RULES_BY_MODE.get(
-        mode, _REWRITE_RULES_BY_MODE["balanced"]
-    )
+    rules = _REWRITE_RULES_BY_MODE.get(mode, _REWRITE_RULES_BY_MODE["balanced"])
     return _REWRITE_SYSTEM_BASE + "\n" + rules
 
 
 # Kept for back-compat with any external imports of the legacy name.
 _REWRITE_SYSTEM = _rewrite_system_for("balanced")
+
+
+_INVALID_BULLET_REWRITE_PATTERNS = (
+    "please paste the system instructions",
+    "paste the system instructions",
+    "system instructions you want me to follow",
+    "if you want me to inspect or modify",
+    "point me to the relevant file",
+    "openai codex",
+    "tokens used",
+    "reading additional input from stdin",
+    "i cannot rewrite",
+    "i can't rewrite",
+    "i am unable to",
+    "i'm unable to",
+    "as an ai language model",
+    "as a language model",
+)
+
+
+def _clean_llm_bullet_rewrite_output(
+    rewritten: str,
+    original: str,
+) -> str:
+    """Reject CLI/meta responses and obvious garbage so bad rewrites fall back.
+
+    Mirrors ``cover_letter._clean_llm_cover_letter_output``: surface an
+    :class:`LLMError` whenever the model returns a meta-response, fenced
+    code-block dump, or a payload so short/long it cannot be a real
+    resume bullet. The async wrapper above catches ``LLMError`` and keeps
+    the original bullet, which is the correct fallback.
+    """
+    from src.utils.llm import LLMError  # noqa: PLC0415
+
+    text = (rewritten or "").strip()
+    if text.startswith("```"):
+        lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
+        text = "\n".join(lines).strip()
+    text = text.strip("•-– ").strip()
+
+    if not text:
+        raise LLMError("LLM returned an empty bullet rewrite.")
+
+    lower = text.lower()
+    if any(pattern in lower for pattern in _INVALID_BULLET_REWRITE_PATTERNS):
+        raise LLMError("LLM returned a meta-response instead of a bullet rewrite.")
+
+    word_count = len(text.split())
+    if word_count < 4:
+        raise LLMError("LLM returned a bullet rewrite that is too short.")
+    if word_count > 80:
+        raise LLMError("LLM returned a bullet rewrite that is too long.")
+    if "\n\n" in text:
+        raise LLMError("LLM returned multiple paragraphs instead of one bullet.")
+
+    original_numbers = set(re.findall(r"\b\d+(?:\.\d+)?%?\+?\b", original))
+    new_numbers = set(re.findall(r"\b\d+(?:\.\d+)?%?\+?\b", text))
+    if new_numbers - original_numbers:
+        raise LLMError("LLM rewrite introduced numbers not present in the original bullet.")
+
+    return text
 
 
 def _rewrite_single_bullet(
@@ -755,5 +940,416 @@ def _rewrite_single_bullet(
     )
     result = generate_json(prompt, system=_rewrite_system_for(mode), timeout=60)
     if isinstance(result, str):
-        return BulletRewriteResult(rewritten_bullet=result.strip().strip("•-– ").strip())
-    return BulletRewriteResult.model_validate(result)
+        cleaned = _clean_llm_bullet_rewrite_output(result, bullet)
+        return BulletRewriteResult(rewritten_bullet=cleaned)
+
+    parsed = BulletRewriteResult.model_validate(result)
+    cleaned = _clean_llm_bullet_rewrite_output(parsed.rewritten_bullet, bullet)
+    return parsed.model_copy(update={"rewritten_bullet": cleaned})
+
+
+_LENGTH_REWRITE_SYSTEM = """You are a resume bullet editor adjusting bullet
+length while preserving every grounded fact.
+
+Return ONLY a JSON object with exactly this shape:
+{
+  "rewritten_bullet": "...",
+  "used_skills": [],
+  "source_ids": [],
+  "confidence": "high" | "medium" | "low",
+  "changed_claims": []
+}
+
+Rules:
+- Preserve every claim, number, metric, and named technology from the original.
+- Do NOT invent skills, technologies, accomplishments, or projects.
+- Stay professional and concise; one bullet, one sentence (or two short ones).
+- changed_claims must list any phrasing whose grounding is even slightly uncertain.
+"""
+
+
+def _rewrite_bullet_for_length(
+    bullet: str,
+    *,
+    direction: str,
+    target_words: int,
+) -> str:
+    """Ask the LLM to make a bullet roughly ``target_words`` long.
+
+    ``direction`` is ``"shorter"`` or ``"longer"`` -- chosen by the
+    caller from the rendered page-count delta so the prompt explicitly
+    asks for the right adjustment instead of letting the model guess.
+    Raises :class:`LLMError` on bad output so the caller can fall back
+    to the original bullet for that round.
+    """
+    from src.utils.llm import generate_json  # noqa: PLC0415
+
+    instruction = (
+        f"Make this bullet noticeably {direction}, around {target_words} words. "
+        "Keep every grounded fact, number, and named tool. Do not invent any "
+        "new claim."
+    )
+    prompt = (
+        f"Original bullet:\n{bullet}\n\n"
+        f"{instruction}\n\n"
+        "Return the JSON object specified by the system instructions."
+    )
+    result = generate_json(prompt, system=_LENGTH_REWRITE_SYSTEM, timeout=60)
+    if isinstance(result, str):
+        return _clean_llm_bullet_rewrite_output(result, bullet)
+    parsed = BulletRewriteResult.model_validate(result)
+    return _clean_llm_bullet_rewrite_output(parsed.rewritten_bullet, bullet)
+
+
+def _resize_document_bullets(
+    document: ResumeDocument,
+    *,
+    direction: str,
+    target_words: int,
+) -> ResumeDocument:
+    """Return a copy of ``document`` whose experience/project bullets have
+    been rewritten for length via the LLM.
+
+    Failures on individual bullets (LLMError) silently keep the original
+    text for that bullet so a single bad rewrite does not abort the
+    whole convergence loop.
+    """
+    from src.utils.llm import LLMError  # noqa: PLC0415
+
+    updated = document.model_copy(deep=True)
+    for section in (updated.experiences, updated.projects):
+        for item in section:
+            for bullet in item.bullets:
+                if not bullet.text:
+                    continue
+                try:
+                    bullet.text = _rewrite_bullet_for_length(
+                        bullet.text,
+                        direction=direction,
+                        target_words=target_words,
+                    )
+                except (LLMError, Exception) as exc:  # noqa: BLE001
+                    logger.debug("Length rewrite kept original bullet (%s): %s", direction, exc)
+    return updated
+
+
+# Upper bound on Fit-Planner rounds. Each round = at most 1 LLM call +
+# 1 render + 1 PDF convert. Two rounds keep the total wall time within
+# the front-end's poll budget even on slow LLM providers.
+_MAX_FIT_PLAN_ROUNDS = 2
+
+
+def _render_resume_to_target_pages(
+    *,
+    resume_document: ResumeDocument,
+    template_path: Path,
+    template_manifest: TemplateManifest,
+    docx_output: Path,
+    pdf_output: Path,
+    target_pages: int,
+    use_llm: bool = True,
+    jd_tags: list[str] | None = None,
+) -> tuple[ResumeDocument, Path, Path | None]:
+    """Render the resume, then drive it to exactly ``target_pages`` using
+    a single-shot **Fit Planner** LLM call per attempt.
+
+    Why this design (replacing the per-bullet rewrite loop)
+    --------------------------------------------------------
+    The previous loop rewrote every selected bullet via the LLM up to
+    two rounds. With ~10 bullets and a 60 s per-call timeout, the worst
+    case blew past the front-end's 2-minute poll budget and the
+    operator saw "no worker completed it" even though the task was
+    still grinding.
+
+    More importantly, per-bullet rewriting is the *wrong* abstraction.
+    The smart move when a resume runs over (or under) the page target
+    is to decide at the **section level** what stays, what shrinks,
+    and what gets dropped -- e.g. cut "INTERESTS & ACTIVITIES" for a
+    backend-engineer role rather than trim sentences of real evidence.
+    The LLM has the relevance judgement to make that call when it sees
+    the full outline.
+
+    Convergence loop
+    ----------------
+    1. Render initial draft, check PDF page count.
+    2. If wrong, send ONE LLM call with a compact section outline
+       (canonical sections + custom_sections + bullet counts + JD tags)
+       and ask for a JSON fit plan: per-section ``keep`` / ``max_items``
+       / ``bullets_mode`` decisions plus the LLM's reasoning.
+    3. Apply the plan deterministically -- drop sections marked drop,
+       trim each section to its ``max_items``, batch-rewrite bullets
+       only when the plan asked for it.
+    4. Re-render. Repeat up to :data:`_MAX_FIT_PLAN_ROUNDS` rounds.
+    5. Final deterministic fallback for stubborn overflow: drop the
+       weakest bullet until pages fit or the resume can't shrink more.
+
+    Returns (final_document, docx_path, pdf_path | None).
+    """
+    from src.documents.page_count import get_pdf_page_count  # noqa: PLC0415
+
+    def _render(doc):
+        path = build_resume_from_ir(
+            template_path=template_path,
+            document=doc,
+            output_path=docx_output,
+            manifest=template_manifest,
+        )
+        pdf: Path | None = None
+        try:
+            pdf = convert_to_pdf(path, pdf_output)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("PDF conversion failed: %s", exc)
+        pages = get_pdf_page_count(pdf) if pdf else None
+        return path, pdf, pages
+
+    current = resume_document
+    docx_path, pdf_path, pages = _render(current)
+    if target_pages <= 0 or pages is None:
+        return current, docx_path, pdf_path
+
+    jd_tags = jd_tags or list(current.metadata.get("jd_tags", []) or [])
+    plan_history: list[str] = []
+
+    for round_idx in range(_MAX_FIT_PLAN_ROUNDS if use_llm else 0):
+        if pages == target_pages:
+            return current, docx_path, pdf_path
+
+        try:
+            plan = _generate_resume_fit_plan(
+                document=current,
+                target_pages=target_pages,
+                current_pages=pages,
+                jd_tags=jd_tags,
+                previous_plans=plan_history,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "Resume fit-planner round %d failed (%s); falling back to deterministic trim.",
+                round_idx + 1,
+                exc,
+            )
+            break
+
+        plan_history.append(_summarise_plan(plan))
+        logger.info(
+            "Resume fit-plan round %d/%d (pages %d -> target %d): %s",
+            round_idx + 1,
+            _MAX_FIT_PLAN_ROUNDS,
+            pages,
+            target_pages,
+            plan_history[-1],
+        )
+        current = _apply_fit_plan(current, plan)
+        docx_path, pdf_path, pages = _render(current)
+
+    # Deterministic structural fallback: only used when the LLM plan
+    # didn't converge. Overflow -> drop weakest bullet; underflow is
+    # left to the validator since we will not fabricate content.
+    for attempt in range(_MAX_TRIM_ATTEMPTS):
+        if pages == target_pages:
+            break
+        if pages < target_pages:
+            logger.info(
+                "Resume under target pages (%d < %d) after fit planner; "
+                "cannot fabricate content -- validator will flag.",
+                pages,
+                target_pages,
+            )
+            break
+        trimmed = _drop_weakest_bullet(current)
+        if trimmed is None:
+            logger.info(
+                "Resume already minimal; cannot trim further to hit %d pages (currently %d).",
+                target_pages,
+                pages,
+            )
+            break
+        logger.info(
+            "Resume rendered %d pages > target %d; deterministic bullet drop %d/%d.",
+            pages,
+            target_pages,
+            attempt + 1,
+            _MAX_TRIM_ATTEMPTS,
+        )
+        current = trimmed
+        docx_path, pdf_path, pages = _render(current)
+
+    return current, docx_path, pdf_path
+
+
+def _drop_weakest_bullet(document: ResumeDocument) -> ResumeDocument | None:
+    """Return a copy of ``document`` with one bullet (or empty item) removed.
+
+    Picks the lowest-scoring bullet across projects + experiences so the
+    most relevant evidence stays on the page. When a section item has
+    no bullets left after a previous trim, the whole item is removed
+    instead. Returns None when there is no more content to drop.
+    """
+    trimmed = document.model_copy(deep=True)
+
+    # 1. Drop any item that has been fully emptied by prior trims.
+    for section_name in ("projects", "experiences"):
+        section = getattr(trimmed, section_name)
+        empty_idx = next((idx for idx, item in enumerate(section) if not item.bullets), None)
+        if empty_idx is not None:
+            section.pop(empty_idx)
+            return trimmed
+
+    # 2. Otherwise drop the single weakest bullet across both sections.
+    weakest: tuple[list, int, float] | None = None
+    for section in (trimmed.projects, trimmed.experiences):
+        for item in section:
+            for idx, bullet in enumerate(item.bullets):
+                score = float(getattr(bullet, "score", 0.0) or 0.0)
+                if weakest is None or score < weakest[2]:
+                    weakest = (item.bullets, idx, score)
+    if weakest is None:
+        return None
+    bullets, idx, _ = weakest
+    bullets.pop(idx)
+    return trimmed
+
+
+# ---------------------------------------------------------------------------
+# Fit Planner: single-shot section-level decisions
+# ---------------------------------------------------------------------------
+
+_FIT_PLAN_SYSTEM = """You are a resume editor making a SINGLE structural
+decision to fit a resume to an exact page target. You see every section
+in the candidate's resume (canonical: experiences / projects / education
+/ skills, plus any custom sections such as VOLUNTEER, AWARDS,
+AFFILIATIONS, INTERESTS, CERTIFICATIONS, PUBLICATIONS). For each section,
+decide whether to keep it, how many items to keep, and whether to ask
+for shorter bullets.
+
+Return ONLY a JSON object of this exact shape:
+{
+  "reasoning": "1-2 sentence summary of your decision",
+  "sections": [
+    {
+      "id": "<the id from the outline>",
+      "keep": true | false,
+      "max_items": <int or null>,
+      "bullets_mode": "shorter" | "keep" | "longer"
+    }
+  ]
+}
+
+Decision rules:
+- The candidate's JD-relevant evidence (experiences + projects with
+  high-overlap tags) is the LAST thing you should cut.
+- Drop low-relevance custom sections FIRST when over budget. For a
+  backend engineer role, INTERESTS or PROFESSIONAL AFFILIATIONS are
+  usually cheaper to lose than a Volunteer Engineering experience.
+- Never set keep=false on experiences or skills -- they are required.
+  Education and Projects are required for student / new-grad resumes;
+  mark keep=false only if the candidate has plenty of full-time work.
+- max_items=null means keep all items in that section.
+- bullets_mode applies to experiences / projects / volunteer-like
+  sections that carry bullet text. Use shorter when over-budget,
+  longer when under-budget, keep when length is fine.
+- Include every section id from the outline in your response.
+"""
+
+
+def _generate_resume_fit_plan(
+    *,
+    document: ResumeDocument,
+    target_pages: int,
+    current_pages: int,
+    jd_tags: list[str],
+    previous_plans: list[str],
+) -> dict[str, Any]:
+    """Ask the LLM for a section-level plan to hit the page target.
+
+    Single LLM round-trip. Returns ``{"reasoning": str, "sections":
+    {<id>: {keep, max_items, bullets_mode}}}``. Raises if the LLM is
+    unavailable or returns malformed JSON so the caller can fall back
+    to deterministic trimming.
+    """
+    from src.generation._fit_planner_helpers import (  # noqa: PLC0415
+        build_section_outline,
+        coerce_optional_int,
+    )
+    from src.utils.llm import generate_json  # noqa: PLC0415
+
+    outline = build_section_outline(document)
+    over = current_pages > target_pages
+    delta_word = (
+        f"OVER target by {current_pages - target_pages} page(s)"
+        if over
+        else f"UNDER target by {target_pages - current_pages} page(s)"
+    )
+    history_block = ""
+    if previous_plans:
+        bullets = "\n".join(f"- {entry}" for entry in previous_plans)
+        history_block = (
+            "\n<previous_attempts>\n" + bullets + "\n</previous_attempts>\n"
+            "Adjust more aggressively than last time -- the previous "
+            "plan did not converge.\n"
+        )
+
+    jd_block = ", ".join(jd_tags[:25]) if jd_tags else "(none provided)"
+    prompt = (
+        "<target>\n"
+        f"Target pages: {target_pages}\n"
+        f"Current rendered pages: {current_pages} ({delta_word})\n"
+        "</target>\n\n"
+        "<jd_keywords>\n"
+        f"{jd_block}\n"
+        "</jd_keywords>\n\n"
+        "<resume_outline>\n"
+        f"{outline}\n"
+        "</resume_outline>\n"
+        f"{history_block}"
+        "\nReturn the JSON object specified by the system instructions.\n"
+    )
+
+    result = generate_json(prompt, system=_FIT_PLAN_SYSTEM, timeout=60)
+    if not isinstance(result, dict):
+        raise ValueError(f"Fit plan response is not a JSON object: {type(result).__name__}")
+    sections_raw = result.get("sections")
+    if not isinstance(sections_raw, list) or not sections_raw:
+        raise ValueError("Fit plan missing 'sections' list")
+
+    by_id: dict[str, dict] = {}
+    for entry in sections_raw:
+        if not isinstance(entry, dict):
+            continue
+        section_id = str(entry.get("id") or "").strip()
+        if not section_id:
+            continue
+        by_id[section_id] = {
+            "keep": bool(entry.get("keep", True)),
+            "max_items": coerce_optional_int(entry.get("max_items")),
+            "bullets_mode": str(entry.get("bullets_mode") or "keep").lower(),
+        }
+
+    return {
+        "reasoning": str(result.get("reasoning") or "").strip(),
+        "sections": by_id,
+    }
+
+
+def _summarise_plan(plan: dict[str, Any]) -> str:
+    """One-line plan summary for logs + the planner's previous_plans block."""
+    from src.generation._fit_planner_helpers import summarise_plan  # noqa: PLC0415
+
+    return summarise_plan(plan)
+
+
+def _apply_fit_plan(document: ResumeDocument, plan: dict[str, Any]) -> ResumeDocument:
+    """Deterministically apply a fit plan returned by the LLM.
+
+    Delegates to the helper module so the planner/apply logic stays
+    importable without pulling all of ``resume_builder`` (which has a
+    heavy import surface). The per-bullet rewriter callable is injected
+    here so the helper module never imports from this file.
+    """
+    from src.generation._fit_planner_helpers import apply_fit_plan  # noqa: PLC0415
+
+    return apply_fit_plan(
+        document,
+        plan,
+        bullet_rewriter=_rewrite_bullet_for_length,
+    )

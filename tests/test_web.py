@@ -430,7 +430,11 @@ class TestJobsApi:
         assert response.json()["message"] == "Filled to review stage"
 
     @patch("src.web.routes.api.generate_material_for_job_usecase")
-    def test_generate_material_route(self, mock_generate, client):
+    def test_generate_material_route(self, mock_generate, client, monkeypatch):
+        # Phase 18.2: the route defaults to enqueue + return task_id.
+        # These tests cover the sync code path semantics, so we set
+        # the dev-only escape hatch ``AUTOAPPLY_SYNC_MATERIALS=1``.
+        monkeypatch.setenv("AUTOAPPLY_SYNC_MATERIALS", "1")
         mock_generate.return_value = {
             "ok": True,
             "job": {"company": "TestCo", "title": "SWE Intern"},
@@ -468,7 +472,9 @@ class TestJobsApi:
         self,
         mock_generate,
         client,
+        monkeypatch,
     ):
+        monkeypatch.setenv("AUTOAPPLY_SYNC_MATERIALS", "1")
         mock_generate.return_value = {
             "ok": False,
             "error": "Profile not configured.",
@@ -488,7 +494,9 @@ class TestJobsApi:
         self,
         mock_generate,
         client,
+        monkeypatch,
     ):
+        monkeypatch.setenv("AUTOAPPLY_SYNC_MATERIALS", "1")
         mock_generate.return_value = {
             "ok": False,
             "error": "Renderer failed.",
@@ -502,6 +510,62 @@ class TestJobsApi:
 
         assert response.status_code == 500
         assert response.json()["detail"] == "Renderer failed."
+
+    def test_generate_material_route_async_default_returns_task_id(
+        self, client, monkeypatch
+    ):
+        """Phase 18.2: without ``AUTOAPPLY_SYNC_MATERIALS=1`` the route
+        enqueues and returns a ``task_id`` + ``poll_url`` instead of
+        running the generator inline."""
+
+        captured: dict[str, object] = {}
+
+        def fake_enqueue(*, celery_task, session, spec):
+            captured["kind"] = spec.kind
+            captured["queue"] = spec.queue
+            captured["payload"] = spec.payload
+            from uuid import uuid4
+
+            return uuid4()
+
+        # Force the task registry to load so ``celery_app.tasks``
+        # contains ``materials.generate`` (the test file doesn't
+        # import src.tasks eagerly).
+        import src.tasks  # noqa: F401, PLC0415
+        import src.tasks.tasks  # noqa: F401, PLC0415
+
+        monkeypatch.delenv("AUTOAPPLY_SYNC_MATERIALS", raising=False)
+        monkeypatch.setattr(
+            "src.tasks.base.AutoApplyTask.enqueue",
+            staticmethod(fake_enqueue),
+        )
+
+        @patch("src.application.material_defaults.resolve_material_choice")
+        def _go(mock_resolve):
+            mock_resolve.return_value = {
+                "strategy": "regenerate",
+                "template_id": None,
+                "document_id": None,
+                "patch_aggressiveness": "balanced",
+                "patch_allow_reorder_sections": True,
+                "patch_allow_add_remove_bullets": True,
+            }
+            return client.post(
+                "/api/jobs/generate-material",
+                json={
+                    "material_type": "resume_docx",
+                    "job": {"id": "abc123", "company": "ACME", "title": "Engineer"},
+                },
+            )
+
+        response = _go()
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "queued"
+        assert body["task_id"]
+        assert body["poll_url"].startswith("/api/tasks/")
+        assert captured["kind"] == "materials.generate"
+        assert captured["queue"] == "materials"
 
     @patch("src.web.routes.api.list_material_templates_usecase")
     def test_templates_route(self, mock_templates, client):

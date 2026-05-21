@@ -47,6 +47,59 @@ function toQuery(params) {
   return query ? `?${query}` : ""
 }
 
+function _materialEnvelopeFromTaskRow(row, materialType, extras = {}) {
+  // Phase 18.2: rebuild the legacy ``generate_material_for_job``
+  // envelope from a settled TaskRecord row so call sites don't have
+  // to learn the new shape. ``row.result`` carries the structured
+  // task return value (artifact paths, strategy notes, errors).
+  //
+  // Codex review fix: ``artifacts`` is an OBJECT keyed by document
+  // type, not an array. The old length comparison never fired, so
+  // a task that returned ``{status: "failed", errors: [...]}``
+  // would land here with ``row.status === "succeeded"`` and yield a
+  // misleading ``{ok: true, artifact: null}``. We now treat any
+  // task whose body-level status is not "ok"/"partial-with-data" as
+  // a failure, regardless of the row's Celery-level status.
+  const result = row?.result || {}
+  const artifacts = result.artifacts || {}
+  const docKey = materialType.startsWith("cover_letter")
+    ? "cover_letter"
+    : "resume"
+  const documentArtifact =
+    artifacts[materialType] ||
+    artifacts[docKey] ||
+    artifacts[`${docKey}_docx`] ||
+    null
+  const errors = result.errors || []
+  const bodyStatus = result.status || null
+  const noArtifacts = Object.keys(artifacts).length === 0
+  const rowFailed = row.status !== "succeeded"
+  const bodyFailed =
+    bodyStatus && bodyStatus !== "ok" && (bodyStatus !== "partial" || noArtifacts)
+  if (rowFailed || bodyFailed || (errors.length > 0 && !documentArtifact)) {
+    const err = new Error(
+      errors.length
+        ? errors.map((e) => e.error).join("; ")
+        : result.detail || row.last_error || `Task failed: ${bodyStatus || row.status}`,
+    )
+    err.row = row
+    err.errors = errors
+    throw err
+  }
+  return {
+    ok: true,
+    task_id: row.id,
+    material_type: materialType,
+    artifact: documentArtifact || null,
+    artifacts: Object.fromEntries(
+      Object.entries(artifacts).map(([k, v]) => [k, v?.path || v]),
+    ),
+    strategy: documentArtifact?.strategy ?? null,
+    strategy_notes: documentArtifact?.strategy_notes ?? [],
+    ...extras,
+  }
+}
+
 export const api = {
   // Generic escape hatches for views that talk to routes without a
   // dedicated wrapper (e.g. TasksView hitting /api/tasks and
@@ -61,6 +114,54 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     })
+  },
+  // Phase 18.2 async-task helpers ----------------------------------
+  // Long-running routes (generate-material, regenerate-material)
+  // return ``{task_id, poll_url}``; views call ``pollTask`` to wait
+  // for the structured ``result`` payload without writing their own
+  // setInterval loop.
+  getTask(taskId) {
+    return request(`/api/tasks/${encodeURIComponent(taskId)}`)
+  },
+  /**
+   * Poll ``/api/tasks/{taskId}`` until the row reaches a terminal
+   * state (``succeeded``, ``failed``, ``cancelled``,
+   * ``dead_lettered``, or ``waiting_human``) or ``timeoutMs``
+   * elapses.
+   *
+   * Optional ``onTick(row)`` callback fires after every poll so the
+   * view can render an "in progress" indicator without subscribing
+   * separately.
+   */
+  async pollTask(
+    taskId,
+    {
+      intervalMs = 1500,
+      timeoutMs = 15 * 60 * 1000,
+      onTick = null,
+    } = {},
+  ) {
+    const terminal = new Set([
+      "succeeded",
+      "failed",
+      "cancelled",
+      "dead_lettered",
+      "waiting_human",
+    ])
+    const deadline = Date.now() + timeoutMs
+    let row = await api.getTask(taskId)
+    if (onTick) onTick(row)
+    while (!terminal.has(row.status)) {
+      if (Date.now() > deadline) {
+        const err = new Error(`pollTask timed out after ${timeoutMs}ms`)
+        err.row = row
+        throw err
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs))
+      row = await api.getTask(taskId)
+      if (onTick) onTick(row)
+    }
+    return row
   },
   dashboard() {
     return request("/api/dashboard")
@@ -234,6 +335,13 @@ export const api = {
       body: JSON.stringify(payload),
     })
   },
+  updateTemplateStyles(documentType, templateId, payload) {
+    return request(`/api/templates/${encodeURIComponent(documentType)}/${encodeURIComponent(templateId)}/styles`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+  },
   validateTemplate(documentType, templateId) {
     return request(`/api/templates/${encodeURIComponent(documentType)}/${encodeURIComponent(templateId)}/validate`, {
       method: "POST",
@@ -244,7 +352,19 @@ export const api = {
       method: "DELETE",
     })
   },
-  generateJobMaterial(
+  /**
+   * Phase 18.2: defaults to enqueue + poll for the produced
+   * artifact map. The route now returns ``{status: "queued",
+   * task_id, poll_url}``; this wrapper waits on ``pollTask`` and
+   * returns the legacy sync-style envelope (``{ok, artifact,
+   * artifacts, strategy_notes, ...}``) so existing call sites need
+   * no changes.
+   *
+   * Pass ``{ async: false }`` to skip the poll and hand the raw
+   * task envelope back (useful for views that want their own
+   * progress UX).
+   */
+  async generateJobMaterial(
     job,
     materialType,
     templateId = "",
@@ -257,8 +377,12 @@ export const api = {
       patchAggressiveness = null,
       patchAllowReorderSections = null,
       patchAllowAddRemoveBullets = null,
+      onProgress = null,
+      pollIntervalMs = 1500,
+      pollTimeoutMs,
+      sync = false,
     } = options
-    return request("/api/jobs/generate-material", {
+    const queued = await request("/api/jobs/generate-material", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -273,6 +397,17 @@ export const api = {
         patch_allow_add_remove_bullets: patchAllowAddRemoveBullets,
       }),
     })
+    if (sync || queued.status !== "queued") {
+      // Either AUTOAPPLY_SYNC_MATERIALS=1 brought back the
+      // synchronous path or the caller opted out of polling.
+      return queued
+    }
+    const row = await api.pollTask(queued.task_id, {
+      intervalMs: pollIntervalMs,
+      timeoutMs: pollTimeoutMs,
+      onTick: onProgress,
+    })
+    return _materialEnvelopeFromTaskRow(row, materialType)
   },
   artifactDownloadUrl(path) {
     return `/api/artifacts/download?path=${encodeURIComponent(path)}`
@@ -301,7 +436,28 @@ export const api = {
       body: JSON.stringify({ reason: reason || null }),
     })
   },
-  regenerateApplicationMaterial(
+  /**
+   * Delete an application from the tracker.
+   *
+   * ``cascade=true`` (default) moves the linked resume / cover letter
+   * artifacts and screenshots into the cleanup quarantine immediately
+   * so the user does not have to wait for the retention window. The
+   * database row itself is still soft-deleted via ``deleted_at`` so
+   * audit history survives until the cleanup task purges it.
+   */
+  deleteApplication(applicationId, { cascade = true } = {}) {
+    const query = cascade ? "?cascade=true" : ""
+    return request(`/api/applications/${applicationId}${query}`, {
+      method: "DELETE",
+    })
+  },
+  /**
+   * Phase 18.2 mirror of :func:`generateJobMaterial`: enqueue +
+   * poll. Existing callers that just ``await`` the call still see
+   * the legacy ``{ok, artifact, ...}`` envelope; pass ``sync: true``
+   * to skip the poll and inspect the queued task envelope directly.
+   */
+  async regenerateApplicationMaterial(
     applicationId,
     {
       materialType,
@@ -311,20 +467,38 @@ export const api = {
       patchAggressiveness = null,
       patchAllowReorderSections = null,
       patchAllowAddRemoveBullets = null,
+      onProgress = null,
+      pollIntervalMs = 1500,
+      pollTimeoutMs,
+      sync = false,
     } = {},
   ) {
-    return request(`/api/applications/${applicationId}/regenerate-material`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        material_type: materialType,
-        strategy,
-        template_id: templateId,
-        source_document_id: sourceDocumentId,
-        patch_aggressiveness: patchAggressiveness,
-        patch_allow_reorder_sections: patchAllowReorderSections,
-        patch_allow_add_remove_bullets: patchAllowAddRemoveBullets,
-      }),
+    const queued = await request(
+      `/api/applications/${applicationId}/regenerate-material`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          material_type: materialType,
+          strategy,
+          template_id: templateId,
+          source_document_id: sourceDocumentId,
+          patch_aggressiveness: patchAggressiveness,
+          patch_allow_reorder_sections: patchAllowReorderSections,
+          patch_allow_add_remove_bullets: patchAllowAddRemoveBullets,
+        }),
+      },
+    )
+    if (sync || queued.status !== "queued") {
+      return queued
+    }
+    const row = await api.pollTask(queued.task_id, {
+      intervalMs: pollIntervalMs,
+      timeoutMs: pollTimeoutMs,
+      onTick: onProgress,
+    })
+    return _materialEnvelopeFromTaskRow(row, materialType, {
+      applicationId,
     })
   },
   profile(profileId = "") {
@@ -454,6 +628,13 @@ export const api = {
   },
   automationPlans() {
     return request("/api/automation-plans")
+  },
+  automationPlanRuns(params = {}) {
+    const query = new URLSearchParams()
+    if (params.limit) query.set("limit", String(params.limit))
+    if (params.status) query.set("status", params.status)
+    const suffix = query.toString() ? `?${query.toString()}` : ""
+    return request(`/api/automation-plans/runs${suffix}`)
   },
   createAutomationPlan(payload) {
     return request("/api/automation-plans", {

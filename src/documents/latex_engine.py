@@ -224,13 +224,30 @@ def _cover_letter_template_variables(document) -> dict[str, str]:
 def _render_resume_sections(document) -> str:
     rendered = []
     seen = set()
+    rendered_custom_titles: set[str] = set()
     for section in _resolved_section_order(document):
         if section == "header" or section in seen:
             continue
         seen.add(section)
+        if section.startswith("custom:"):
+            rendered_custom_titles.add(section.split(":", 1)[1].strip().lower())
+        elif section in ("custom", "custom_sections"):
+            for custom in getattr(document, "custom_sections", []) or []:
+                rendered_custom_titles.add(custom.title.strip().lower())
         section_text = _render_resume_section(section, document)
         if section_text:
             rendered.append(section_text)
+
+    # Append any CustomSection the user/profile carried that
+    # section_order didn't explicitly place. Same fallback policy as
+    # the DOCX renderer in docx_engine.py.
+    for custom in getattr(document, "custom_sections", []) or []:
+        if custom.title.strip().lower() in rendered_custom_titles:
+            continue
+        section_text = _render_custom_section(custom)
+        if section_text:
+            rendered.append(section_text)
+            rendered_custom_titles.add(custom.title.strip().lower())
     return "\n\n".join(rendered)
 
 
@@ -243,7 +260,58 @@ def _render_resume_section(section: str, document) -> str:
         return _render_items("Experience", document.experiences)
     if section == "projects":
         return _render_items("Projects", document.projects)
+    if section in ("custom", "custom_sections"):
+        chunks = [
+            _render_custom_section(custom)
+            for custom in getattr(document, "custom_sections", []) or []
+        ]
+        return "\n\n".join(chunk for chunk in chunks if chunk)
+    if section.startswith("custom:"):
+        title = section.split(":", 1)[1].strip().lower()
+        for custom in getattr(document, "custom_sections", []) or []:
+            if custom.title.strip().lower() == title:
+                return _render_custom_section(custom)
+        return ""
     return ""
+
+
+def _render_custom_section(custom) -> str:
+    """Render one CustomSection as a LaTeX block.
+
+    Mirrors :func:`src.documents.docx_engine._render_ir_custom_section`
+    but using the existing LaTeX line / bullet helpers, so a resume
+    with a "VOLUNTEER EXPERIENCE" section renders consistently in both
+    output formats. Skips entries with no usable fields so that empty
+    profile data doesn't leave hanging headings.
+    """
+    entries = [
+        entry
+        for entry in getattr(custom, "entries", []) or []
+        if (entry.title or entry.organization or entry.details or entry.bullets)
+    ]
+    if not entries:
+        return ""
+    lines = [_section_heading(custom.title)]
+    for entry in entries:
+        primary = entry.title.strip() or entry.organization.strip()
+        dates = _format_date_range(entry.start_date, entry.end_date)
+        if primary or dates:
+            lines.append(_bold_line(latex_escape(primary), latex_escape(dates)))
+        subtitle_parts: list[str] = []
+        if entry.title and entry.organization and primary != entry.organization:
+            subtitle_parts.append(entry.organization)
+        if entry.location:
+            subtitle_parts.append(entry.location)
+        subtitle = _join_nonempty(subtitle_parts)
+        if subtitle:
+            lines.append(latex_escape(subtitle))
+        if entry.details:
+            lines.append(latex_escape(entry.details))
+        for bullet in entry.bullets:
+            text = str(bullet).strip()
+            if text:
+                lines.append(rf"\textbullet\ {latex_escape(text)}")
+    return "\n\n".join(line for line in lines if line)
 
 
 def _render_education(education: list[dict]) -> str:
@@ -255,7 +323,12 @@ def _render_education(education: list[dict]) -> str:
         dates = latex_escape(_format_date_range(edu.get("start_date", ""), edu.get("end_date", "")))
         lines.append(_bold_line(institution, dates))
         degree = " ".join(part for part in [edu.get("degree", ""), edu.get("field", "")] if part)
-        gpa = f"GPA: {edu.get('gpa')}" if edu.get("gpa") else ""
+        gpa_text = (edu.get("gpa") or "")
+        gpa_text = str(gpa_text).strip()
+        if gpa_text.lower() in {"", "none", "null", "n/a", "na", "0", "0.0", "0.00"}:
+            gpa = ""
+        else:
+            gpa = f"GPA: {gpa_text}"
         details = _join_nonempty([degree, edu.get("location"), gpa])
         if details:
             lines.append(latex_escape(details))
@@ -348,7 +421,15 @@ def _format_date_range(start: str, end: str) -> str:
 
 
 def _join_nonempty(values: list) -> str:
-    return " | ".join(str(value) for value in values if value)
+    cleaned: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text or text.lower() in {"none", "null", "n/a", "na", "nan"}:
+            continue
+        cleaned.append(text)
+    return " | ".join(cleaned)
 
 
 def _skill_label_map() -> dict[str, str]:

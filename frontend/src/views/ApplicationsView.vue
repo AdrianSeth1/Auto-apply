@@ -8,9 +8,12 @@ import {
   BookMarked,
   CheckCircle2,
   ClipboardCheck,
+  ExternalLink,
   Filter,
   Loader2,
+  RotateCcw,
   Send,
+  Trash2,
   TrendingUp,
 } from "lucide-vue-next"
 
@@ -199,6 +202,74 @@ function closePromoteDialog() {
   promoteDialog.application = null
 }
 
+const rowActionState = reactive({
+  deletingId: "",
+  reapplyingId: "",
+})
+
+const deleteDialog = reactive({
+  open: false,
+  application: null,
+  submitting: false,
+})
+
+function openDeleteDialog(application) {
+  deleteDialog.application = application
+  deleteDialog.submitting = false
+  deleteDialog.open = true
+}
+
+function closeDeleteDialog() {
+  deleteDialog.open = false
+  deleteDialog.application = null
+}
+
+async function confirmDelete() {
+  if (!deleteDialog.application) return
+  const target = deleteDialog.application
+  deleteDialog.submitting = true
+  rowActionState.deletingId = target.id
+  state.error = ""
+  state.message = ""
+  try {
+    await api.deleteApplication(target.id, { cascade: true })
+    state.message = `Deleted application for ${target.job.title} at ${target.job.company}. Linked materials moved to cleanup quarantine.`
+    closeDeleteDialog()
+    await load()
+  } catch (err) {
+    state.error = err?.message || "Couldn't delete the application."
+  } finally {
+    deleteDialog.submitting = false
+    rowActionState.deletingId = ""
+  }
+}
+
+async function reapplyApplication(application) {
+  const url = application?.job?.application_url
+  if (!url) {
+    state.error = "This application has no recorded apply URL, so it can't be re-applied automatically."
+    return
+  }
+  rowActionState.reapplyingId = application.id
+  state.error = ""
+  state.message = ""
+  try {
+    const result = await api.applyJob(url)
+    if (result?.status === "submitted") {
+      state.message = `Re-submitted application for ${application.job.title}.`
+    } else if (result?.status === "review") {
+      state.message = `Re-apply prepared materials for ${application.job.title} -- check Awaiting Review.`
+    } else {
+      state.message = "Re-apply request queued."
+    }
+    await load()
+  } catch (err) {
+    state.error = err?.message || "Couldn't re-apply for this job."
+  } finally {
+    rowActionState.reapplyingId = ""
+  }
+}
+
 async function confirmPromote() {
   if (!promoteDialog.application || !promoteDialog.artifactPath) return
   promoteDialog.submitting = true
@@ -322,6 +393,7 @@ onMounted(load)
                 <th>Match</th>
                 <th>Outcome</th>
                 <th>Materials</th>
+                <th class="text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -386,6 +458,67 @@ onMounted(load)
                     >—</span>
                   </div>
                 </td>
+                <td class="text-right">
+                  <div class="inline-flex items-center gap-1">
+                    <Button
+                      v-if="application.job.application_url"
+                      variant="ghost"
+                      size="sm"
+                      type="button"
+                      :disabled="rowActionState.reapplyingId === application.id"
+                      :title="`Open the original posting (${application.job.application_url})`"
+                      as="a"
+                      :href="application.job.application_url"
+                      target="_blank"
+                      rel="noopener"
+                    >
+                      <ExternalLink class="h-4 w-4" />
+                      <span class="sr-only">Open posting</span>
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      type="button"
+                      :disabled="
+                        !application.job.application_url ||
+                        rowActionState.reapplyingId === application.id ||
+                        rowActionState.deletingId === application.id
+                      "
+                      :title="
+                        application.job.application_url
+                          ? 'Re-run the apply pipeline for this job (regenerates materials and tries again).'
+                          : 'No application URL stored for this row, cannot auto-re-apply.'
+                      "
+                      @click="reapplyApplication(application)"
+                    >
+                      <Loader2
+                        v-if="rowActionState.reapplyingId === application.id"
+                        class="h-4 w-4 animate-spin"
+                      />
+                      <RotateCcw v-else class="h-4 w-4" />
+                      Re-apply
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      type="button"
+                      class="text-destructive hover:text-destructive"
+                      :disabled="
+                        rowActionState.deletingId === application.id ||
+                        rowActionState.reapplyingId === application.id
+                      "
+                      title="Delete this application. Linked materials and screenshots are moved to the cleanup quarantine."
+                      @click="openDeleteDialog(application)"
+                    >
+                      <Loader2
+                        v-if="rowActionState.deletingId === application.id"
+                        class="h-4 w-4 animate-spin"
+                      />
+                      <Trash2 v-else class="h-4 w-4" />
+                      Delete
+                    </Button>
+                  </div>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -428,6 +561,41 @@ onMounted(load)
             <Loader2 v-if="promoteDialog.submitting" class="h-4 w-4 animate-spin" />
             <BookMarked v-else class="h-4 w-4" />
             {{ promoteDialog.submitting ? "Saving…" : "Save to library" }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog :open="deleteDialog.open" @update:open="(v) => !v && closeDeleteDialog()">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Delete this application?</DialogTitle>
+          <DialogDescription>
+            <template v-if="deleteDialog.application">
+              {{ deleteDialog.application.job.title }} at
+              {{ deleteDialog.application.job.company }} will be marked deleted.
+              Its resume, cover letter, and screenshots get moved into the cleanup
+              quarantine immediately and purged after the configured retention
+              window. This cannot be undone from the UI.
+            </template>
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            :disabled="deleteDialog.submitting"
+            @click="closeDeleteDialog"
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            :disabled="deleteDialog.submitting"
+            @click="confirmDelete"
+          >
+            <Loader2 v-if="deleteDialog.submitting" class="h-4 w-4 animate-spin" />
+            <Trash2 v-else class="h-4 w-4" />
+            {{ deleteDialog.submitting ? "Deleting…" : "Delete + clean up" }}
           </Button>
         </DialogFooter>
       </DialogContent>

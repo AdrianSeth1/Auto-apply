@@ -72,11 +72,21 @@ class CompanyStats:
 
 
 def compute_pipeline_stats(session: Session) -> PipelineStats:
-    """Compute overall pipeline statistics."""
+    """Compute overall pipeline statistics.
+
+    Phase 18.4: soft-deleted rows (``deleted_at IS NOT NULL``) are
+    filtered out so the dashboard pipeline counters stop counting
+    rows the operator already removed.
+    """
     stats = PipelineStats()
 
-    # Count by status
-    status_counts = _count_by_column(session, Application.status)
+    # Count by status (live rows only).
+    stmt = (
+        select(Application.status, func.count())
+        .where(Application.deleted_at.is_(None))
+        .group_by(Application.status)
+    )
+    status_counts = {val: count for val, count in session.execute(stmt).all()}
     stats.total_discovered = sum(status_counts.values())
     stats.total_applied = status_counts.get(AppStatus.SUBMITTED, 0)
     stats.total_failed = status_counts.get(AppStatus.FAILED, 0)
@@ -84,7 +94,9 @@ def compute_pipeline_stats(session: Session) -> PipelineStats:
 
     # Average match score
     row = session.execute(
-        select(func.avg(Application.match_score)).where(Application.match_score.isnot(None))
+        select(func.avg(Application.match_score))
+        .where(Application.match_score.isnot(None))
+        .where(Application.deleted_at.is_(None))
     ).scalar()
     stats.avg_match_score = float(row) if row else 0.0
 
@@ -92,7 +104,9 @@ def compute_pipeline_stats(session: Session) -> PipelineStats:
     row = session.execute(
         select(
             func.avg(Application.fields_filled * 1.0 / func.nullif(Application.fields_total, 0))
-        ).where(Application.fields_total.isnot(None), Application.fields_total > 0)
+        )
+        .where(Application.fields_total.isnot(None), Application.fields_total > 0)
+        .where(Application.deleted_at.is_(None))
     ).scalar()
     stats.avg_fields_filled_pct = float(row) if row else 0.0
 
@@ -100,11 +114,17 @@ def compute_pipeline_stats(session: Session) -> PipelineStats:
 
 
 def compute_outcome_stats(session: Session) -> OutcomeStats:
-    """Compute outcome breakdown for submitted applications."""
+    """Compute outcome breakdown for submitted applications.
+
+    Phase 18.4: excludes soft-deleted rows."""
     stats = OutcomeStats()
 
     submitted = (
-        session.execute(select(Application).where(Application.status == AppStatus.SUBMITTED))
+        session.execute(
+            select(Application)
+            .where(Application.status == AppStatus.SUBMITTED)
+            .where(Application.deleted_at.is_(None))
+        )
         .scalars()
         .all()
     )

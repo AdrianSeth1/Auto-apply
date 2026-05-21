@@ -461,9 +461,9 @@ class TestResultShape:
 class TestSubmitRoute:
     """End-to-end through ``POST /api/review/{id}/submit``.
 
-    The route must call into the gate, mutate the entry per the
-    verdict, and (on allow) enqueue ``application.submit``. We patch
-    Celery so no broker is required.
+    The route must call into the gate and mutate the entry only when
+    the gate blocks. Phase 18 does not perform the final external ATS
+    click-submit, so an allowed gate must not mark the entry submitted.
     """
 
     def test_submit_blocked_when_not_approved(self, db_session: Session):
@@ -536,7 +536,7 @@ class TestSubmitRoute:
             )
             db_session.commit()
 
-    def test_submit_clear_flips_to_submitted(
+    def test_submit_clear_does_not_mark_submitted(
         self, db_session: Session, monkeypatch
     ):
         from fastapi.testclient import TestClient
@@ -573,11 +573,12 @@ class TestSubmitRoute:
             )
             assert response.status_code == 200
             body = response.json()
-            assert body["ok"] is True
+            assert body["ok"] is False
+            assert body["status"] == "submit_not_completed"
             assert body["gate"]["action"] == "allow"
-            assert body["entry"]["status"] == "submitted"
-            # Task id surfaced for the UI
-            assert body["submit_task_id"] == "stub-task-id"
+            assert body["entry"]["status"] == "approved"
+            assert body["submit_task_id"] is None
+            assert "not be counted as submitted" in body["detail"]
         finally:
             db_session.execute(
                 sa_delete(ReviewQueueEntry).where(

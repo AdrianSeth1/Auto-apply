@@ -12,7 +12,8 @@ from typing import Any
 
 import click
 
-from src.tasks import celery_app
+from src.application.schedule_control import ScheduleEntryNotFound, run_schedule_entry_now
+from src.core.models import TENANT_DEFAULT
 from src.tasks.beat import get_schedule
 
 
@@ -48,21 +49,16 @@ def schedule_list(as_json: bool) -> None:
 
 @schedule_cmd.command("run-now")
 @click.argument("entry_name")
-def schedule_run_now(entry_name: str) -> None:
+@click.option("--tenant", default=TENANT_DEFAULT, help="Tenant id to dispatch under.")
+def schedule_run_now(entry_name: str, tenant: str) -> None:
     """Enqueue a Beat entry immediately. Workers consume it normally."""
-    schedule = get_schedule()
-    if entry_name not in schedule:
+    tenant_id = (tenant or TENANT_DEFAULT).strip() or TENANT_DEFAULT
+    try:
+        result = run_schedule_entry_now(entry_name, tenant_id=tenant_id)
+    except ScheduleEntryNotFound:
         click.echo(f"no such schedule entry: {entry_name}", err=True)
         raise SystemExit(1)
-    entry = schedule[entry_name]
-    task_name: str = str(entry["task"])
-    queue = entry.get("options", {}).get("queue", "maintenance")
-    celery_app.send_task(
-        task_name,
-        queue=queue,
-        headers={"x-autoapply-tenant": "default"},
-    )
-    click.echo(f"enqueued {task_name} on queue '{queue}'")
+    click.echo(f"enqueued {result['enqueued']} on queue '{result['queue']}'")
 
 
 def _render_schedule(schedule: Any) -> str:

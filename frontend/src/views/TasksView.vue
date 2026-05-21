@@ -51,6 +51,7 @@ const STATUS_OPTIONS = [
   { value: "succeeded", label: "Succeeded" },
   { value: "failed", label: "Failed" },
   { value: "cancelled", label: "Cancelled" },
+  { value: "dead_lettered", label: "Stuck (DLQ)" },
 ]
 
 const STATUS_LABEL = {
@@ -61,6 +62,7 @@ const STATUS_LABEL = {
   cancelled: "Cancelled",
   waiting_human: "Awaiting review",
   expired: "Expired",
+  dead_lettered: "Stuck (DLQ)",
 }
 
 const CADENCE_OPTIONS = [
@@ -216,12 +218,9 @@ async function refreshAll() {
   state.loading = true
   state.error = ""
   try {
-    const suffix = state.statusFilter
-      ? `?limit=75&status=${encodeURIComponent(state.statusFilter)}`
-      : "?limit=75"
     const [tasksResp, scheduleResp, filtersResp, profilesResp, templatesResp, docsResp] =
       await Promise.all([
-        api.get(`/api/tasks${suffix}`),
+        api.automationPlanRuns({ limit: 75, status: state.statusFilter }),
         api.automationPlans(),
         api.filterProfiles(),
         api.profile(),
@@ -253,7 +252,14 @@ const activeRuns = computed(() =>
 )
 
 const failedRuns = computed(() =>
-  state.tasks.filter((task) => task.status === "failed"),
+  state.tasks.filter((task) => task.status === "failed" || task.status === "dead_lettered"),
+)
+
+// Phase 18.3: dead-lettered tasks are surfaced separately in the
+// "Stuck / failed" tab so the operator can replay or discard them
+// without scrolling the main list.
+const stuckRuns = computed(() =>
+  state.tasks.filter((task) => task.status === "dead_lettered"),
 )
 
 const nextSchedule = computed(() => {
@@ -274,7 +280,7 @@ const applicantProfileOptions = computed(() => [
 
 function statusVariant(status) {
   if (status === "succeeded") return "default"
-  if (status === "failed") return "destructive"
+  if (status === "failed" || status === "dead_lettered") return "destructive"
   if (status === "running" || status === "waiting_human") return "secondary"
   return "outline"
 }
@@ -285,6 +291,16 @@ function statusLabel(status) {
 
 function applyModeLabel(mode) {
   return APPLY_MODE_LABEL[mode] || mode
+}
+
+function planRunName(task) {
+  return task?.payload?.automation_plan_name || task?.payload?.automation_plan_id || task.kind_display
+}
+
+function planRunDescription(task) {
+  return task?.payload?.search_profile_id
+    ? `Saved search: ${task.payload.search_profile_id}`
+    : task.kind_description
 }
 
 function formatTimestamp(iso) {
@@ -490,6 +506,22 @@ async function cancelTask(id) {
     await refreshAll()
   } catch (err) {
     state.error = err?.message || "Couldn't cancel that run."
+  } finally {
+    delete state.busy[id]
+  }
+}
+
+async function discardTask(id) {
+  // Phase 18.3: drop a dead-lettered task from the "Stuck / failed"
+  // tab without retrying. The row transitions to ``cancelled`` so
+  // it stays auditable; a later retry from the cancelled state is
+  // still allowed if the operator changes their mind.
+  state.busy[id] = "discard"
+  try {
+    await api.post(`/api/tasks/${id}/discard`, {})
+    await refreshAll()
+  } catch (err) {
+    state.error = err?.message || "Couldn't discard that run."
   } finally {
     delete state.busy[id]
   }
@@ -906,15 +938,16 @@ onMounted(refreshAll)
                 <th class="py-2 pr-4">Status</th>
                 <th class="py-2 pr-4">Tries</th>
                 <th class="py-2 pr-4">Finished</th>
+                <th class="py-2 pr-4">Notes</th>
                 <th class="py-2 text-right">Action</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="task in state.tasks" :key="task.id" class="border-t align-top">
                 <td class="py-3 pr-4">
-                  <div class="font-medium">{{ task.kind_display }}</div>
-                  <div v-if="task.kind_description" class="text-xs text-muted-foreground">
-                    {{ task.kind_description }}
+                  <div class="font-medium">{{ planRunName(task) }}</div>
+                  <div v-if="planRunDescription(task)" class="text-xs text-muted-foreground">
+                    {{ planRunDescription(task) }}
                   </div>
                 </td>
                 <td class="py-3 pr-4">
@@ -931,9 +964,39 @@ onMounted(refreshAll)
                 <td class="py-3 pr-4 text-xs text-muted-foreground">
                   {{ formatTimestamp(task.finished_at) }}
                 </td>
+                <td class="py-3 pr-4 text-xs text-muted-foreground">
+                  <span v-if="task.status === 'dead_lettered' && task.dlq_reason" :title="task.dlq_reason">
+                    DLQ:&nbsp;{{ task.dlq_reason.length > 60 ? task.dlq_reason.slice(0, 60) + '…' : task.dlq_reason }}
+                  </span>
+                </td>
                 <td class="py-3 text-right">
+                  <div
+                    v-if="task.status === 'dead_lettered'"
+                    class="flex items-center justify-end gap-2"
+                  >
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      :disabled="!!state.busy[task.id]"
+                      @click="retryTask(task.id)"
+                    >
+                      <Loader2 v-if="state.busy[task.id] === 'retry'" class="size-4 animate-spin" />
+                      <RotateCcw v-else class="size-4" />
+                      {{ state.busy[task.id] === 'retry' ? 'Retrying…' : 'Retry' }}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      :disabled="!!state.busy[task.id]"
+                      @click="discardTask(task.id)"
+                    >
+                      <Loader2 v-if="state.busy[task.id] === 'discard'" class="size-4 animate-spin" />
+                      <XCircle v-else class="size-4" />
+                      {{ state.busy[task.id] === 'discard' ? 'Discarding…' : 'Discard' }}
+                    </Button>
+                  </div>
                   <Button
-                    v-if="task.status === 'failed' || task.status === 'cancelled'"
+                    v-else-if="task.status === 'failed' || task.status === 'cancelled'"
                     size="sm"
                     variant="outline"
                     :disabled="!!state.busy[task.id]"
