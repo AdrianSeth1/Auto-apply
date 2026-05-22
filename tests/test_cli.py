@@ -650,7 +650,7 @@ class TestApplicationUseCases:
             result = await apply_to_url(url="https://www.linkedin.com/jobs/view/123/")
 
         assert result["ok"] is False
-        assert result["error_code"] == "unsupported_ats"
+        assert result["error_code"] == "linkedin_easy_apply_only"
         mock_load_job.assert_not_called()
 
     def test_load_applications_data_uses_filtered_records_for_summaries(self):
@@ -983,7 +983,7 @@ class TestMaterialGeneration:
             patch("src.generation.qa_responder.answer_questions") as mock_answers,
         ):
             mock_resume.return_value = {"pdf": Path("data/output/resume_testco_swe_intern.pdf")}
-            mock_cover.return_value = {"txt": Path("data/output/cover_testco_swe_intern.txt")}
+            mock_cover.return_value = {"pdf": Path("data/output/cover_testco_swe_intern.pdf")}
             mock_answers.return_value = [
                 SimpleNamespace(
                     question="Are you legally authorized to work?",
@@ -994,7 +994,7 @@ class TestMaterialGeneration:
             resume_path, cover_path, qa_responses = await _generate_materials(profile_data, job)
 
         assert resume_path == Path("data/output/resume_testco_swe_intern.pdf")
-        assert cover_path == Path("data/output/cover_testco_swe_intern.txt")
+        assert cover_path == Path("data/output/cover_testco_swe_intern.pdf")
         assert qa_responses == {"Are you legally authorized to work?": "Yes"}
         mock_resume.assert_called_once()
         mock_cover.assert_called_once()

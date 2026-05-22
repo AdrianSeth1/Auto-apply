@@ -95,6 +95,12 @@ class GenericAdapter(BaseATSAdapter):
             fields_filled = 0
             fields_total = 0
             qa_answered = 0
+            # GenericAdapter overrides ``apply()`` instead of using the
+            # base implementation, so we have to manage the per-field
+            # details buffer ourselves -- reset it before walking the
+            # multi-step form, ``_fill_current_page`` accumulates into
+            # it page by page.
+            self._last_fill_details = []
 
             for _ in range(self.max_steps):
                 filled, total, answered = await self._fill_current_page(
@@ -117,6 +123,11 @@ class GenericAdapter(BaseATSAdapter):
             state.transition(AppStatus.FIELDS_MAPPED, fields_filled=fields_filled)
             result.fields_filled = fields_filled
             result.fields_total = fields_total
+            # Copy the per-field log onto the result so ``sync_state_to_db``
+            # can persist it. The base ``apply()`` does this automatically
+            # for adapters that inherit it; we have to do it explicitly
+            # here because GenericAdapter has its own ``apply()``.
+            result.fill_details = list(self._last_fill_details)
             result.screenshots.append(
                 await self.browser.screenshot(page, "fields_mapped", state.job_id)
             )
@@ -256,6 +267,13 @@ class GenericAdapter(BaseATSAdapter):
 
         mappings = map_fields_to_profile(fields, profile_data, combined_qa or None)
         filled_mappings = await fill_fields(page, mappings)
+        # Publish per-field details so the base ``apply()`` can persist
+        # them on the application row. Accumulate across multi-step
+        # forms by extending what the previous page already recorded.
+        prior = list(self._last_fill_details)
+        self._record_fill_details(filled_mappings)
+        self._last_fill_details = prior + list(self._last_fill_details)
+
         filled = sum(1 for mapping in filled_mappings if mapping.filled)
         answered = sum(
             1

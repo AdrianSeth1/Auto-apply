@@ -10,14 +10,23 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
 
+from src.documents._shared import (
+    clean_cover_letter_location as _clean_cover_letter_location,
+    clean_field as _clean_field,
+    cover_letter_contact_lines as _cover_letter_contact_lines,
+    cover_letter_date as _cover_letter_date,
+    cover_letter_recipient_lines as _cover_letter_recipient_lines,
+    normalise_divider_set as _normalise_divider_set,
+    section_wants_divider as _section_wants_divider,
+)
 from src.documents.templates import TemplateManifest, default_manifest
 
 logger = logging.getLogger("autoapply.documents.docx_engine")
@@ -130,19 +139,29 @@ def build_resume_from_ir(
     """
     manifest = manifest or default_manifest("resume")
     styles = manifest.styles
-    doc = Document(str(template_path))
-    substitute_placeholders(doc, _resume_template_variables(document))
+    # Activate the manifest's optional "emphasis font" (the second font
+    # the user picked in Template Library) for the duration of this
+    # render. ``_add_styled_paragraph`` reads it when emitting bold
+    # runs so a Markdown ``**FastAPI**`` highlight can use a different
+    # face from the body text. Cleared in ``finally`` so a render fault
+    # never leaks a font setting into the next call.
+    _set_active_emphasis_font(getattr(manifest, "emphasis_font", None))
+    try:
+        doc = Document(str(template_path))
+        substitute_placeholders(doc, _resume_template_variables(document))
 
-    if not _render_resume_markers(doc, document, styles, manifest):
-        _clear_document_body(doc)
-        _render_resume_sections(_DocxSink(doc), document, styles, include_header=True)
+        if not _render_resume_markers(doc, document, styles, manifest):
+            _clear_document_body(doc)
+            _render_resume_sections(_DocxSink(doc), document, styles, include_header=True)
 
-    _remove_empty_placeholder_paragraphs(doc)
+        _remove_empty_placeholder_paragraphs(doc)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(str(output_path))
-    logger.info("Saved IR resume to %s", output_path)
-    return output_path
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        doc.save(str(output_path))
+        logger.info("Saved IR resume to %s", output_path)
+        return output_path
+    finally:
+        _set_active_emphasis_font(None)
 
 
 def _render_resume_markers(
@@ -192,6 +211,9 @@ def _render_resume_sections(
     *,
     include_header: bool,
 ) -> None:
+    # Build the divider lookup once -- match tokens are normalised so
+    # both ``"experience"`` and ``"custom:VOLUNTEER EXPERIENCE"`` work.
+    dividers_after = _normalise_divider_set(getattr(document, "dividers_after", None))
     rendered = set()
     rendered_custom_titles: set[str] = set()
     for section in _resolved_section_order(document):
@@ -206,6 +228,8 @@ def _render_resume_sections(
             for custom in getattr(document, "custom_sections", []) or []:
                 rendered_custom_titles.add(custom.title.strip().lower())
         _render_resume_section(section, sink, document, styles)
+        if _section_wants_divider(section, dividers_after):
+            _add_horizontal_rule(sink)
 
     # Catch-all: any CustomSection that wasn't explicitly placed by
     # ``section_order`` gets rendered at the end. This is what lets the
@@ -217,6 +241,9 @@ def _render_resume_sections(
             continue
         _render_ir_custom_section(sink, custom, styles)
         rendered_custom_titles.add(custom.title.strip().lower())
+        token = f"custom:{custom.title}"
+        if _section_wants_divider(token, dividers_after):
+            _add_horizontal_rule(sink)
 
 
 def _render_resume_section(section: str, sink, document, styles: dict[str, str]) -> None:
@@ -296,25 +323,33 @@ def build_cover_letter_from_ir(
     """Build a DOCX cover letter from CoverLetterDocument IR."""
     manifest = manifest or default_manifest("cover_letter")
     styles = manifest.styles
-    doc = Document(str(template_path)) if template_path and template_path.exists() else Document()
-    substitute_placeholders(doc, _cover_letter_template_variables(document))
+    _set_active_emphasis_font(getattr(manifest, "emphasis_font", None))
+    try:
+        doc = (
+            Document(str(template_path))
+            if template_path and template_path.exists()
+            else Document()
+        )
+        substitute_placeholders(doc, _cover_letter_template_variables(document))
 
-    marker = manifest.blocks.get("body", "{{cover_letter.body}}")
-    marker_para = _find_marker_paragraph(doc, marker)
-    if marker_para is not None:
-        sink = _DocxSink(doc, marker_para)
-        _render_cover_letter_body(sink, document, styles)
-        _remove_paragraph(marker_para)
-    else:
-        _clear_document_body(doc)
-        _render_cover_letter_fallback(_DocxSink(doc), document, styles)
+        marker = manifest.blocks.get("body", "{{cover_letter.body}}")
+        marker_para = _find_marker_paragraph(doc, marker)
+        if marker_para is not None:
+            sink = _DocxSink(doc, marker_para)
+            _render_cover_letter_body(sink, document, styles)
+            _remove_paragraph(marker_para)
+        else:
+            _clear_document_body(doc)
+            _render_cover_letter_fallback(_DocxSink(doc), document, styles)
 
-    _remove_empty_placeholder_paragraphs(doc)
+        _remove_empty_placeholder_paragraphs(doc)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(str(output_path))
-    logger.info("Saved cover letter to %s", output_path)
-    return output_path
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        doc.save(str(output_path))
+        logger.info("Saved cover letter to %s", output_path)
+        return output_path
+    finally:
+        _set_active_emphasis_font(None)
 
 
 def _render_cover_letter_fallback(sink, document, styles: dict[str, str]) -> None:
@@ -323,19 +358,25 @@ def _render_cover_letter_fallback(sink, document, styles: dict[str, str]) -> Non
 
     name = applicant.get("name") or applicant.get("full_name") or ""
     if name:
-        _add_styled_paragraph(sink, str(name), styles.get("header"))
-    contact = _join_nonempty([applicant.get("email"), applicant.get("phone")])
-    if contact:
-        _add_styled_paragraph(sink, contact, styles.get("header"))
+        paragraph = _add_styled_paragraph(sink, str(name), styles.get("header"))
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    contact_lines = _cover_letter_contact_lines(applicant)
+    if contact_lines:
+        paragraph = _add_styled_paragraph(
+            sink, "\n".join(contact_lines), styles.get("header")
+        )
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
-    company = recipient.get("company")
-    if company:
-        _add_styled_paragraph(sink, str(company), styles.get("recipient"))
+    _add_styled_paragraph(sink, _cover_letter_date(), styles.get("date"))
+    recipient_lines = _cover_letter_recipient_lines(recipient)
+    if recipient_lines:
+        _add_styled_paragraph(sink, "\n".join(recipient_lines), styles.get("recipient"))
     _add_styled_paragraph(sink, "Dear Hiring Manager,", styles.get("body"))
     _render_cover_letter_body(sink, document, styles)
     _add_styled_paragraph(sink, "Sincerely,", styles.get("signature"))
     if name:
         _add_styled_paragraph(sink, str(name), styles.get("signature"))
+    _add_styled_paragraph(sink, "Enclosure", styles.get("signature"))
 
 
 def _render_cover_letter_body(sink, document, styles: dict[str, str]) -> None:
@@ -423,19 +464,16 @@ def _cover_letter_template_variables(document) -> dict[str, str]:
     applicant = document.applicant or {}
     recipient = document.recipient or {}
     name = applicant.get("name") or applicant.get("full_name") or ""
-    contact = _join_nonempty([applicant.get("email"), applicant.get("phone")])
+    contact = "\n".join(_cover_letter_contact_lines(applicant))
+    recipient_block = "\n".join(_cover_letter_recipient_lines(recipient))
     return {
         "applicant.name": str(name),
         "applicant.contact": contact,
         "date": _cover_letter_date(),
+        "recipient.block": recipient_block,
         "recipient.company": str(recipient.get("company") or ""),
         "signature": str(name),
     }
-
-
-def _cover_letter_date() -> str:
-    today = datetime.now()
-    return f"{today:%B} {today.day}, {today:%Y}"
 
 
 def _resolved_section_order(document) -> list[str]:
@@ -545,6 +583,24 @@ def _add_section_heading(doc: Document, title: str, styles: dict[str, str]) -> N
     _add_styled_paragraph(doc, title, styles.get("section_heading"), fallback="Heading 2")
 
 
+# Module-level "current emphasis font" -- set by ``build_resume_from_ir`` /
+# ``build_cover_letter_from_ir`` when the active manifest declares one,
+# read inside ``_add_styled_paragraph`` to swap the font on bold/italic
+# runs. We keep it as module state rather than threading a parameter
+# through every sub-renderer because the call graph is wide
+# (header / education / skills / experience / projects / custom) and
+# every call site would otherwise need a new kwarg. The renderer is
+# always invoked from a single Python thread per render, so module
+# state is safe here. Always cleared in a ``finally`` so a render that
+# raises does not leak the font into the next call.
+_ACTIVE_EMPHASIS_FONT: str | None = None
+
+
+def _set_active_emphasis_font(font: str | None) -> None:
+    global _ACTIVE_EMPHASIS_FONT
+    _ACTIVE_EMPHASIS_FONT = (font or "").strip() or None
+
+
 def _add_styled_paragraph(
     doc: Document,
     text: str,
@@ -552,13 +608,83 @@ def _add_styled_paragraph(
     *,
     fallback: str | None = None,
 ):
+    """Append a paragraph honouring inline ``**bold**`` / ``*italic*``
+    markers from the LLM.
+
+    Backwards compatible: ``text`` with no markers renders identically
+    to the previous single-run implementation. When markers are present
+    the paragraph is built run by run so Word shows the formatting and
+    the style's named font is preserved on every run. A configured
+    ``manifest.emphasis_font`` (the "second font" the user picked in
+    Template Library) overrides the font for bold runs only -- italics
+    keep the body font so the contrast is purely structural rather than
+    typographic noise.
+    """
+    from src.generation.inline_format import (  # noqa: PLC0415
+        is_divider_paragraph,
+        parse_inline_markup,
+    )
+
+    if is_divider_paragraph(text):
+        return _add_horizontal_rule(doc)
+
     style_candidates = [style for style in (style_name, fallback) if style]
+    paragraph = None
     for style in style_candidates:
         try:
-            return doc.add_paragraph(text, style=style)
+            paragraph = doc.add_paragraph("", style=style)
+            break
         except KeyError:
             continue
-    return doc.add_paragraph(text)
+    if paragraph is None:
+        paragraph = doc.add_paragraph("")
+
+    runs = parse_inline_markup(text)
+    if not runs or (len(runs) == 1 and not runs[0].bold and not runs[0].italic):
+        # Fast path -- a single plain run is the common case; assign
+        # directly so existing behaviour (and downstream
+        # ``paragraph.runs[0].text`` access) keeps working.
+        plain = runs[0].text if runs else ""
+        if plain:
+            paragraph.add_run(plain)
+        return paragraph
+
+    emphasis_font = _ACTIVE_EMPHASIS_FONT
+    for run in runs:
+        if not run.text:
+            continue
+        word_run = paragraph.add_run(run.text)
+        if run.bold:
+            word_run.bold = True
+            if emphasis_font:
+                word_run.font.name = emphasis_font
+        if run.italic:
+            word_run.italic = True
+    return paragraph
+
+
+def _add_horizontal_rule(doc) -> None:
+    """Insert a horizontal rule paragraph.
+
+    Implemented as an empty paragraph with a bottom border so it shows
+    up the same in Word, LibreOffice, and the PDF converter. We avoid
+    actual ``<w:hr/>`` because that element is not part of the OOXML
+    standard -- the bottom-border trick is the canonical workaround.
+    """
+    from docx.oxml import OxmlElement  # noqa: PLC0415
+    from docx.oxml.ns import qn  # noqa: PLC0415
+
+    paragraph = doc.add_paragraph("")
+    p_pr = paragraph._p.get_or_add_pPr()
+    p_bdr = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "6")  # 1/8 pt units -> ~0.75pt rule
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), "808080")
+    p_bdr.append(bottom)
+    p_pr.append(p_bdr)
+    return paragraph
 
 
 def _add_resume_bullet(doc: Document, text: str, styles: dict[str, str]) -> None:
@@ -599,24 +725,6 @@ def _gpa_label(value) -> str:
     if text.lower() in {"none", "n/a", "na", "null", "0", "0.0", "0.00"}:
         return ""
     return f"GPA: {text}"
-
-
-def _clean_field(value) -> str:
-    """Return a trimmed string, treating None / "None" / "null" as empty.
-
-    Profile fields imported from heterogeneous sources sometimes round-trip
-    through ``str(None)`` and arrive at the renderer as the literal text
-    "None". This helper keeps every renderer call site one line of code
-    away from doing the right thing.
-    """
-    if value is None:
-        return ""
-    text = str(value).strip()
-    if not text:
-        return ""
-    if text.lower() in {"none", "null", "n/a", "na", "nan"}:
-        return ""
-    return text
 
 
 def _join_nonempty(values: list) -> str:

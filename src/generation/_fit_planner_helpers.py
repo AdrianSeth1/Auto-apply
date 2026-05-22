@@ -11,6 +11,8 @@ import asyncio
 import logging
 from typing import Any
 
+from src.utils.parallelism import run_coroutine_safely as _run_coroutine_safely
+
 logger = logging.getLogger("autoapply.generation.fit_planner")
 
 
@@ -166,7 +168,7 @@ def resize_section_bullets_in_place(
 
         await asyncio.gather(*(_one(triple) for triple in bullets))
 
-    asyncio.run(_runner())
+    _run_coroutine_safely(_runner())
 
 
 def apply_fit_plan(document, plan: dict[str, Any], *, bullet_rewriter):
@@ -218,5 +220,36 @@ def apply_fit_plan(document, plan: dict[str, Any], *, bullet_rewriter):
         if mode not in {"shorter", "longer"}:
             continue
         resize_section_bullets_in_place(items, mode, bullet_rewriter)
+
+    # Translate per-section ``divider_after`` decisions into the IR's
+    # ``dividers_after`` list. We rebuild the list from scratch each
+    # apply so a previously-set divider can be revoked by a subsequent
+    # plan round (e.g. if the planner now decides a section should be
+    # dropped entirely, leaving its trailing divider would be visual
+    # noise).
+    dividers: list[str] = []
+    canonical_keys = {
+        "experiences": "experience",
+        "projects": "projects",
+        "education": "education",
+        "skills": "skills",
+    }
+    for key, rendered_section in canonical_keys.items():
+        if (decisions.get(key) or {}).get("divider_after"):
+            dividers.append(rendered_section)
+    for custom in new_doc.custom_sections or []:
+        token = f"custom:{custom.title}"
+        # Look up the plan decision both by the indexed id we sent and
+        # by the bare ``custom:<title>`` form so a planner that echoed
+        # only the title still gets honoured.
+        for section_id, decision in decisions.items():
+            if not isinstance(decision, dict):
+                continue
+            if not decision.get("divider_after"):
+                continue
+            if section_id == token or section_id.endswith(f":{custom.title}"):
+                dividers.append(token)
+                break
+    new_doc.dividers_after = dividers
 
     return new_doc

@@ -66,6 +66,11 @@ def sync_state_to_db(
         app.files_uploaded = result.get("files_uploaded", app.files_uploaded)
         app.qa_responses = result.get("qa_responses", app.qa_responses)
         app.screenshot_paths = result.get("screenshot_paths", app.screenshot_paths)
+        # Phase 18.5: persist per-field record so the Review UI can show
+        # "we tried these fields with these values, this one failed
+        # because ..." rather than just the integer counters.
+        if "fill_details" in result:
+            app.fill_details = result.get("fill_details") or []
 
     if state.status == AppStatus.SUBMITTED and app.submitted_at is None:
         app.submitted_at = datetime.now(UTC)

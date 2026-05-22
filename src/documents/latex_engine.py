@@ -10,6 +10,15 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from src.documents._shared import (
+    clean_cover_letter_location as _clean_cover_letter_location,
+    clean_field as _clean_field,
+    cover_letter_contact_lines as _cover_letter_contact_lines,
+    cover_letter_date as _cover_letter_date,
+    cover_letter_recipient_lines as _cover_letter_recipient_lines,
+    normalise_divider_set as _normalise_divider_set,
+    section_wants_divider as _section_wants_divider,
+)
 from src.documents.templates import TemplateManifest, default_manifest
 
 logger = logging.getLogger("autoapply.documents.latex_engine")
@@ -31,9 +40,56 @@ LATEX_ESCAPE_MAP = {
 
 
 def latex_escape(value: Any) -> str:
-    """Escape user/generated text for safe insertion into LaTeX content."""
+    """Escape user/generated text for safe insertion into LaTeX content.
+
+    The escape map deliberately does not handle Markdown-ish inline
+    markers (``**bold**`` / ``*italic*``) -- those are pre-processed
+    by :func:`latex_inline` so the markup never reaches this escape
+    pass. Calling ``latex_escape`` on raw text from the LLM is still
+    safe -- a stray ``**`` becomes literal characters in the output
+    rather than corrupting the document.
+    """
     text = "" if value is None else str(value)
     return "".join(LATEX_ESCAPE_MAP.get(char, char) for char in text)
+
+
+def latex_inline(value: Any) -> str:
+    """Render text that may carry inline ``**bold**`` / ``*italic*``
+    markers as a LaTeX-safe string, wrapping the marked spans in
+    ``\\textbf{...}`` / ``\\textit{...}``.
+
+    All non-marker characters still go through :func:`latex_escape` so
+    backslashes / underscores / percent signs are escaped properly.
+    Divider paragraphs (a line of dashes) come back as the LaTeX HR
+    command from :func:`latex_horizontal_rule` -- callers that want a
+    block divider should detect it earlier via
+    :func:`src.generation.inline_format.is_divider_paragraph` and emit
+    the rule themselves.
+    """
+    from src.generation.inline_format import parse_inline_markup  # noqa: PLC0415
+
+    pieces: list[str] = []
+    for run in parse_inline_markup(value):
+        escaped = latex_escape(run.text)
+        if not escaped:
+            continue
+        if run.bold and run.italic:
+            pieces.append(rf"\textbf{{\textit{{{escaped}}}}}")
+        elif run.bold:
+            pieces.append(rf"\textbf{{{escaped}}}")
+        elif run.italic:
+            pieces.append(rf"\textit{{{escaped}}}")
+        else:
+            pieces.append(escaped)
+    return "".join(pieces)
+
+
+def latex_horizontal_rule() -> str:
+    """LaTeX snippet for a thin horizontal divider rule spanning the
+    text width. Used by the section-divider rendering path so the
+    LaTeX and DOCX outputs match visually.
+    """
+    return r"\noindent\rule{\linewidth}{0.4pt}"
 
 
 def build_resume_tex_from_ir(
@@ -212,19 +268,24 @@ def _cover_letter_template_variables(document) -> dict[str, str]:
     applicant = document.applicant or {}
     recipient = document.recipient or {}
     name = applicant.get("name") or applicant.get("full_name") or ""
-    contact = _join_nonempty([applicant.get("email"), applicant.get("phone")])
+    contact = _latex_line_block(_cover_letter_contact_lines(applicant))
+    recipient_block = _latex_line_block(_cover_letter_recipient_lines(recipient))
     return {
         "applicant.name": latex_escape(name),
-        "applicant.contact": latex_escape(contact),
+        "applicant.contact": contact,
+        "date": latex_escape(_cover_letter_date()),
+        "recipient.block": recipient_block,
         "recipient.company": latex_escape(recipient.get("company") or ""),
         "signature": latex_escape(name),
     }
 
 
 def _render_resume_sections(document) -> str:
-    rendered = []
-    seen = set()
+    rendered: list[str] = []
+    seen: set[str] = set()
     rendered_custom_titles: set[str] = set()
+    dividers_after = _normalise_divider_set(getattr(document, "dividers_after", None))
+
     for section in _resolved_section_order(document):
         if section == "header" or section in seen:
             continue
@@ -237,6 +298,8 @@ def _render_resume_sections(document) -> str:
         section_text = _render_resume_section(section, document)
         if section_text:
             rendered.append(section_text)
+            if _section_wants_divider(section, dividers_after):
+                rendered.append(latex_horizontal_rule())
 
     # Append any CustomSection the user/profile carried that
     # section_order didn't explicitly place. Same fallback policy as
@@ -248,6 +311,9 @@ def _render_resume_sections(document) -> str:
         if section_text:
             rendered.append(section_text)
             rendered_custom_titles.add(custom.title.strip().lower())
+            token = f"custom:{custom.title}"
+            if _section_wants_divider(token, dividers_after):
+                rendered.append(latex_horizontal_rule())
     return "\n\n".join(rendered)
 
 
@@ -306,11 +372,11 @@ def _render_custom_section(custom) -> str:
         if subtitle:
             lines.append(latex_escape(subtitle))
         if entry.details:
-            lines.append(latex_escape(entry.details))
+            lines.append(latex_inline(entry.details))
         for bullet in entry.bullets:
             text = str(bullet).strip()
             if text:
-                lines.append(rf"\textbullet\ {latex_escape(text)}")
+                lines.append(rf"\textbullet\ {latex_inline(text)}")
     return "\n\n".join(line for line in lines if line)
 
 
@@ -371,7 +437,7 @@ def _render_items(title: str, items: list) -> str:
             subtitle = _join_nonempty([", ".join(item.tech_stack), item.meta])
         if subtitle:
             lines.append(latex_escape(subtitle))
-        bullets = [latex_escape(bullet.text) for bullet in item.bullets if bullet.text]
+        bullets = [latex_inline(bullet.text) for bullet in item.bullets if bullet.text]
         if bullets:
             lines.append(_itemize(bullets))
     return "\n\n".join(line for line in lines if line)
@@ -379,9 +445,13 @@ def _render_items(title: str, items: list) -> str:
 
 def _render_cover_letter_body(document) -> str:
     paragraphs = [
-        latex_escape(paragraph.text) for paragraph in document.paragraphs if paragraph.text
+        latex_inline(paragraph.text) for paragraph in document.paragraphs if paragraph.text
     ]
     return "\n\n".join(paragraphs)
+
+
+def _latex_line_block(lines: list[str]) -> str:
+    return "\\\\\n".join(latex_escape(line) for line in lines if line)
 
 
 def _section_heading(title: str) -> str:
@@ -423,10 +493,8 @@ def _format_date_range(start: str, end: str) -> str:
 def _join_nonempty(values: list) -> str:
     cleaned: list[str] = []
     for value in values:
-        if value is None:
-            continue
-        text = str(value).strip()
-        if not text or text.lower() in {"none", "null", "n/a", "na", "nan"}:
+        text = _clean_field(value)
+        if not text:
             continue
         cleaned.append(text)
     return " | ".join(cleaned)

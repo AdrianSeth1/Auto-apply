@@ -12,6 +12,7 @@ from src.documents.docx_engine import (
     _resolved_section_order as _resolved_section_order_docx,
 )
 from src.documents.docx_engine import (
+    build_cover_letter_from_ir,
     build_resume,
     build_resume_from_ir,
     create_default_template,
@@ -44,7 +45,13 @@ from src.documents.templates import (
     update_docx_template_styles,
     update_latex_template_package,
 )
-from src.generation.ir import ResumeBullet, ResumeDocument, ResumeItem
+from src.generation.ir import (
+    CoverLetterDocument,
+    CoverLetterParagraph,
+    ResumeBullet,
+    ResumeDocument,
+    ResumeItem,
+)
 
 TMP_DIR = Path("data/output/_test")
 
@@ -252,6 +259,165 @@ class TestDocxEngine:
         full_text = " ".join(p.text for p in doc.paragraphs)
         assert "GPA: None" not in full_text
         assert "None" not in full_text  # not anywhere as a stray field
+
+    def test_build_resume_renders_inline_bold_and_italic_runs(self, tmp_path):
+        """LLM-emitted inline ``**bold**`` and ``*italic*`` markers must
+        survive into the rendered DOCX as run-level formatting (not
+        leak through as literal asterisks)."""
+        from src.generation.ir import ResumeBullet, ResumeDocument, ResumeItem
+
+        template_path = tmp_path / "template_runs.docx"
+        create_default_template(template_path)
+        output_path = tmp_path / "resume_runs.docx"
+        document = ResumeDocument(
+            target_role="SWE",
+            company="Acme",
+            header=SAMPLE_IDENTITY,
+            education=[],
+            skills={},
+            section_order=["header", "experience"],
+            experiences=[
+                ResumeItem(
+                    source_id="exp:0",
+                    source_type="experience",
+                    name="Acme",
+                    title="SWE",
+                    organization="Acme",
+                    bullets=[
+                        ResumeBullet(
+                            text="Built **REST APIs** with *FastAPI* serving 1M+ req/day",
+                            source_id="b:0",
+                            source_type="experience",
+                            source_entity="Acme",
+                        ),
+                    ],
+                )
+            ],
+            projects=[],
+        )
+
+        result = build_resume_from_ir(template_path, document, output_path)
+
+        doc = Document(str(result))
+        target_para = None
+        for paragraph in doc.paragraphs:
+            if "REST APIs" in paragraph.text:
+                target_para = paragraph
+                break
+        assert target_para is not None, "bullet missing from rendered DOCX"
+        # Asterisks should NOT appear in the rendered text -- they
+        # were structural markup, not content.
+        assert "**" not in target_para.text
+        assert "*F" not in target_para.text
+        # At least one run is bold ("REST APIs") and one is italic ("FastAPI").
+        runs = list(target_para.runs)
+        assert any(run.bold and "REST APIs" in run.text for run in runs)
+        assert any(run.italic and "FastAPI" in run.text for run in runs)
+
+    def test_build_resume_emphasis_font_swaps_bold_run_font(self, tmp_path):
+        """When the manifest declares an ``emphasis_font`` the bold runs
+        emitted by inline markup pick up that font, while plain runs
+        keep the body font. Regression for the second-font feature."""
+        from src.documents.templates import default_manifest
+        from src.generation.ir import ResumeBullet, ResumeDocument, ResumeItem
+
+        manifest = default_manifest("resume")
+        manifest = manifest.model_copy(update={"emphasis_font": "Georgia"})
+
+        template_path = tmp_path / "template_emphasis.docx"
+        create_default_template(template_path)
+        output_path = tmp_path / "resume_emphasis.docx"
+        document = ResumeDocument(
+            target_role="SWE",
+            company="Acme",
+            header=SAMPLE_IDENTITY,
+            education=[],
+            skills={},
+            section_order=["header", "experience"],
+            experiences=[
+                ResumeItem(
+                    source_id="exp:0",
+                    source_type="experience",
+                    name="Acme",
+                    title="SWE",
+                    organization="Acme",
+                    bullets=[
+                        ResumeBullet(
+                            text="Owned **payment retries** on a high-traffic service",
+                            source_id="b:0",
+                            source_type="experience",
+                            source_entity="Acme",
+                        ),
+                    ],
+                )
+            ],
+            projects=[],
+        )
+
+        result = build_resume_from_ir(
+            template_path, document, output_path, manifest=manifest
+        )
+
+        doc = Document(str(result))
+        target_para = next(
+            p for p in doc.paragraphs if "payment retries" in p.text
+        )
+        bold_runs = [run for run in target_para.runs if run.bold]
+        plain_runs = [run for run in target_para.runs if not run.bold]
+        assert bold_runs, "no bold run rendered"
+        assert any(run.font.name == "Georgia" for run in bold_runs), (
+            "emphasis_font='Georgia' should swap onto bold runs"
+        )
+        # Plain runs must NOT take Georgia just because the bold ones did.
+        for run in plain_runs:
+            assert run.font.name != "Georgia"
+
+    def test_build_resume_inserts_divider_after_section(self, tmp_path):
+        """Fit Planner output may include ``dividers_after`` to request
+        a horizontal rule below a section. Verify the renderer emits
+        the rule as an empty paragraph with a bottom border."""
+        from src.generation.ir import ResumeDocument
+
+        template_path = tmp_path / "template_hr.docx"
+        create_default_template(template_path)
+        output_path = tmp_path / "resume_hr.docx"
+        document = ResumeDocument(
+            target_role="SWE",
+            company="Acme",
+            header=SAMPLE_IDENTITY,
+            education=SAMPLE_EDUCATION,
+            skills=SAMPLE_SKILLS,
+            section_order=["header", "education", "skills"],
+            experiences=[],
+            projects=[],
+            dividers_after=["education"],
+        )
+
+        result = build_resume_from_ir(template_path, document, output_path)
+        doc = Document(str(result))
+
+        # Locate the paragraph right after the last education paragraph.
+        # The HR is rendered as an empty paragraph carrying a w:pBdr
+        # element with a bottom border. python-docx exposes the XML
+        # element on paragraph._p so we can introspect.
+        paragraphs = list(doc.paragraphs)
+        hr_count = 0
+        for paragraph in paragraphs:
+            if paragraph.text.strip():
+                continue
+            p_pr = paragraph._p.find(
+                "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pPr"
+            )
+            if p_pr is None:
+                continue
+            p_bdr = p_pr.find(
+                "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pBdr"
+            )
+            if p_bdr is not None and p_bdr.find(
+                "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}bottom"
+            ) is not None:
+                hr_count += 1
+        assert hr_count >= 1, "expected at least one HR paragraph"
 
     def test_build_resume_renders_custom_sections(self, tmp_path):
         """Profile sections outside the canonical buckets (VOLUNTEER,
@@ -495,9 +661,61 @@ class TestTemplateRegistry:
         assert "Dear Hiring Manager," in cover_texts
         assert "Sincerely," in cover_texts
         assert "{{date}}" in cover_texts
+        assert "{{recipient.block}}" in cover_texts
+        assert "Enclosure" in cover_texts
         assert body_style.font.name == "Times New Roman"
         assert body_style.font.size.pt == 11
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        header_style = cover_doc.styles["CoverLetter.Header"]
+        assert header_style.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.RIGHT
         assert round(cover_doc.sections[0].left_margin.inches, 2) == 0.85
+
+    def test_build_cover_letter_from_ir_renders_classic_frame(self, tmp_path):
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        package = ensure_template_package("cover_letter", template_root=tmp_path)
+        output_path = tmp_path / "cover.docx"
+        document = CoverLetterDocument(
+            recipient={"company": "TestCo", "location": "Calgary, AB (Hybrid)"},
+            applicant={
+                "name": "Test User",
+                "location": "Vancouver, BC (Remote)",
+                "phone": "+1 604-000-0000",
+                "email": "test@example.com",
+                "linkedin_url": "linkedin.com/in/test",
+                "portfolio_url": "test.example.com",
+            },
+            paragraphs=[
+                CoverLetterParagraph(type="opening", text="Opening body paragraph."),
+                CoverLetterParagraph(type="closing", text="Closing body paragraph."),
+            ],
+        )
+
+        result = build_cover_letter_from_ir(
+            document,
+            output_path,
+            template_path=package.template_path,
+            manifest=package.manifest,
+        )
+
+        doc = Document(str(result))
+        texts = [paragraph.text for paragraph in doc.paragraphs]
+        assert doc.styles["CoverLetter.Header"].paragraph_format.alignment == (
+            WD_ALIGN_PARAGRAPH.RIGHT
+        )
+        assert "Test User" in texts
+        assert any("Vancouver, BC" in text and "test@example.com" in text for text in texts)
+        assert not any("Remote" in text or "Hybrid" in text for text in texts)
+        assert not any("linkedin" in text.lower() or "test.example.com" in text for text in texts)
+        assert any(" 202" in text and "," in text for text in texts)
+        assert any(
+            "Hiring Team" in text and "TestCo" in text and "Calgary, AB" in text
+            for text in texts
+        )
+        assert texts.index("Dear Hiring Manager,") < texts.index("Opening body paragraph.")
+        assert texts.index("Closing body paragraph.") < texts.index("Sincerely,")
+        assert "Enclosure" in texts
 
     def test_save_uploaded_template_package(self, tmp_path):
         upload_docx = tmp_path / "upload.docx"
@@ -723,6 +941,25 @@ class TestLatexTemplates:
 
         assert r"R\&D\_50\% C\# \{x\}" in escaped
         assert r"\textbackslash{} path" in escaped
+
+    def test_latex_inline_renders_bold_and_italic_markers(self):
+        from src.documents.latex_engine import latex_inline
+
+        rendered = latex_inline("Built **REST APIs** with *FastAPI*")
+        # Bold + italic markers must turn into LaTeX commands rather
+        # than leaking as literal asterisks.
+        assert r"\textbf{REST APIs}" in rendered
+        assert r"\textit{FastAPI}" in rendered
+        assert "*" not in rendered
+
+    def test_latex_inline_still_escapes_specials(self):
+        from src.documents.latex_engine import latex_inline
+
+        rendered = latex_inline("Tuned **A&B_50%** retries")
+        assert r"\textbf{A\&B\_50\%}" in rendered
+        # Plain ``&`` outside markers also gets escaped via latex_escape.
+        rendered2 = latex_inline("R&D")
+        assert rendered2 == r"R\&D"
 
     def test_build_resume_tex_from_ir(self, tmp_path):
         template = create_latex_template_package(

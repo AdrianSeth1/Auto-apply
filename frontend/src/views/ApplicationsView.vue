@@ -255,12 +255,30 @@ async function reapplyApplication(application) {
   state.message = ""
   try {
     const result = await api.applyJob(url)
+    // Only retire the stale FAILED / SUBMITTED row once the new apply
+    // attempt actually got somewhere -- if applyJob threw we want to
+    // keep the original row visible so the user can retry from it.
+    // Soft-delete with cascade=true so the linked materials and
+    // screenshots head into the cleanup quarantine instead of dangling.
+    let cleanupNote = ""
+    try {
+      await api.deleteApplication(application.id, { cascade: true })
+    } catch (cleanupErr) {
+      // The new application is already submitted/in review at this
+      // point; failing to remove the old row is a UI annoyance, not a
+      // pipeline failure. Surface it gently in the toast.
+      cleanupNote =
+        " (couldn't auto-remove the previous entry: " +
+        (cleanupErr?.message || "unknown error") +
+        ")"
+    }
     if (result?.status === "submitted") {
-      state.message = `Re-submitted application for ${application.job.title}.`
+      state.message = `Re-submitted application for ${application.job.title}.${cleanupNote}`
     } else if (result?.status === "review") {
-      state.message = `Re-apply prepared materials for ${application.job.title} -- check Awaiting Review.`
+      state.message =
+        `Re-apply prepared materials for ${application.job.title} -- check Awaiting Review.${cleanupNote}`
     } else {
-      state.message = "Re-apply request queued."
+      state.message = `Re-apply request queued.${cleanupNote}`
     }
     await load()
   } catch (err) {

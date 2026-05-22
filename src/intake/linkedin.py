@@ -29,7 +29,7 @@ import logging
 import re
 import shutil
 from contextlib import suppress
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -88,7 +88,7 @@ def _read_probe_cache(session_dir: Path) -> dict | None:
         checked_at = datetime.fromisoformat(data["checked_at"])
     except (ValueError, KeyError, TypeError):
         return None
-    if datetime.now(timezone.utc) - checked_at > _PROBE_TTL:
+    if datetime.now(UTC) - checked_at > _PROBE_TTL:
         return None
     return data
 
@@ -103,7 +103,7 @@ def _write_probe_cache(
     payload = {
         "authenticated": bool(authenticated),
         "has_session_data": bool(has_session_data),
-        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "checked_at": datetime.now(UTC).isoformat(),
     }
     try:
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -732,13 +732,26 @@ class LinkedInScraper:
             if apply_target.get("manual_apply_url"):
                 job.raw_data["manual_apply_url"] = apply_target["manual_apply_url"]
 
-            # Detect external apply link (ATS redirect or company-hosted apply page).
-            manual_apply_url = apply_target.get("manual_apply_url")
-            external_apply_url = (
-                manual_apply_url
-                if manual_apply_url and "linkedin.com" not in manual_apply_url.lower()
-                else None
+            # Persist the Easy Apply signals so the apply pipeline can
+            # refuse to run when LinkedIn Easy Apply is the only path
+            # (we don't yet automate Easy Apply -- pretending some other
+            # link is the real apply form just submits the company's
+            # marketing homepage). Even when both paths exist we record
+            # ``has_easy_apply`` so a future "ask user which path" UI
+            # has the data to decide.
+            job.raw_data["linkedin_has_easy_apply"] = bool(
+                apply_target.get("has_easy_apply")
             )
+            job.raw_data["linkedin_easy_apply_only"] = bool(
+                apply_target.get("easy_apply_only")
+            )
+
+            # Use the dedicated external URL the resolver classified
+            # rather than re-deriving it from manual_apply_url. The
+            # resolver already knows which candidate is external; doing
+            # the work twice was how the "any same-page link wins"
+            # regression slipped in.
+            external_apply_url = apply_target.get("external_apply_url")
             if external_apply_url:
                 job.raw_data["linkedin_url"] = detail_url
                 job.application_url = external_apply_url
@@ -749,6 +762,28 @@ class LinkedInScraper:
                     job.raw_data["linkedin_url"],
                     external_apply_url,
                 )
+            elif apply_target.get("easy_apply_only"):
+                # No external option AND Easy Apply is the only thing
+                # on the page. Keep the LinkedIn detail URL on the job
+                # so the operator can still open the posting manually,
+                # but DO NOT set application_url -- the apply pipeline
+                # uses that field to decide it's safe to fire off an
+                # automated form-fill.
+                job.raw_data["linkedin_url"] = detail_url
+                if job.application_url and "linkedin.com" not in (
+                    job.application_url or ""
+                ).lower():
+                    # An older scrape pass stored a bogus URL (this is
+                    # the Fitzrovia regression). Clear it so the new
+                    # apply-time guard catches the situation.
+                    logger.info(
+                        "Clearing stale non-LinkedIn application_url for Easy-Apply-only "
+                        "job %s: %s",
+                        job.title,
+                        job.application_url,
+                    )
+                    job.application_url = detail_url
+                    job.ats_type = None
 
         except Exception as e:
             logger.warning("Failed to get detail for job %s: %s", job.source_id, e)
@@ -954,42 +989,126 @@ class LinkedInScraper:
         )
 
     async def _resolve_apply_target(self, page: Page, fallback_url: str) -> dict[str, str | None]:
-        """Resolve the destination of the Apply button and classify ATS if possible."""
+        """Resolve the destination of the Apply button and classify ATS if possible.
+
+        Returns a dict with five fields:
+
+        * ``manual_apply_url``: the URL we'd send a human to if they
+          wanted to apply outside the LinkedIn modal. Falls back to the
+          LinkedIn detail URL when nothing better is available.
+        * ``ats_url``: same URL ONLY when it lives on a known ATS host
+          (Greenhouse / Lever / Ashby / Workday). Used by the apply
+          pipeline to pick an adapter.
+        * ``has_easy_apply``: True if the page exposes an "Easy Apply"
+          button regardless of whether an external option also exists.
+        * ``easy_apply_only``: True when the only viable apply path is
+          LinkedIn's Easy Apply -- the apply layer surfaces this as a
+          clear "not yet supported" error instead of pretending some
+          random link on the page is the form to fill.
+        * ``external_apply_url``: the external apply target if found
+          (e.g. an ATS link or "Apply on company website" destination).
+
+        Key behaviour: enumerate ALL apply candidates and classify each
+        rather than picking the topmost one and trusting whatever href
+        it carries. The previous implementation would pick a same-page
+        "Visit company website" link as the apply URL when the real
+        apply path was Easy Apply, which caused the form-filler to try
+        to submit Fitzrovia's marketing homepage form.
+        """
+        empty = {
+            "manual_apply_url": fallback_url,
+            "ats_url": None,
+            "has_easy_apply": False,
+            "easy_apply_only": False,
+            "external_apply_url": None,
+        }
         try:
-            apply_btn = await self._find_primary_apply_button(page)
-            if not apply_btn:
-                return {"manual_apply_url": fallback_url, "ats_url": None}
+            candidates = await self._find_all_apply_buttons(page)
+            if not candidates:
+                return empty
 
-            btn_text = _clean_html_text(await apply_btn.inner_text()).lower()
-            aria_label = _clean_html_text(await apply_btn.get_attribute("aria-label") or "").lower()
-            href = _manual_apply_destination_url(
-                await apply_btn.get_attribute("href"),
-                source_url=fallback_url,
-            )
-            if href:
-                clean_href = _clean_tracking_url(href)
-                return {
-                    "manual_apply_url": clean_href,
-                    "ats_url": clean_href if _is_known_ats_url(clean_href) else None,
-                }
+            has_easy_apply = False
+            external_candidates: list[str] = []
+            click_resolution_btn = None
 
-            if "easy apply" in btn_text or "easy apply" in aria_label:
-                return {"manual_apply_url": fallback_url, "ats_url": None}
+            for element, btn_text_raw, aria_label_raw, raw_href in candidates:
+                btn_text = (btn_text_raw or "").lower()
+                aria_label = (aria_label_raw or "").lower()
 
-            external_url = await self._resolve_click_apply_target(page, apply_btn)
+                combined = f"{btn_text} {aria_label}".strip()
+                if "easy apply" in combined:
+                    has_easy_apply = True
+                    continue
 
-            if external_url:
-                clean_url = _clean_tracking_url(external_url)
-                return {
-                    "manual_apply_url": clean_url,
-                    "ats_url": clean_url if _is_known_ats_url(clean_url) else None,
-                }
+                href = _manual_apply_destination_url(raw_href, source_url=fallback_url)
+                if href and "linkedin.com" not in href.lower():
+                    external_candidates.append(_clean_tracking_url(href))
+                    continue
 
-            return {"manual_apply_url": fallback_url, "ats_url": None}
+                # Anchor with no usable href but text suggests an external
+                # apply (e.g. "Apply on company website") -- treat as a
+                # click-to-resolve candidate. We only do this for ONE
+                # element to keep the runtime bounded; the page typically
+                # has at most one such button.
+                if (
+                    click_resolution_btn is None
+                    and ("apply on company website" in combined or "apply on" in combined)
+                ):
+                    click_resolution_btn = element
+
+            external_url: str | None = None
+            for candidate in external_candidates:
+                if _is_known_ats_url(candidate):
+                    external_url = candidate
+                    break
+            if external_url is None and external_candidates:
+                external_url = external_candidates[0]
+
+            if external_url is None and click_resolution_btn is not None:
+                clicked = await self._resolve_click_apply_target(page, click_resolution_btn)
+                if clicked and "linkedin.com" not in clicked.lower():
+                    external_url = _clean_tracking_url(clicked)
+
+            easy_apply_only = has_easy_apply and not external_url
+            manual_apply_url = external_url or fallback_url
+
+            return {
+                "manual_apply_url": manual_apply_url,
+                "ats_url": (
+                    external_url if external_url and _is_known_ats_url(external_url) else None
+                ),
+                "has_easy_apply": has_easy_apply,
+                "easy_apply_only": easy_apply_only,
+                "external_apply_url": external_url,
+            }
 
         except Exception as e:
             logger.debug("Apply target detection failed: %s", e)
-            return {"manual_apply_url": fallback_url, "ats_url": None}
+            return empty
+
+    async def _find_all_apply_buttons(self, page: Page) -> list[tuple]:
+        """Return ``(element, text, aria_label, href)`` for every visible
+        apply candidate on the page.
+
+        Returns the already-fetched attributes alongside the element so
+        :meth:`_resolve_apply_target` does not pay for the same Playwright
+        round-trips a second time.
+        """
+        out: list[tuple] = []
+        for element in await page.query_selector_all(SELECTORS["apply_button"]):
+            try:
+                if not await element.is_visible():
+                    continue
+                text = _clean_html_text(await element.inner_text())
+                aria_label = _clean_html_text(await element.get_attribute("aria-label") or "")
+                href = await element.get_attribute("href")
+                class_name = await element.get_attribute("class") or ""
+                if not _is_primary_apply_candidate(text, aria_label, href, class_name):
+                    continue
+                out.append((element, text, aria_label, href))
+            except Exception:
+                continue
+        return out
 
     async def _find_primary_apply_button(self, page: Page):
         candidates: list[tuple[float, object]] = []
@@ -1000,7 +1119,8 @@ class LinkedInScraper:
                 text = _clean_html_text(await element.inner_text())
                 aria_label = _clean_html_text(await element.get_attribute("aria-label") or "")
                 href = await element.get_attribute("href")
-                if not _is_primary_apply_candidate(text, aria_label, href):
+                class_name = await element.get_attribute("class") or ""
+                if not _is_primary_apply_candidate(text, aria_label, href, class_name):
                     continue
                 box = await element.bounding_box()
                 y = box["y"] if box else float("inf")
@@ -1403,16 +1523,26 @@ def _manual_apply_destination_url(url: str | None, *, source_url: str | None = N
     return clean_url
 
 
-def _is_primary_apply_candidate(text: str, aria_label: str, href: str | None) -> bool:
+def _is_primary_apply_candidate(
+    text: str,
+    aria_label: str,
+    href: str | None,
+    class_name: str = "",
+) -> bool:
     combined = " ".join(part for part in (text, aria_label) if part).lower()
     href_lower = (href or "").lower()
+    class_lower = class_name.lower()
 
     if any(
         blocked in href_lower for blocked in ("/jobs/collections/", "/jobs/search/", "/jobs/view/")
     ):
         return False
     if "/safety/go/" in href_lower:
-        return True
+        # LinkedIn also wraps non-apply outbound links (for example
+        # "Visit company website") in /safety/go/. Do not treat those
+        # marketing-homepage links as application URLs unless the link
+        # itself has Apply semantics or is the actual LinkedIn apply button.
+        return "apply" in combined or "jobs-apply-button" in class_lower
     if not combined or "apply" not in combined:
         return False
     if "apply on company website" in combined:
@@ -1614,7 +1744,7 @@ async def get_linkedin_session_status(
         "error": None,
         "error_code": None,
         "cached": False,
-        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "checked_at": datetime.now(UTC).isoformat(),
     }
 
 

@@ -88,6 +88,12 @@ class Application(Base):
     state_history: Mapped[list | None] = mapped_column(JSONB)  # list[dict] FSM audit trail
     fields_filled: Mapped[int | None] = mapped_column(Integer)
     fields_total: Mapped[int | None] = mapped_column(Integer)
+    # Phase 18.5: per-field record persisted from the form-filler so the
+    # operator can expand the "N of M fields filled" badge in the
+    # Review queue and see exactly which fields were detected, what we
+    # tried to fill, whether it succeeded, and why the misses missed.
+    # See FieldMapping in src/execution/form_filler.py for the shape.
+    fill_details: Mapped[list | None] = mapped_column(JSONB)
     files_uploaded: Mapped[list | None] = mapped_column(JSONB)  # list[str] uploaded filenames
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(

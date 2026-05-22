@@ -360,6 +360,16 @@ def validate_cover_letter_document(
                 message="Cover letter appears to include raw resume bullet phrasing.",
             )
         )
+    quality_issues = list((document.metadata or {}).get("quality_issues") or [])
+    for issue in quality_issues:
+        issues.append(
+            ValidationIssue(
+                type="cover_letter_quality_check",
+                severity="warning",
+                section="body",
+                message=f"Cover letter quality check flagged: {issue}",
+            )
+        )
 
     return ValidationResult(
         ok=not any(issue.severity == "error" for issue in issues),
@@ -371,6 +381,7 @@ def validate_cover_letter_document(
             "font_family": "Times New Roman",
             "font_size_pt": 11,
             "page_margin_inches": 0.85,
+            "cover_letter_quality_issues": quality_issues,
         },
     )
 
