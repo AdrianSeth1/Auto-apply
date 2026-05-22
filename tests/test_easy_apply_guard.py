@@ -56,6 +56,21 @@ def _make_element(
     return element
 
 
+def _make_candidate(
+    *,
+    text: str = "",
+    aria_label: str | None = None,
+    href: str | None = None,
+    class_name: str | None = None,
+) -> tuple:
+    """Return the (element, text, aria_label, href) tuple that
+    ``_find_all_apply_buttons`` now hands to ``_resolve_apply_target``."""
+    element = _make_element(
+        text=text, aria_label=aria_label, href=href, class_name=class_name
+    )
+    return (element, text, aria_label or "", href)
+
+
 def test_easy_apply_plus_company_homepage_is_still_easy_apply_only() -> None:
     """Fitzrovia regression: LinkedIn may show Easy Apply plus a
     wrapped company-homepage link. The homepage is not an Apply path,
@@ -89,11 +104,11 @@ def test_easy_apply_only_page_flags_the_job_correctly() -> None:
     """LinkedIn page with one "Easy Apply" button and nothing else
     must set ``easy_apply_only=True`` and surface no external URL."""
     scraper = LinkedInScraper.__new__(LinkedInScraper)
-    elements = [_make_element(text="Easy Apply", aria_label="Easy Apply on LinkedIn")]
+    candidates = [_make_candidate(text="Easy Apply", aria_label="Easy Apply on LinkedIn")]
 
     async def _run():
         with patch.object(
-            LinkedInScraper, "_find_all_apply_buttons", AsyncMock(return_value=elements)
+            LinkedInScraper, "_find_all_apply_buttons", AsyncMock(return_value=candidates)
         ):
             return await scraper._resolve_apply_target(
                 MagicMock(),
@@ -113,9 +128,9 @@ def test_dual_apply_page_keeps_external_url_and_marks_easy_apply() -> None:
     while still flagging ``has_easy_apply=True`` so a future "let the
     user pick" UI has the data."""
     scraper = LinkedInScraper.__new__(LinkedInScraper)
-    elements = [
-        _make_element(text="Easy Apply", aria_label="Easy Apply on LinkedIn"),
-        _make_element(
+    candidates = [
+        _make_candidate(text="Easy Apply", aria_label="Easy Apply on LinkedIn"),
+        _make_candidate(
             text="Apply",
             aria_label="Apply on company website",
             href="https://boards.greenhouse.io/acme/jobs/123",
@@ -124,7 +139,7 @@ def test_dual_apply_page_keeps_external_url_and_marks_easy_apply() -> None:
 
     async def _run():
         with patch.object(
-            LinkedInScraper, "_find_all_apply_buttons", AsyncMock(return_value=elements)
+            LinkedInScraper, "_find_all_apply_buttons", AsyncMock(return_value=candidates)
         ):
             return await scraper._resolve_apply_target(
                 MagicMock(),

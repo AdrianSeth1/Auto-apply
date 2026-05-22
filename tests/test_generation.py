@@ -1105,7 +1105,6 @@ class TestGenerateTemplate:
                 "At Canvas Course Agent, built API ingestion and validation workflows.",
                 "At Parallax, debugged Java backend and Python OCR service integration.",
             ],
-            _PROFILE,
         )
 
         assert strategy["role_type"] == "software_development_test"

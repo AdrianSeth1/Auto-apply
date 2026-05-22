@@ -756,22 +756,11 @@ def rewrite_bullets(
     :mod:`src.utils.parallelism` so increasing the per-task cap does
     NOT translate into unbounded LLM concurrency across workers.
     """
-    # Both the Celery worker (no outer loop) and FastAPI ``apply_to_url``
-    # (inside its own event loop) can land here, so we route through
-    # the loop-aware helper that picks ``asyncio.run`` vs a worker
-    # thread automatically.
-    import asyncio  # noqa: PLC0415
+    from src.utils.parallelism import run_coroutine_safely  # noqa: PLC0415
 
-    coro = _rewrite_bullets_async(selected_bullets, jd_tags, mode=mode)
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-    import concurrent.futures
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coro).result()
+    return run_coroutine_safely(
+        _rewrite_bullets_async(selected_bullets, jd_tags, mode=mode)
+    )
 
 
 async def _rewrite_bullets_async(

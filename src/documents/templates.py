@@ -1253,7 +1253,6 @@ def _ensure_required_markers(package: TemplatePackage) -> None:
     )
     if is_default_cover_letter:
         changed = _ensure_default_cover_letter_layout(doc, package.manifest.styles) or changed
-        changed = True
     text = _document_text(doc)
     if package.document_type == "resume":
         style = package.manifest.styles.get("normal")

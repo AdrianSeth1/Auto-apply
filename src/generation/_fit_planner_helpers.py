@@ -11,6 +11,8 @@ import asyncio
 import logging
 from typing import Any
 
+from src.utils.parallelism import run_coroutine_safely as _run_coroutine_safely
+
 logger = logging.getLogger("autoapply.generation.fit_planner")
 
 
@@ -167,44 +169,6 @@ def resize_section_bullets_in_place(
         await asyncio.gather(*(_one(triple) for triple in bullets))
 
     _run_coroutine_safely(_runner())
-
-
-def _run_coroutine_safely(coro) -> None:
-    """Run ``coro`` regardless of whether the caller is inside an
-    event loop.
-
-    ``asyncio.run`` blows up with ``RuntimeError: asyncio.run() cannot
-    be called from a running event loop`` whenever it is invoked from
-    a coroutine that is already being driven by an outer loop -- which
-    is exactly the situation when the Fit Planner runs inside the
-    FastAPI request handler (``apply_to_url`` -> ``_generate_materials``
-    -> ``generate_resume`` -> ``_apply_fit_plan`` -> here). The Celery
-    worker path does NOT have a live loop and the standalone CLI path
-    does not either, so we have to support both shapes.
-
-    Strategy: detect a running loop via ``get_running_loop``; if there
-    isn't one, the standard ``asyncio.run`` is the right call. If
-    there is one, hand the coroutine off to a fresh thread that creates
-    its own loop -- the outer FastAPI loop stays free to handle other
-    requests and our nested ``asyncio.gather`` runs unhindered. We
-    block on the worker thread's result so the caller's control flow
-    looks identical either way.
-    """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        # No outer loop -- the simple case.
-        asyncio.run(coro)
-        return
-
-    # Already inside an event loop. Push the coroutine into a worker
-    # thread with its own loop and wait for the result there. We use
-    # ``ThreadPoolExecutor`` rather than ``asyncio.to_thread`` because
-    # the caller is a synchronous function -- we cannot ``await`` here.
-    import concurrent.futures
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        pool.submit(asyncio.run, coro).result()
 
 
 def apply_fit_plan(document, plan: dict[str, Any], *, bullet_rewriter):

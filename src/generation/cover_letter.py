@@ -65,6 +65,7 @@ def _render_cover_letter_to_target_pages(
     profile_data: dict[str, Any] | None = None,
     evidence_bullets: list[str] | None = None,
     use_llm: bool = True,
+    strategy: dict[str, Any] | None = None,
 ):
     """Render the cover letter, then iteratively ask the LLM for a longer
     or shorter draft until the produced PDF matches the target page count.
@@ -133,6 +134,7 @@ def _render_cover_letter_to_target_pages(
                     target_pages=target_pages,
                     length_feedback=feedback,
                     previous_attempt="\n\n".join(p.text for p in current.paragraphs),
+                    strategy=strategy,
                 )
             except LLMError as exc:
                 logger.info(
@@ -272,16 +274,28 @@ def generate_cover_letter(
 
     target_pages = template_manifest.target_pages or template_manifest.capacity.max_pages
 
+    strategy = _infer_cover_letter_strategy(job, evidence_bullets)
+
+    text_from_llm = False
     if use_llm:
         try:
             text = _generate_with_llm(
-                job, profile_data, evidence_bullets, target_pages=target_pages
+                job,
+                profile_data,
+                evidence_bullets,
+                target_pages=target_pages,
+                strategy=strategy,
             )
+            text_from_llm = True
         except (LLMError, Exception) as e:
             logger.warning("LLM cover letter generation failed (%s), using template", e)
-            text = _generate_template(job, identity, evidence_bullets, profile_data)
+            text = _generate_template(
+                job, identity, evidence_bullets, profile_data, strategy=strategy
+            )
     else:
-        text = _generate_template(job, identity, evidence_bullets, profile_data)
+        text = _generate_template(
+            job, identity, evidence_bullets, profile_data, strategy=strategy
+        )
 
     paths = get_output_paths(
         company=job.company,
@@ -298,6 +312,8 @@ def generate_cover_letter(
         profile_data=profile_data,
         body_text=text,
         evidence_bullets=evidence_bullets,
+        strategy=strategy,
+        quality_issues=[] if text_from_llm else None,
     )
     document = _fit_cover_letter_document(document, template_manifest)
     document, docx_path, pdf_path = _render_cover_letter_to_target_pages(
@@ -311,6 +327,7 @@ def generate_cover_letter(
         profile_data=profile_data,
         evidence_bullets=evidence_bullets,
         use_llm=use_llm,
+        strategy=strategy,
     )
     validation = validate_cover_letter_document(document, target_pages=target_pages)
     validation = validate_cover_letter_artifacts(
@@ -354,16 +371,28 @@ def generate_cover_letter_latex(
 
     target_pages = package.manifest.target_pages or package.manifest.capacity.max_pages
 
+    strategy = _infer_cover_letter_strategy(job, evidence_bullets)
+
+    text_from_llm = False
     if use_llm:
         try:
             text = _generate_with_llm(
-                job, profile_data, evidence_bullets, target_pages=target_pages
+                job,
+                profile_data,
+                evidence_bullets,
+                target_pages=target_pages,
+                strategy=strategy,
             )
+            text_from_llm = True
         except (LLMError, Exception) as exc:
             logger.warning("LLM cover letter generation failed (%s), using template", exc)
-            text = _generate_template(job, identity, evidence_bullets, profile_data)
+            text = _generate_template(
+                job, identity, evidence_bullets, profile_data, strategy=strategy
+            )
     else:
-        text = _generate_template(job, identity, evidence_bullets, profile_data)
+        text = _generate_template(
+            job, identity, evidence_bullets, profile_data, strategy=strategy
+        )
 
     paths = get_output_paths(
         company=job.company,
@@ -379,6 +408,8 @@ def generate_cover_letter_latex(
         profile_data=profile_data,
         body_text=text,
         evidence_bullets=evidence_bullets,
+        strategy=strategy,
+        quality_issues=[] if text_from_llm else None,
     )
     document = _fit_cover_letter_document(document, package.manifest)
     validation = validate_cover_letter_document(document, target_pages=target_pages)
@@ -422,11 +453,15 @@ def build_cover_letter_document(
     profile_data: dict[str, Any],
     body_text: str,
     evidence_bullets: list[str],
+    strategy: dict[str, Any] | None = None,
+    quality_issues: list[str] | None = None,
 ) -> CoverLetterDocument:
     """Create a structured cover letter IR from generated body text."""
     identity = profile_data.get("identity", {})
-    strategy = _infer_cover_letter_strategy(job, evidence_bullets, profile_data)
-    quality_issues = _cover_letter_quality_issues(body_text, job_title=job.title)
+    if strategy is None:
+        strategy = _infer_cover_letter_strategy(job, evidence_bullets)
+    if quality_issues is None:
+        quality_issues = _cover_letter_quality_issues(body_text, job_title=job.title)
     return CoverLetterDocument(
         recipient={"company": job.company, "hiring_manager": None, "location": job.location},
         applicant={
@@ -666,19 +701,23 @@ _TECH_TERMS = (
 )
 
 
+_TECH_TERM_RE = re.compile(
+    r"(?<![\w.+-])(" + "|".join(re.escape(term) for term in _TECH_TERMS) + r")(?![\w.+-])"
+)
+
+
 def _infer_cover_letter_strategy(
     job: RawJob,
     evidence_bullets: list[str],
-    profile_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    del profile_data  # reserved for future evidence-aware scoring without changing callers
     role_type = _classify_cover_letter_role(job)
     job_text = _job_signal_text(job).lower()
+    boosts = _role_bucket_boosts(role_type)
     buckets = []
-    for bucket in _capability_bucket_library():
+    for bucket in _CAPABILITY_BUCKETS:
         score = sum(2 for signal in bucket["signals"] if signal in job_text)
-        if bucket["name"] in _role_bucket_boosts(role_type):
-            score += _role_bucket_boosts(role_type)[bucket["name"]]
+        if bucket["name"] in boosts:
+            score += boosts[bucket["name"]]
         matched_evidence = _match_bucket_evidence(bucket, evidence_bullets)
         if matched_evidence:
             score += 1
@@ -741,8 +780,7 @@ def _job_signal_text(job: RawJob) -> str:
     return "\n".join(parts)
 
 
-def _capability_bucket_library() -> list[dict[str, Any]]:
-    return [
+_CAPABILITY_BUCKETS: list[dict[str, Any]] = [
         {
             "name": "software development and maintainability",
             "signals": [
@@ -845,34 +883,38 @@ def _capability_bucket_library() -> list[dict[str, Any]]:
     ]
 
 
+_ROLE_BUCKET_BOOSTS_DEFAULT: dict[str, int] = {"software development and maintainability": 3}
+_ROLE_BUCKET_BOOSTS: dict[str, dict[str, int]] = {
+    "software_development_test": {
+        "testing, debugging, and reliability": 5,
+        "software development and maintainability": 3,
+        "systems integration and collaboration": 2,
+    },
+    "backend": {
+        "software development and maintainability": 5,
+        "systems integration and collaboration": 3,
+        "testing, debugging, and reliability": 2,
+    },
+    "security_mission_systems": {
+        "security, correctness, and controlled change": 5,
+        "testing, debugging, and reliability": 3,
+        "software development and maintainability": 2,
+    },
+    "ai_automation": {
+        "workflow automation and data quality": 5,
+        "testing, debugging, and reliability": 2,
+        "systems integration and collaboration": 2,
+    },
+    "embedded_firmware": {
+        "embedded interfaces and low-level debugging": 5,
+        "testing, debugging, and reliability": 3,
+        "software development and maintainability": 1,
+    },
+}
+
+
 def _role_bucket_boosts(role_type: str) -> dict[str, int]:
-    return {
-        "software_development_test": {
-            "testing, debugging, and reliability": 5,
-            "software development and maintainability": 3,
-            "systems integration and collaboration": 2,
-        },
-        "backend": {
-            "software development and maintainability": 5,
-            "systems integration and collaboration": 3,
-            "testing, debugging, and reliability": 2,
-        },
-        "security_mission_systems": {
-            "security, correctness, and controlled change": 5,
-            "testing, debugging, and reliability": 3,
-            "software development and maintainability": 2,
-        },
-        "ai_automation": {
-            "workflow automation and data quality": 5,
-            "testing, debugging, and reliability": 2,
-            "systems integration and collaboration": 2,
-        },
-        "embedded_firmware": {
-            "embedded interfaces and low-level debugging": 5,
-            "testing, debugging, and reliability": 3,
-            "software development and maintainability": 1,
-        },
-    }.get(role_type, {"software development and maintainability": 3})
+    return _ROLE_BUCKET_BOOSTS.get(role_type, _ROLE_BUCKET_BOOSTS_DEFAULT)
 
 
 def _match_bucket_evidence(bucket: dict[str, Any], evidence_bullets: list[str]) -> list[str]:
@@ -920,12 +962,7 @@ def _quality_focus_for_role(role_type: str) -> list[str]:
 
 def _format_cover_strategy_for_prompt(strategy: dict[str, Any]) -> str:
     focus = ", ".join(strategy.get("quality_focus") or [])
-    return (
-        f"Role type: {strategy.get('role_type')}\n"
-        f"Quality focus: {focus}\n"
-        f"Capability buckets:\n"
-        f"{_format_capability_buckets_for_prompt(strategy.get('capability_buckets') or [])}"
-    )
+    return f"Quality focus: {focus}"
 
 
 def _format_role_references_for_prompt(role_refs: dict[str, str]) -> str:
@@ -943,6 +980,7 @@ def _generate_with_llm(
     target_pages: int = 1,
     length_feedback: str | None = None,
     previous_attempt: str | None = None,
+    strategy: dict[str, Any] | None = None,
 ) -> str:
     """Generate cover letter body using the configured LLM.
 
@@ -953,7 +991,8 @@ def _generate_with_llm(
     """
     identity = profile_data.get("identity", {})
     skills = profile_data.get("skills", {})
-    strategy = _infer_cover_letter_strategy(job, evidence_bullets, profile_data)
+    if strategy is None:
+        strategy = _infer_cover_letter_strategy(job, evidence_bullets)
     system_prompt = _cl_system_prompt(target_pages, strategy)
     role_refs = _role_references(job, strategy)
 
@@ -1104,12 +1143,7 @@ def _normalize_role_title_for_repetition(value: str | None) -> str:
 
 
 def _technology_terms_in_sentence(sentence: str) -> set[str]:
-    lower = sentence.lower()
-    found = set()
-    for term in _TECH_TERMS:
-        if re.search(rf"(?<![\w.+-]){re.escape(term)}(?![\w.+-])", lower):
-            found.add(term)
-    return found
+    return set(_TECH_TERM_RE.findall(sentence.lower()))
 
 
 def _generate_template(
@@ -1117,6 +1151,8 @@ def _generate_template(
     identity: dict[str, Any],
     evidence_bullets: list[str],
     profile_data: dict[str, Any] | None = None,
+    *,
+    strategy: dict[str, Any] | None = None,
 ) -> str:
     """Generate a deterministic fallback body when the LLM is unavailable.
 
@@ -1125,7 +1161,8 @@ def _generate_template(
     a complete professional cover-letter body. The DOCX/PDF renderer
     adds the salutation and sign-off around these paragraphs.
     """
-    strategy = _infer_cover_letter_strategy(job, evidence_bullets, profile_data)
+    if strategy is None:
+        strategy = _infer_cover_letter_strategy(job, evidence_bullets)
     buckets = strategy["capability_buckets"]
     background = _candidate_background(identity, profile_data)
     capability_phrase = _join_natural(

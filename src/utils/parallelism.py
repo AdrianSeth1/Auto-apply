@@ -23,13 +23,18 @@ manager acquires both in the right order.
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import logging
 import threading
+from collections.abc import Coroutine
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, TypeVar
 
 from src.core.config import load_config
+
+_T = TypeVar("_T")
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +167,25 @@ def llm_call_gate(provider_id: str) -> Iterator[None]:
         prov_sem.release()
 
 
+def run_coroutine_safely(coro: Coroutine[Any, Any, _T]) -> _T:
+    """Run ``coro`` whether or not the caller is inside an event loop.
+
+    ``asyncio.run`` raises ``RuntimeError`` when called from a coroutine
+    that is already being driven by an outer loop (the FastAPI request
+    handler case). The Celery worker and CLI paths do not have a live
+    loop, so we have to support both shapes: pick ``asyncio.run`` when
+    no loop is running, otherwise hand the coroutine to a fresh thread
+    with its own loop and block on the result.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
 def reset_for_tests() -> None:
     """Drop the cached semaphores so tests can reload settings."""
     global _GLOBAL_SEM, _PROVIDER_SEMS, _PROVIDER_CAPS, _GLOBAL_CAP, _BULLET_CAP
@@ -181,4 +205,5 @@ __all__ = [
     "provider_cap",
     "provider_semaphore",
     "reset_for_tests",
+    "run_coroutine_safely",
 ]

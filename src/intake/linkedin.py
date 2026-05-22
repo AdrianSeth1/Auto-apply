@@ -1031,27 +1031,15 @@ class LinkedInScraper:
             external_candidates: list[str] = []
             click_resolution_btn = None
 
-            for element in candidates:
-                try:
-                    btn_text = _clean_html_text(await element.inner_text()).lower()
-                except Exception:
-                    btn_text = ""
-                try:
-                    aria_label = _clean_html_text(
-                        await element.get_attribute("aria-label") or ""
-                    ).lower()
-                except Exception:
-                    aria_label = ""
+            for element, btn_text_raw, aria_label_raw, raw_href in candidates:
+                btn_text = (btn_text_raw or "").lower()
+                aria_label = (aria_label_raw or "").lower()
 
                 combined = f"{btn_text} {aria_label}".strip()
                 if "easy apply" in combined:
                     has_easy_apply = True
                     continue
 
-                try:
-                    raw_href = await element.get_attribute("href")
-                except Exception:
-                    raw_href = None
                 href = _manual_apply_destination_url(raw_href, source_url=fallback_url)
                 if href and "linkedin.com" not in href.lower():
                     external_candidates.append(_clean_tracking_url(href))
@@ -1098,15 +1086,15 @@ class LinkedInScraper:
             logger.debug("Apply target detection failed: %s", e)
             return empty
 
-    async def _find_all_apply_buttons(self, page: Page) -> list:
-        """Return every visible apply-related button / link on the page.
+    async def _find_all_apply_buttons(self, page: Page) -> list[tuple]:
+        """Return ``(element, text, aria_label, href)`` for every visible
+        apply candidate on the page.
 
-        Used by :meth:`_resolve_apply_target` to classify candidates
-        (easy_apply vs external) instead of picking the topmost match
-        and hoping. Order is preserved -- callers that still want a
-        single "primary" candidate can take ``[0]``.
+        Returns the already-fetched attributes alongside the element so
+        :meth:`_resolve_apply_target` does not pay for the same Playwright
+        round-trips a second time.
         """
-        out: list = []
+        out: list[tuple] = []
         for element in await page.query_selector_all(SELECTORS["apply_button"]):
             try:
                 if not await element.is_visible():
@@ -1117,7 +1105,7 @@ class LinkedInScraper:
                 class_name = await element.get_attribute("class") or ""
                 if not _is_primary_apply_candidate(text, aria_label, href, class_name):
                     continue
-                out.append(element)
+                out.append((element, text, aria_label, href))
             except Exception:
                 continue
         return out
