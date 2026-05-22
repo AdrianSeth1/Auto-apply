@@ -56,6 +56,7 @@ class LeverAdapter(BaseATSAdapter):
 
         # Fill them
         filled_mappings = await fill_fields(page, mappings)
+        self._record_fill_details(filled_mappings)
         filled = sum(1 for m in filled_mappings if m.filled)
         total = len(filled_mappings)
 

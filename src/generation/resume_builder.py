@@ -756,9 +756,22 @@ def rewrite_bullets(
     :mod:`src.utils.parallelism` so increasing the per-task cap does
     NOT translate into unbounded LLM concurrency across workers.
     """
+    # Both the Celery worker (no outer loop) and FastAPI ``apply_to_url``
+    # (inside its own event loop) can land here, so we route through
+    # the loop-aware helper that picks ``asyncio.run`` vs a worker
+    # thread automatically.
     import asyncio  # noqa: PLC0415
 
-    return asyncio.run(_rewrite_bullets_async(selected_bullets, jd_tags, mode=mode))
+    coro = _rewrite_bullets_async(selected_bullets, jd_tags, mode=mode)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
 
 
 async def _rewrite_bullets_async(
@@ -814,6 +827,17 @@ Return ONLY a JSON object with exactly this shape:
   "confidence": "high" | "medium" | "low",
   "changed_claims": []
 }
+
+Inline markup you MAY use sparingly inside ``rewritten_bullet``:
+- ``**text**`` -- bold for ONE or TWO key skills, named technologies,
+  or quantified outcomes per bullet (e.g. "**FastAPI**", "**1.5M+
+  requests/day**"). Never bold a whole sentence.
+- ``*text*`` -- italics for proper nouns, paper / product / project
+  names. Never italicise ordinary technical terms.
+- Do NOT use any other Markdown -- no headings, no links, no code
+  fences, no ``_underscores_`` (so ``model_v2`` stays literal).
+- Markup is OPTIONAL. Leave bullets plain when no term clearly merits
+  emphasis.
 """
 
 _REWRITE_RULES_BY_MODE: dict[str, str] = {
@@ -965,6 +989,19 @@ Rules:
 - Do NOT invent skills, technologies, accomplishments, or projects.
 - Stay professional and concise; one bullet, one sentence (or two short ones).
 - changed_claims must list any phrasing whose grounding is even slightly uncertain.
+
+Inline markup you MAY use sparingly inside ``rewritten_bullet``:
+- ``**text**`` -- bold for ONE or TWO key skills, named technologies,
+  or quantified outcomes per bullet (e.g. "**FastAPI**", "**1.5M+
+  requests/day**"). Never bold a whole sentence.
+- ``*text*`` -- italics for proper nouns, paper / product / project
+  names (e.g. "*Operating Systems: Three Easy Pieces*"). Never italicise
+  ordinary technical terms.
+- Do NOT use any other Markdown -- no headings, no links, no code
+  fences, no ``_underscores_``. Underscores stay literal so identifiers
+  like ``model_v2`` render correctly.
+- Markup is OPTIONAL. If a bullet does not have an obvious key term to
+  highlight, leave it plain.
 """
 
 
@@ -1219,8 +1256,9 @@ decision to fit a resume to an exact page target. You see every section
 in the candidate's resume (canonical: experiences / projects / education
 / skills, plus any custom sections such as VOLUNTEER, AWARDS,
 AFFILIATIONS, INTERESTS, CERTIFICATIONS, PUBLICATIONS). For each section,
-decide whether to keep it, how many items to keep, and whether to ask
-for shorter bullets.
+decide whether to keep it, how many items to keep, whether to ask for
+shorter bullets, and whether to place a horizontal divider after it for
+visual grouping.
 
 Return ONLY a JSON object of this exact shape:
 {
@@ -1230,7 +1268,8 @@ Return ONLY a JSON object of this exact shape:
       "id": "<the id from the outline>",
       "keep": true | false,
       "max_items": <int or null>,
-      "bullets_mode": "shorter" | "keep" | "longer"
+      "bullets_mode": "shorter" | "keep" | "longer",
+      "divider_after": true | false
     }
   ]
 }
@@ -1248,6 +1287,11 @@ Decision rules:
 - bullets_mode applies to experiences / projects / volunteer-like
   sections that carry bullet text. Use shorter when over-budget,
   longer when under-budget, keep when length is fine.
+- divider_after=true inserts a thin horizontal rule after the section.
+  Use SPARINGLY -- at most one or two per resume, only where the visual
+  break clearly helps (e.g. between the experience block and a list of
+  awards). Default to false. Skipped automatically for the very last
+  rendered section.
 - Include every section id from the outline in your response.
 """
 
@@ -1323,6 +1367,7 @@ def _generate_resume_fit_plan(
             "keep": bool(entry.get("keep", True)),
             "max_items": coerce_optional_int(entry.get("max_items")),
             "bullets_mode": str(entry.get("bullets_mode") or "keep").lower(),
+            "divider_after": bool(entry.get("divider_after", False)),
         }
 
     return {

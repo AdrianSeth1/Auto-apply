@@ -166,7 +166,45 @@ def resize_section_bullets_in_place(
 
         await asyncio.gather(*(_one(triple) for triple in bullets))
 
-    asyncio.run(_runner())
+    _run_coroutine_safely(_runner())
+
+
+def _run_coroutine_safely(coro) -> None:
+    """Run ``coro`` regardless of whether the caller is inside an
+    event loop.
+
+    ``asyncio.run`` blows up with ``RuntimeError: asyncio.run() cannot
+    be called from a running event loop`` whenever it is invoked from
+    a coroutine that is already being driven by an outer loop -- which
+    is exactly the situation when the Fit Planner runs inside the
+    FastAPI request handler (``apply_to_url`` -> ``_generate_materials``
+    -> ``generate_resume`` -> ``_apply_fit_plan`` -> here). The Celery
+    worker path does NOT have a live loop and the standalone CLI path
+    does not either, so we have to support both shapes.
+
+    Strategy: detect a running loop via ``get_running_loop``; if there
+    isn't one, the standard ``asyncio.run`` is the right call. If
+    there is one, hand the coroutine off to a fresh thread that creates
+    its own loop -- the outer FastAPI loop stays free to handle other
+    requests and our nested ``asyncio.gather`` runs unhindered. We
+    block on the worker thread's result so the caller's control flow
+    looks identical either way.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No outer loop -- the simple case.
+        asyncio.run(coro)
+        return
+
+    # Already inside an event loop. Push the coroutine into a worker
+    # thread with its own loop and wait for the result there. We use
+    # ``ThreadPoolExecutor`` rather than ``asyncio.to_thread`` because
+    # the caller is a synchronous function -- we cannot ``await`` here.
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(asyncio.run, coro).result()
 
 
 def apply_fit_plan(document, plan: dict[str, Any], *, bullet_rewriter):
@@ -218,5 +256,36 @@ def apply_fit_plan(document, plan: dict[str, Any], *, bullet_rewriter):
         if mode not in {"shorter", "longer"}:
             continue
         resize_section_bullets_in_place(items, mode, bullet_rewriter)
+
+    # Translate per-section ``divider_after`` decisions into the IR's
+    # ``dividers_after`` list. We rebuild the list from scratch each
+    # apply so a previously-set divider can be revoked by a subsequent
+    # plan round (e.g. if the planner now decides a section should be
+    # dropped entirely, leaving its trailing divider would be visual
+    # noise).
+    dividers: list[str] = []
+    canonical_keys = {
+        "experiences": "experience",
+        "projects": "projects",
+        "education": "education",
+        "skills": "skills",
+    }
+    for key, rendered_section in canonical_keys.items():
+        if (decisions.get(key) or {}).get("divider_after"):
+            dividers.append(rendered_section)
+    for custom in new_doc.custom_sections or []:
+        token = f"custom:{custom.title}"
+        # Look up the plan decision both by the indexed id we sent and
+        # by the bare ``custom:<title>`` form so a planner that echoed
+        # only the title still gets honoured.
+        for section_id, decision in decisions.items():
+            if not isinstance(decision, dict):
+                continue
+            if not decision.get("divider_after"):
+                continue
+            if section_id == token or section_id.endswith(f":{custom.title}"):
+                dividers.append(token)
+                break
+    new_doc.dividers_after = dividers
 
     return new_doc

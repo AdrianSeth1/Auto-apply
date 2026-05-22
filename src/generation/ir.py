@@ -112,6 +112,11 @@ class ResumeDocument(BaseModel):
     section_order: list[str] = Field(
         default_factory=lambda: ["header", "education", "skills", "experience", "projects"]
     )
+    # Section names (canonical or ``custom:<title>``) after which the
+    # renderer inserts a thin horizontal rule. Lets the Fit Planner
+    # group visually related blocks ("...projects --- volunteer...") so
+    # the page reads as deliberate structure rather than a wall of text.
+    dividers_after: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

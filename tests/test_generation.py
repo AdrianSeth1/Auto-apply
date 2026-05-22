@@ -5,8 +5,12 @@ from pathlib import Path
 from src.documents.templates import default_manifest
 from src.generation.cover_letter import (
     _clean_llm_cover_letter_output,
+    _cover_letter_quality_issues,
     _format_education_brief,
     _generate_template,
+    _infer_cover_letter_strategy,
+    _normalize_cover_letter_dashes,
+    _role_references,
     _select_evidence,
     generate_cover_letter,
 )
@@ -333,6 +337,137 @@ class TestResumeIR:
 
         assert rewritten["Acme Corp - Software Dev Intern"][0] == (
             "Built backend REST APIs with Python and FastAPI"
+        )
+
+    def test_resume_fit_planner_runs_under_running_event_loop(self, tmp_path):
+        """Regression for the Re-apply bug: when ``apply_to_url`` invokes
+        the synchronous resume generator from inside an asyncio event
+        loop, the Fit Planner's nested ``asyncio.run`` used to crash
+        with "cannot be called from a running event loop". Verify the
+        loop-aware helper now keeps the call working."""
+        import asyncio
+        from unittest.mock import patch
+
+        from src.generation.ir import ResumeBullet, ResumeDocument, ResumeItem
+        from src.generation.resume_builder import _apply_fit_plan
+
+        document = ResumeDocument(
+            target_role="SWE",
+            company="Acme",
+            header={"full_name": "Jane Doe"},
+            experiences=[
+                ResumeItem(
+                    source_id="exp:0",
+                    source_type="experience",
+                    name="Acme",
+                    title="SWE",
+                    organization="Acme",
+                    bullets=[
+                        ResumeBullet(
+                            text="Built backend REST APIs with Python and FastAPI",
+                            source_id="b:0",
+                            source_entity="Acme",
+                        ),
+                        ResumeBullet(
+                            text="Designed PostgreSQL schema",
+                            source_id="b:1",
+                            source_entity="Acme",
+                        ),
+                    ],
+                ),
+            ],
+        )
+        plan = {
+            "reasoning": "shorten bullets",
+            "sections": {
+                "experiences": {
+                    "keep": True,
+                    "max_items": None,
+                    "bullets_mode": "shorter",
+                    "divider_after": False,
+                },
+            },
+        }
+
+        async def _run():
+            # Replace the per-bullet rewriter with a deterministic stub
+            # so the test does not need a live LLM provider.
+            with patch(
+                "src.generation.resume_builder._rewrite_bullet_for_length",
+                return_value="Short bullet.",
+            ):
+                # Calling the sync helper from inside this coroutine is
+                # the exact shape that used to blow up.
+                return _apply_fit_plan(document, plan)
+
+        applied = asyncio.run(_run())
+        for bullet in applied.experiences[0].bullets:
+            assert bullet.text == "Short bullet."
+
+    def test_resume_fit_planner_propagates_divider_after(self):
+        """LLM ``divider_after: true`` decisions land on the IR's
+        ``dividers_after`` list so the renderer can insert a horizontal
+        rule after that section."""
+        from src.generation.ir import (
+            CustomSection,
+            CustomSectionEntry,
+            ResumeBullet,
+            ResumeDocument,
+            ResumeItem,
+        )
+        from src.generation.resume_builder import _apply_fit_plan
+
+        document = ResumeDocument(
+            target_role="SWE",
+            company="Acme",
+            header={"full_name": "Jane Doe"},
+            experiences=[
+                ResumeItem(
+                    source_id="exp:0",
+                    source_type="experience",
+                    name="Acme",
+                    title="SWE",
+                    organization="Acme",
+                    bullets=[
+                        ResumeBullet(
+                            text="Built X",
+                            source_id="b0",
+                            source_entity="Acme",
+                        ),
+                    ],
+                ),
+            ],
+            custom_sections=[
+                CustomSection(
+                    title="VOLUNTEER EXPERIENCE",
+                    entries=[CustomSectionEntry(title="Tutor")],
+                ),
+            ],
+        )
+
+        plan = {
+            "reasoning": "Group experience apart from volunteer block.",
+            "sections": {
+                "experiences": {
+                    "keep": True,
+                    "max_items": None,
+                    "bullets_mode": "keep",
+                    "divider_after": True,
+                },
+                "custom:0:VOLUNTEER EXPERIENCE": {
+                    "keep": True,
+                    "max_items": None,
+                    "bullets_mode": "keep",
+                    "divider_after": False,
+                },
+            },
+        }
+
+        applied = _apply_fit_plan(document, plan)
+        assert "experience" in applied.dividers_after, applied.dividers_after
+        # Volunteer entry must NOT have got a divider since divider_after=False.
+        assert not any(
+            "volunteer" in token.lower() for token in applied.dividers_after
         )
 
     def test_resume_fit_planner_drops_custom_sections_and_trims(self, tmp_path):
@@ -925,25 +1060,65 @@ class TestGenerateTemplate:
         job = _make_job()
         identity = _PROFILE["identity"]
         evidence = ["At Acme Corp, Built REST APIs with Python and FastAPI"]
-        text = _generate_template(job, identity, evidence)
-        assert "Backend Engineering Intern" in text
+        text = _generate_template(job, identity, evidence, _PROFILE)
+        assert "backend engineering internship" in text
         assert "TestCo" in text
+        assert text.startswith("As a Computer Science student")
+        assert "A central area of fit" in text
+        assert "A second area of fit" in text
         assert "Built REST APIs" not in text
         assert "built REST APIs" in text
+        assert "I am excited" not in text
         assert len(text.split("\n\n")) == 5
         assert len(text.split()) >= 260
+
+    def test_role_references_simplify_seasonal_titles(self):
+        job = _make_job(title="Software Engineering Intern/Co-op - 2026 Spring")
+        strategy = {"role_type": "software_development_test"}
+
+        refs = _role_references(job, strategy)
+
+        assert refs["opening"] == "the software engineering internship/co-op position"
+        assert refs["body"] == "this role"
+        assert refs["alternate"] == "the position"
+        assert "2026" not in " ".join(refs.values())
+        assert "Spring" not in " ".join(refs.values())
 
     def test_no_evidence(self):
         job = _make_job()
         text = _generate_template(job, _PROFILE["identity"], [])
         assert "TestCo" in text
 
+    def test_infers_capability_buckets_for_software_development_test(self):
+        job = _make_job(
+            company="General Dynamics Mission Systems-Canada",
+            title="Co-op Software Development and Test",
+            description=(
+                "Develop maintainable software, write tests, debug reliability issues, "
+                "document verification results, and work with an engineering team."
+            ),
+        )
+
+        strategy = _infer_cover_letter_strategy(
+            job,
+            [
+                "At Canvas Course Agent, built API ingestion and validation workflows.",
+                "At Parallax, debugged Java backend and Python OCR service integration.",
+            ],
+            _PROFILE,
+        )
+
+        assert strategy["role_type"] == "software_development_test"
+        bucket_names = [bucket["name"] for bucket in strategy["capability_buckets"]]
+        assert "testing, debugging, and reliability" in bucket_names[:2]
+        assert "software development and maintainability" in bucket_names[:3]
+
     def test_generate_cover_letter_outputs_docx_ir_and_validation(self, tmp_path):
         from unittest.mock import patch
 
         with patch("src.generation.cover_letter.convert_to_pdf", side_effect=RuntimeError):
             result = generate_cover_letter(
-                _make_job(),
+                _make_job(location="Calgary, AB (Hybrid)"),
                 _PROFILE,
                 output_dir=tmp_path,
                 use_llm=False,
@@ -951,7 +1126,10 @@ class TestGenerateTemplate:
 
         assert result["docx"].exists()
         assert result["ir"].document_type == "cover_letter"
+        assert result["ir"].metadata["role_type"]
+        assert result["ir"].metadata["capability_buckets"]
         assert result["validation"].metrics["docx_generated"] is True
+        assert result["validation"].metrics["cover_letter_quality_issues"] == []
         assert result["validation"].metrics["font_family"] == "Times New Roman"
         assert result["validation"].metrics["font_size_pt"] == 11
         assert result["validation"].metrics["estimated_page_fill_ratio"] >= 0.58
@@ -962,7 +1140,44 @@ class TestGenerateTemplate:
         texts = [paragraph.text for paragraph in Document(str(result["docx"])).paragraphs]
         assert "Dear Hiring Manager," in texts
         assert "Sincerely," in texts
+        assert "Enclosure" in texts
         assert any(" 202" in text and "," in text for text in texts)
+        assert any("Hiring Team" in text and "TestCo" in text for text in texts)
+        assert any("Calgary, AB" in text for text in texts)
+        assert not any("Hybrid" in text for text in texts)
+        assert not any("linkedin" in text.lower() for text in texts)
+        assert any("Vancouver, BC, Canada" in text and "test@example.com" in text for text in texts)
+
+    def test_cover_letter_dash_cleanup_removes_em_and_en_dashes(self):
+        text = "I built APIs — improving reliability – while collaborating across teams."
+
+        cleaned = _normalize_cover_letter_dashes(text)
+
+        assert "—" not in cleaned
+        assert "–" not in cleaned
+        assert cleaned == "I built APIs, improving reliability, while collaborating across teams."
+
+    def test_cover_letter_quality_flags_generic_phrases_and_tech_dumping(self):
+        text = (
+            "I am passionate about software and would be a valuable addition. "
+            "I used Java, Python, Nginx, HTTPS, Cloudflare, systemd, and SQLite."
+        )
+
+        issues = _cover_letter_quality_issues(text)
+
+        assert any(issue.startswith("generic_phrase:") for issue in issues)
+        assert any(issue.startswith("technology_dumping:") for issue in issues)
+
+    def test_cover_letter_quality_flags_repeated_raw_job_title(self):
+        title = "Software Engineering Intern/Co-op - 2026 Spring"
+        text = (
+            "I am applying for the Software Engineering Intern/Co-op - 2026 Spring role. "
+            "The Software Engineering Intern/Co-op - 2026 Spring role aligns with my work."
+        )
+
+        issues = _cover_letter_quality_issues(text, job_title=title)
+
+        assert "repeated_raw_job_title:2" in issues
 
     def test_invalid_llm_cover_letter_response_falls_back_to_template(self, tmp_path):
         from unittest.mock import patch
@@ -981,10 +1196,10 @@ class TestGenerateTemplate:
                 _PROFILE,
                 output_dir=tmp_path,
                 use_llm=True,
-            )
+        )
 
         assert "Please paste the system instructions" not in result["text"]
-        assert "Backend Engineering Intern" in result["text"]
+        assert "backend engineering internship" in result["text"]
         assert result["docx"].exists()
 
     def test_rejects_codex_transcript_as_cover_letter(self):

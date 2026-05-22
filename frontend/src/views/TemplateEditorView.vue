@@ -44,6 +44,7 @@ const editor = reactive({
   targetPages: 1,
   filenamePattern: "company_role_date",
   filenameCustomLabel: "",
+  emphasisFont: "",
 })
 
 const FONT_OPTIONS = [
@@ -56,6 +57,15 @@ const FONT_OPTIONS = [
   "Garamond",
   "Verdana",
 ].map((font) => ({ value: font, label: font }))
+
+// Emphasis-font picker adds an "inherit body font" option (empty
+// string means "don't override"). The renderer only swaps the font on
+// **bold** runs the LLM emits, so leaving it inherited is the safe
+// default for any template that doesn't want a typographic accent.
+const EMPHASIS_FONT_OPTIONS = [
+  { value: "", label: "Inherit body font (default)" },
+  ...FONT_OPTIONS,
+]
 
 const FILENAME_PATTERN_OPTIONS = [
   {
@@ -115,6 +125,7 @@ async function loadTemplate() {
       template.filename_pattern ?? manifest.filename_pattern ?? "company_role_date"
     editor.filenameCustomLabel =
       template.filename_custom_label ?? manifest.filename_custom_label ?? ""
+    editor.emphasisFont = template.emphasis_font ?? manifest.emphasis_font ?? ""
   } catch (error) {
     editor.error = error.message
   } finally {
@@ -198,6 +209,7 @@ async function saveTemplate() {
     target_pages: Number(editor.targetPages) || 1,
     filename_pattern: editor.filenamePattern,
     filename_custom_label: editor.filenameCustomLabel,
+    emphasis_font: editor.emphasisFont,
   }
 
   try {
@@ -397,6 +409,21 @@ const isLatexEditor = computed(() => editor.renderer === "latex")
           />
           <p class="text-xs text-muted-foreground">
             Lowercased, special chars become underscores. Used in place of the company name.
+          </p>
+        </label>
+        <label class="space-y-1.5 md:col-span-2">
+          <span class="text-xs font-medium text-muted-foreground">Emphasis font (second font)</span>
+          <AppSelect
+            v-model="editor.emphasisFont"
+            :options="EMPHASIS_FONT_OPTIONS"
+            aria-label="Emphasis font"
+            compact
+          />
+          <p class="text-xs text-muted-foreground">
+            Applied to bold text the LLM emits via inline <code>**...**</code> markup
+            (key skills, metrics, project names). Pair with the body font for a classic
+            two-font resume look — e.g. Arial body + Georgia emphasis. Leave on "Inherit"
+            to keep one consistent font.
           </p>
         </label>
       </CardContent>

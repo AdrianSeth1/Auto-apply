@@ -43,6 +43,7 @@ class AshbyAdapter(BaseATSAdapter):
         fields = await detect_fields(page)
         mappings = map_fields_to_profile(fields, profile_data, qa_responses)
         filled_mappings = await fill_fields(page, mappings)
+        self._record_fill_details(filled_mappings)
         filled = sum(1 for mapping in filled_mappings if mapping.filled)
         total = len(filled_mappings)
 

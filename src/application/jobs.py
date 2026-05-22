@@ -622,6 +622,26 @@ async def apply_to_url(
             resolved_url = resolved_target
             payload["resolved_url"] = resolved_url
 
+    # If we are still pointing at a LinkedIn URL at this point it means
+    # the LinkedIn resolver couldn't find a real external apply target.
+    # That's the Easy-Apply-only case: refuse with a clear message
+    # rather than letting the pipeline pretend a random link on the
+    # page is the apply form. When LinkedIn Easy Apply is eventually
+    # automated we'll branch here instead of erroring out.
+    if _is_linkedin_url(resolved_url):
+        return {
+            **payload,
+            "ok": False,
+            "status": None,
+            "job": None,
+            "tracking_id": None,
+            "result": None,
+            "artifacts": _empty_artifacts(),
+            "error": _linkedin_easy_apply_message(),
+            "error_code": "linkedin_easy_apply_only",
+            "dry_run": dry_run,
+        }
+
     ats_type = _detect_ats_from_url(resolved_url)
     if not ats_type:
         return {
@@ -672,6 +692,25 @@ async def apply_to_url(
             "artifacts": _empty_artifacts(),
             "error": _no_job_context_message(ats_type),
             "error_code": "job_context_required",
+            "dry_run": dry_run,
+        }
+
+    # Final EasyApply guard: the LinkedIn scraper persists
+    # ``raw_data.linkedin_easy_apply_only`` whenever the only apply
+    # path on the LinkedIn page was Easy Apply. Even if a previous
+    # scrape pass stored a bogus external URL (Fitzrovia's marketing
+    # homepage), the flag tells us not to send the form-filler there.
+    if _job_is_easy_apply_only(job):
+        return {
+            **payload,
+            "ok": False,
+            "status": None,
+            "job": serialize_job(job),
+            "tracking_id": None,
+            "result": None,
+            "artifacts": _empty_artifacts(),
+            "error": _linkedin_easy_apply_message(),
+            "error_code": "linkedin_easy_apply_only",
             "dry_run": dry_run,
         }
 
@@ -770,6 +809,24 @@ async def apply_to_job_id(
                 }
 
             job = _job_to_raw_job(db_job)
+
+            # Same Easy-Apply-only guard as ``apply_to_url`` -- catch
+            # the Fitzrovia regression when applying by stored job id
+            # too, so the apply pipeline never tries to form-fill a
+            # company's marketing homepage.
+            if _job_is_easy_apply_only(job) or _is_linkedin_url(job.application_url or ""):
+                return {
+                    **payload,
+                    "ok": False,
+                    "status": None,
+                    "job": serialize_job(job),
+                    "tracking_id": None,
+                    "result": None,
+                    "artifacts": _empty_artifacts(),
+                    "error": _linkedin_easy_apply_message(),
+                    "error_code": "linkedin_easy_apply_only",
+                    "dry_run": dry_run,
+                }
     except Exception as exc:
         return {
             **payload,
@@ -1151,6 +1208,7 @@ def update_material_template(
     target_pages: int | None = None,
     filename_pattern: str | None = None,
     filename_custom_label: str | None = None,
+    emphasis_font: str | None = None,
 ) -> dict:
     """Update an editable LaTeX material template package."""
     from src.documents.templates import update_latex_template_package
@@ -1171,6 +1229,7 @@ def update_material_template(
             target_pages=target_pages,
             filename_pattern=filename_pattern,
             filename_custom_label=filename_custom_label,
+            emphasis_font=emphasis_font,
         )
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "error_code": "invalid_template"}
@@ -1190,6 +1249,7 @@ def update_material_template_styles(
     target_pages: int | None = None,
     filename_pattern: str | None = None,
     filename_custom_label: str | None = None,
+    emphasis_font: str | None = None,
 ) -> dict:
     """Apply DOCX style overrides (font/size/bold/line-spacing) to a template."""
     from src.documents.templates import update_docx_template_styles
@@ -1210,6 +1270,7 @@ def update_material_template_styles(
             target_pages=target_pages,
             filename_pattern=filename_pattern,
             filename_custom_label=filename_custom_label,
+            emphasis_font=emphasis_font,
         )
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "error_code": "invalid_template"}
@@ -2110,7 +2171,9 @@ def _generate_selected_material(
             output_dir=output_dir,
             material_type=material_type,
         )
-        artifacts[material_type] = str(copied_path)
+        source_suffix = _source_type_to_material_suffix(used_doc.source_type)
+        artifact_type = f"{used_doc.document_type}_{source_suffix}"
+        artifacts[artifact_type] = str(copied_path)
         strategy_notes.append(
             f"Used your library document {used_doc.original_filename!r} as-is."
         )
@@ -2525,7 +2588,8 @@ def _copy_library_document_to_output(
                 f"Library document is a {row.document_type.replace('_', ' ')}, "
                 f"but a {expected_doc_type.replace('_', ' ')} was requested."
             )
-        if row.source_type != expected_source:
+        actual_source = _source_type_to_material_suffix(row.source_type)
+        if actual_source != expected_source:
             raise ValueError(
                 f"Library document is a {row.source_type.upper()} file, "
                 f"but the requested output format is {expected_source.upper()}. "
@@ -2597,6 +2661,36 @@ def _no_job_context_message(ats_type: str) -> str:
     )
 
 
+def _linkedin_easy_apply_message() -> str:
+    """Standard error message when a job only exposes LinkedIn Easy Apply.
+
+    AutoApply does not yet automate LinkedIn Easy Apply: the form lives
+    inside a LinkedIn modal that needs its own automation path. Until
+    that ships, refusing the apply request is the honest answer --
+    far better than silently submitting some random homepage form.
+    """
+    return (
+        "This job only offers LinkedIn Easy Apply, which AutoApply does not "
+        "yet automate. Open the LinkedIn posting and submit manually -- or "
+        "wait for the Easy Apply automation to land."
+    )
+
+
+def _job_is_easy_apply_only(job) -> bool:
+    """True when the scraper marked this job as LinkedIn-Easy-Apply-only.
+
+    The scraper writes ``raw_data["linkedin_easy_apply_only"]`` during
+    job-detail extraction. Reading via ``getattr`` + ``dict.get``
+    keeps the helper tolerant of older scrape passes that predate the
+    flag (in which case we fall through to the URL-domain check the
+    caller already performs).
+    """
+    raw = getattr(job, "raw_data", None) or {}
+    if not isinstance(raw, dict):
+        return False
+    return bool(raw.get("linkedin_easy_apply_only"))
+
+
 def _serialize_execution_result(result) -> dict:
     if result is None:
         return {
@@ -2604,6 +2698,7 @@ def _serialize_execution_result(result) -> dict:
             "error": None,
             "fields_filled": 0,
             "fields_total": 0,
+            "fill_details": [],
             "files_uploaded": [],
             "qa_answered": 0,
             "screenshots": [],
@@ -2614,6 +2709,10 @@ def _serialize_execution_result(result) -> dict:
         "error": result.error or None,
         "fields_filled": result.fields_filled,
         "fields_total": result.fields_total,
+        # ``getattr`` guards against older adapter shapes that don't
+        # publish per-field details yet -- their payload comes back
+        # with ``[]`` which the UI renders as "no per-field details".
+        "fill_details": getattr(result, "fill_details", []) or [],
         "files_uploaded": result.files_uploaded,
         "qa_answered": result.qa_answered,
         "screenshots": [str(path) for path in result.screenshots],
@@ -2710,18 +2809,45 @@ async def _run_application_for_job(
 async def _generate_materials(
     profile_data: dict, job
 ) -> tuple[Path | None, Path | None, dict | None]:
-    from src.generation.cover_letter import generate_cover_letter
+    from src.application.material_defaults import resolve_material_choice
     from src.generation.qa_responder import answer_questions
-    from src.generation.resume_builder import generate_resume
 
     output_dir = PROJECT_ROOT / "data" / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    resume_files = generate_resume(job=job, profile_data=profile_data, output_dir=output_dir)
-    resume_path = resume_files.get("pdf") or resume_files.get("docx")
+    resume_choice = resolve_material_choice(document_type="resume")
+    resume_material_type = _application_material_type("resume", resume_choice)
+    resume_files = _generate_selected_material(
+        profile_data,
+        job,
+        resume_material_type,
+        template_id=resume_choice["template_id"],
+        strategy=resume_choice["strategy"],
+        source_document_id=resume_choice["document_id"],
+        patch_aggressiveness=resume_choice["patch_aggressiveness"],
+        patch_allow_reorder_sections=resume_choice["patch_allow_reorder_sections"],
+        patch_allow_add_remove_bullets=resume_choice["patch_allow_add_remove_bullets"],
+    )
+    resume_path = _pick_application_artifact(
+        resume_files.get("artifacts") or {}, "resume", resume_choice["strategy"]
+    )
 
-    cover_files = generate_cover_letter(job=job, profile_data=profile_data, output_dir=output_dir)
-    cover_letter_path = cover_files.get("pdf") or cover_files.get("docx") or cover_files.get("txt")
+    cover_choice = resolve_material_choice(document_type="cover_letter")
+    cover_material_type = _application_material_type("cover_letter", cover_choice)
+    cover_files = _generate_selected_material(
+        profile_data,
+        job,
+        cover_material_type,
+        template_id=cover_choice["template_id"],
+        strategy=cover_choice["strategy"],
+        source_document_id=cover_choice["document_id"],
+        patch_aggressiveness=cover_choice["patch_aggressiveness"],
+        patch_allow_reorder_sections=cover_choice["patch_allow_reorder_sections"],
+        patch_allow_add_remove_bullets=cover_choice["patch_allow_add_remove_bullets"],
+    )
+    cover_letter_path = _pick_application_artifact(
+        cover_files.get("artifacts") or {}, "cover_letter", cover_choice["strategy"]
+    )
 
     qa_entries = [
         entry
@@ -2744,6 +2870,62 @@ async def _generate_materials(
             qa_responses = None
 
     return resume_path, cover_letter_path, qa_responses
+
+
+def _application_material_type(document_type: str, choice: dict) -> str:
+    # Patch mode produces a tailored DOCX from the user's library. Ask
+    # for DOCX so the apply pipeline uploads that patched file instead
+    # of a stale template PDF side-effect.
+    if choice.get("strategy") == "use_library":
+        suffix = _source_type_to_material_suffix(
+            _library_document_source_type(choice.get("document_id"))
+        ) or "pdf"
+    elif choice.get("strategy") == "patch_existing":
+        suffix = "docx"
+    else:
+        suffix = "pdf"
+    prefix = "resume" if document_type == "resume" else "cover_letter"
+    return f"{prefix}_{suffix}"
+
+
+def _source_type_to_material_suffix(source_type: str | None) -> str | None:
+    if not source_type:
+        return None
+    normalized = str(source_type).strip().lower()
+    return "tex" if normalized == "latex" else normalized
+
+
+def _library_document_source_type(document_id: str | None) -> str | None:
+    if not document_id:
+        return None
+    try:
+        from uuid import UUID
+
+        from src.core.database import get_session_factory
+        from src.documents.user_documents import get_document
+
+        doc_uuid = UUID(document_id)
+        session_factory = get_session_factory(load_config())
+        with session_factory() as session:
+            row = get_document(session, doc_uuid)
+            return getattr(row, "source_type", None) if row is not None else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not resolve library document source type: %s", exc)
+        return None
+
+
+def _pick_application_artifact(artifacts: dict, document_type: str, strategy: str) -> Path | None:
+    prefix = "resume" if document_type == "resume" else "cover_letter"
+    order = (
+        [f"{prefix}_docx", f"{prefix}_pdf", f"{prefix}_tex", f"{prefix}_txt"]
+        if strategy in {"patch_existing", "use_library"}
+        else [f"{prefix}_pdf", f"{prefix}_docx", f"{prefix}_tex", f"{prefix}_txt"]
+    )
+    for key in order:
+        value = artifacts.get(key)
+        if value:
+            return Path(value)
+    return None
 
 
 async def _execute_application(
@@ -3048,6 +3230,11 @@ def _sync_tracking_application(app_id: uuid.UUID, state, result, qa_responses: d
                     "files_uploaded": result.files_uploaded,
                     "qa_responses": qa_responses,
                     "screenshot_paths": [str(path) for path in result.screenshots],
+                    # Phase 18.5: forward the per-field record published
+                    # by the ATS adapter. ``getattr`` keeps older custom
+                    # adapters that haven't migrated to the new attr
+                    # from blowing up here.
+                    "fill_details": getattr(result, "fill_details", []) or [],
                 },
             )
             session.commit()

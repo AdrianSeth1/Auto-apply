@@ -58,6 +58,18 @@ async def test_application_materials_prefers_cover_letter_pdf_not_txt(
         "src.generation.cover_letter.generate_cover_letter",
         lambda **_kwargs: {"pdf": cover_pdf, "docx": cover_docx, "txt": cover_txt},
     )
+    monkeypatch.setattr(
+        "src.application.material_defaults.resolve_material_choice",
+        lambda *, document_type, **_kwargs: {
+            "strategy": "regenerate",
+            "template_id": None,
+            "document_id": None,
+            "patch_aggressiveness": "balanced",
+            "patch_allow_reorder_sections": True,
+            "patch_allow_add_remove_bullets": True,
+            "source": "test-default",
+        },
+    )
 
     resume_path, cover_letter_path, _qa = await jobs_app._generate_materials(
         {"qa_bank": []}, SimpleNamespace(company="Acme", title="Engineer")
@@ -65,6 +77,126 @@ async def test_application_materials_prefers_cover_letter_pdf_not_txt(
 
     assert resume_path == resume_pdf
     assert cover_letter_path == cover_pdf
+
+
+async def test_application_materials_honor_patch_default_strategy(
+    monkeypatch, tmp_path: Path
+) -> None:
+    patched_resume = tmp_path / "patched_resume.docx"
+    patched_cover = tmp_path / "patched_cover.docx"
+    patched_resume.write_text("resume", encoding="utf-8")
+    patched_cover.write_text("cover", encoding="utf-8")
+    calls: list[tuple[str, str, str | None]] = []
+
+    def fake_choice(*, document_type, **_kwargs):
+        return {
+            "strategy": "patch_existing",
+            "template_id": None,
+            "document_id": f"{document_type}-doc-id",
+            "patch_aggressiveness": "balanced",
+            "patch_allow_reorder_sections": True,
+            "patch_allow_add_remove_bullets": True,
+            "source": "saved-default",
+        }
+
+    def fake_generate(_profile_data, _job, material_type, **kwargs):
+        calls.append((material_type, kwargs["strategy"], kwargs["source_document_id"]))
+        artifacts = jobs_app._empty_material_artifacts()
+        if material_type == "resume_docx":
+            artifacts["resume_docx"] = str(patched_resume)
+        elif material_type == "cover_letter_docx":
+            artifacts["cover_letter_docx"] = str(patched_cover)
+        return {"artifacts": artifacts, "strategy_notes": []}
+
+    monkeypatch.setattr("src.application.material_defaults.resolve_material_choice", fake_choice)
+    monkeypatch.setattr(jobs_app, "_generate_selected_material", fake_generate)
+
+    resume_path, cover_letter_path, _qa = await jobs_app._generate_materials(
+        {"qa_bank": []}, SimpleNamespace(company="Acme", title="Engineer")
+    )
+
+    assert resume_path == patched_resume
+    assert cover_letter_path == patched_cover
+    assert calls == [
+        ("resume_docx", "patch_existing", "resume-doc-id"),
+        ("cover_letter_docx", "patch_existing", "cover_letter-doc-id"),
+    ]
+
+
+async def test_application_materials_use_library_preserves_pdf_format(
+    monkeypatch, tmp_path: Path
+) -> None:
+    resume_pdf = tmp_path / "library_resume.pdf"
+    cover_pdf = tmp_path / "cover.pdf"
+    resume_pdf.write_bytes(b"%PDF-1.7\n")
+    cover_pdf.write_bytes(b"%PDF-1.7\n")
+    calls: list[tuple[str, str, str | None]] = []
+
+    def fake_choice(*, document_type, **_kwargs):
+        if document_type == "resume":
+            return {
+                "strategy": "use_library",
+                "template_id": None,
+                "document_id": "resume-doc-id",
+                "patch_aggressiveness": "balanced",
+                "patch_allow_reorder_sections": True,
+                "patch_allow_add_remove_bullets": True,
+                "source": "saved-default",
+            }
+        return {
+            "strategy": "regenerate",
+            "template_id": None,
+            "document_id": None,
+            "patch_aggressiveness": "balanced",
+            "patch_allow_reorder_sections": True,
+            "patch_allow_add_remove_bullets": True,
+            "source": "system-default",
+        }
+
+    def fake_generate(_profile_data, _job, material_type, **kwargs):
+        calls.append((material_type, kwargs["strategy"], kwargs["source_document_id"]))
+        artifacts = jobs_app._empty_material_artifacts()
+        if material_type == "resume_pdf":
+            artifacts["resume_pdf"] = str(resume_pdf)
+        elif material_type == "cover_letter_pdf":
+            artifacts["cover_letter_pdf"] = str(cover_pdf)
+        return {"artifacts": artifacts, "strategy_notes": []}
+
+    monkeypatch.setattr("src.application.material_defaults.resolve_material_choice", fake_choice)
+    monkeypatch.setattr(jobs_app, "_library_document_source_type", lambda _doc_id: "pdf")
+    monkeypatch.setattr(jobs_app, "_generate_selected_material", fake_generate)
+
+    resume_path, cover_letter_path, _qa = await jobs_app._generate_materials(
+        {"qa_bank": []}, SimpleNamespace(company="Acme", title="Engineer")
+    )
+
+    assert resume_path == resume_pdf
+    assert cover_letter_path == cover_pdf
+    assert calls == [
+        ("resume_pdf", "use_library", "resume-doc-id"),
+        ("cover_letter_pdf", "regenerate", None),
+    ]
+
+
+def test_application_material_type_maps_library_latex_to_tex(monkeypatch) -> None:
+    monkeypatch.setattr(jobs_app, "_library_document_source_type", lambda _doc_id: "latex")
+
+    material_type = jobs_app._application_material_type(
+        "resume",
+        {"strategy": "use_library", "document_id": "resume-doc-id"},
+    )
+
+    assert material_type == "resume_tex"
+
+
+def test_pick_application_artifact_includes_txt_for_library() -> None:
+    picked = jobs_app._pick_application_artifact(
+        {"cover_letter_txt": "data/output/cover.txt"},
+        "cover_letter",
+        "use_library",
+    )
+
+    assert picked == Path("data/output/cover.txt")
 
 
 def test_patch_existing_drops_stale_template_pdf_for_docx_request(

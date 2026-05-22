@@ -395,6 +395,40 @@ function pausedFieldSummary(application) {
   return `${application.fields_filled || 0} of ${application.fields_total} fields filled`
 }
 
+const fillDetailsDialog = reactive({
+  open: false,
+  application: null,
+})
+
+function openFillDetailsDialog(application) {
+  // Allow opening even when the backend has not recorded per-field
+  // details yet -- the dialog will tell the user "no detail available"
+  // instead, which is more useful than the badge silently doing nothing.
+  fillDetailsDialog.application = application
+  fillDetailsDialog.open = true
+}
+
+function closeFillDetailsDialog() {
+  fillDetailsDialog.open = false
+  fillDetailsDialog.application = null
+}
+
+function applicationFillDetails(application) {
+  const raw = Array.isArray(application?.fill_details)
+    ? application.fill_details
+    : []
+  return raw.map((entry, idx) => ({
+    key: `${idx}-${entry?.label || entry?.data_key || idx}`,
+    label: entry?.label || "(no label detected)",
+    dataKey: entry?.data_key || "",
+    value: entry?.value ?? "",
+    filled: Boolean(entry?.filled),
+    error: entry?.error || "",
+    required: Boolean(entry?.required),
+    fieldType: entry?.field_type || "",
+  }))
+}
+
 function artifactUrl(path) {
   return api.artifactDownloadUrl(path)
 }
@@ -595,7 +629,15 @@ onMounted(refresh)
               {{ application.job.title }}
             </div>
             <div class="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-              <span v-if="pausedFieldSummary(application)">{{ pausedFieldSummary(application) }}</span>
+              <button
+                v-if="pausedFieldSummary(application)"
+                type="button"
+                class="inline-flex items-center gap-1 underline decoration-dotted underline-offset-2 hover:text-foreground"
+                title="See exactly which fields the form-filler attempted, with values and errors"
+                @click="openFillDetailsDialog(application)"
+              >
+                {{ pausedFieldSummary(application) }}
+              </button>
               <span v-if="application.match_score !== null">
                 Match {{ formatPercent(application.match_score, "0%") }}
               </span>
@@ -1094,5 +1136,68 @@ onMounted(refresh)
         </CardContent>
       </Card>
     </div>
+
+    <Dialog :open="fillDetailsDialog.open" @update:open="(v) => !v && closeFillDetailsDialog()">
+      <DialogContent class="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Form-fill details</DialogTitle>
+          <DialogDescription>
+            <template v-if="fillDetailsDialog.application">
+              {{ fillDetailsDialog.application.job.title }} at
+              {{ fillDetailsDialog.application.job.company }} —
+              {{ fillDetailsDialog.application.fields_filled || 0 }} of
+              {{ fillDetailsDialog.application.fields_total || 0 }} fields filled.
+            </template>
+          </DialogDescription>
+        </DialogHeader>
+        <div class="max-h-[60vh] overflow-y-auto space-y-2">
+          <div
+            v-for="entry in applicationFillDetails(fillDetailsDialog.application)"
+            :key="entry.key"
+            class="rounded-md border p-3 text-sm"
+            :class="entry.filled
+              ? 'border-emerald-500/30 bg-emerald-500/5'
+              : entry.error
+                ? 'border-destructive/40 bg-destructive/5'
+                : 'border-amber-500/40 bg-amber-500/5'"
+          >
+            <div class="flex items-start justify-between gap-2">
+              <div class="font-medium text-foreground">
+                {{ entry.label }}
+                <span v-if="entry.required" class="text-destructive">*</span>
+              </div>
+              <Badge :variant="entry.filled ? 'success' : entry.error ? 'destructive' : 'warning'">
+                {{ entry.filled ? "Filled" : entry.error ? "Failed" : "Skipped" }}
+              </Badge>
+            </div>
+            <div v-if="entry.dataKey" class="mt-1 font-mono text-xs text-muted-foreground">
+              maps to: {{ entry.dataKey }}<span v-if="entry.fieldType"> ({{ entry.fieldType }})</span>
+            </div>
+            <div v-if="entry.value !== ''" class="mt-1 text-xs">
+              <span class="text-muted-foreground">Value:</span>
+              <span class="ml-1 break-words text-foreground">{{ entry.value }}</span>
+            </div>
+            <div v-else class="mt-1 text-xs text-muted-foreground italic">
+              No value attempted (no matching profile field).
+            </div>
+            <div v-if="entry.error" class="mt-2 text-xs text-destructive">
+              Reason: {{ entry.error }}
+            </div>
+          </div>
+          <div
+            v-if="!applicationFillDetails(fillDetailsDialog.application).length"
+            class="rounded-md border border-dashed p-4 text-sm text-muted-foreground"
+          >
+            No per-field details were recorded for this attempt. This usually means the
+            ATS form was never reached (e.g. browser timed out before opening the form)
+            or the application was generated before the form-fill log was added. Check
+            the error log on the row for the broader failure reason.
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="closeFillDetailsDialog">Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

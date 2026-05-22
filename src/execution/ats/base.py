@@ -29,6 +29,12 @@ class ApplicationResult:
     screenshots: list[Path] = field(default_factory=list)
     fields_filled: int = 0
     fields_total: int = 0
+    # Per-field record of what the form-filler detected and attempted.
+    # Each entry is ``{"label", "data_key", "value", "filled", "error"}``
+    # so the Review UI can show "we tried to fill 'Years of experience'
+    # with '' and it failed because no matching profile field" rather
+    # than just "1 of 4 fields filled".
+    fill_details: list[dict[str, Any]] = field(default_factory=list)
     files_uploaded: list[str] = field(default_factory=list)
     qa_answered: int = 0
     error: str = ""
@@ -45,6 +51,41 @@ class BaseATSAdapter(ABC):
 
     def __init__(self, browser: BrowserManager):
         self.browser = browser
+        # Most recent per-field fill log. Subclass ``fill_form``
+        # implementations call :meth:`_record_fill_details` after
+        # ``fill_fields(...)`` to publish the mapping list here so the
+        # base ``apply()`` can copy it into ``ApplicationResult``. Empty
+        # list means "no details available" -- the validator UI knows
+        # to fall back to the integer counters in that case.
+        self._last_fill_details: list[dict[str, Any]] = []
+
+    def _record_fill_details(self, mappings) -> None:
+        """Serialise a list of :class:`FieldMapping` objects into the
+        plain-dict shape persisted on the application row + sent to the
+        SPA. Tolerates anything that quacks like a FieldMapping so the
+        helper can be called from adapters that haven't fully migrated
+        to the new return shape."""
+        details: list[dict[str, Any]] = []
+        for mapping in mappings or []:
+            form_field = getattr(mapping, "form_field", None)
+            details.append(
+                {
+                    "label": getattr(form_field, "label", "")
+                    or getattr(mapping, "label", "")
+                    or "",
+                    "data_key": getattr(mapping, "data_key", "") or "",
+                    "value": getattr(mapping, "value", "") or "",
+                    "filled": bool(getattr(mapping, "filled", False)),
+                    "error": getattr(mapping, "error", "") or "",
+                    "required": bool(getattr(form_field, "required", False))
+                    if form_field is not None
+                    else False,
+                    "field_type": getattr(form_field, "field_type", "")
+                    if form_field is not None
+                    else "",
+                }
+            )
+        self._last_fill_details = details
 
     async def apply(
         self,
@@ -77,10 +118,16 @@ class BaseATSAdapter(ABC):
             )
 
             # Step 2: Fill form fields
+            self._last_fill_details = []
             fields_filled, fields_total = await self.fill_form(page, profile_data, qa_responses)
             state.transition(AppStatus.FIELDS_MAPPED, fields_filled=fields_filled)
             result.fields_filled = fields_filled
             result.fields_total = fields_total
+            # ``fill_form`` overrides set ``self._last_fill_details`` via
+            # the base helper after calling ``fill_fields(...)``. Copying
+            # the list here decouples the persisted record from later
+            # mutations on the adapter.
+            result.fill_details = list(self._last_fill_details)
             result.screenshots.append(
                 await self.browser.screenshot(page, "fields_mapped", state.job_id)
             )

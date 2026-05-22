@@ -194,6 +194,7 @@ class TemplateUpdatePayload(BaseModel):
     target_pages: int | None = None
     filename_pattern: str | None = None
     filename_custom_label: str | None = None
+    emphasis_font: str | None = None
 
 
 class TemplateStyleOverridePayload(BaseModel):
@@ -213,6 +214,7 @@ class TemplateStylesPayload(BaseModel):
     target_pages: int | None = None
     filename_pattern: str | None = None
     filename_custom_label: str | None = None
+    emphasis_font: str | None = None
 
 
 class SearchProfilePayload(BaseModel):
@@ -722,6 +724,7 @@ async def update_material_template(
         target_pages=payload.target_pages,
         filename_pattern=payload.filename_pattern,
         filename_custom_label=payload.filename_custom_label,
+        emphasis_font=payload.emphasis_font,
     )
     if result["ok"]:
         return result
@@ -748,6 +751,7 @@ async def update_material_template_styles(
         target_pages=payload.target_pages,
         filename_pattern=payload.filename_pattern,
         filename_custom_label=payload.filename_custom_label,
+        emphasis_font=payload.emphasis_font,
     )
     if result["ok"]:
         return result
@@ -996,7 +1000,20 @@ async def apply_job(payload: JobApplyPayload) -> dict:
                 "artifacts": result.get("artifacts"),
             }
 
-    status_code = 400 if result["error_code"] in {"unsupported_ats", "profile_missing"} else 500
+    # 400 == "request as written cannot be applied"; 500 only for
+    # things the user can't recover by adjusting their input. EasyApply
+    # rejection is a 400 because the user can either wait for the
+    # Easy Apply automation or open the LinkedIn posting manually.
+    user_recoverable_codes = {
+        "unsupported_ats",
+        "profile_missing",
+        "linkedin_easy_apply_only",
+        "job_context_required",
+        "missing_application_url",
+        "invalid_job_id",
+        "job_not_found",
+    }
+    status_code = 400 if result["error_code"] in user_recoverable_codes else 500
     raise HTTPException(status_code=status_code, detail=result["error"])
 
 

@@ -15,7 +15,7 @@ from typing import Literal
 
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
-from docx.enum.text import WD_TAB_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.shared import Inches, Pt
 from pydantic import BaseModel, Field
 
@@ -189,6 +189,12 @@ class TemplateManifest(BaseModel):
     # Label substituted into ``type_custom_seq`` pattern; ignored by
     # other patterns.
     filename_custom_label: str = ""
+    # Optional "second font" used for bold runs the LLM emits via
+    # ``**inline**`` markup. Empty string / None means "use the same
+    # font as the surrounding body" -- which is what most resumes
+    # want. Pairing Arial body with a Georgia / Cambria emphasis font
+    # is the classic typographic trick this enables.
+    emphasis_font: str = ""
 
 
 class TemplatePackage(BaseModel):
@@ -568,6 +574,7 @@ def update_docx_template_styles(
     target_pages: int | None = None,
     filename_pattern: str | None = None,
     filename_custom_label: str | None = None,
+    emphasis_font: str | None = None,
     template_root: Path = TEMPLATE_ROOT,
 ) -> dict:
     """Apply user-edited font/size/spacing overrides to a DOCX template.
@@ -605,6 +612,7 @@ def update_docx_template_styles(
         target_pages=target_pages,
         filename_pattern=filename_pattern,
         filename_custom_label=filename_custom_label,
+        emphasis_font=emphasis_font,
     )
     manifest = package.manifest.model_copy(update=manifest_updates)
     package.manifest_path.write_text(
@@ -677,6 +685,7 @@ def update_latex_template_package(
     target_pages: int | None = None,
     filename_pattern: str | None = None,
     filename_custom_label: str | None = None,
+    emphasis_font: str | None = None,
     template_root: Path = TEMPLATE_ROOT,
 ) -> dict:
     """Update editable LaTeX template content and metadata."""
@@ -699,6 +708,7 @@ def update_latex_template_package(
         target_pages=target_pages,
         filename_pattern=filename_pattern,
         filename_custom_label=filename_custom_label,
+        emphasis_font=emphasis_font,
     )
     manifest = package.manifest.model_copy(update=manifest_updates)
     package.manifest_path.write_text(
@@ -720,6 +730,7 @@ def _apply_template_settings_updates(
     target_pages: int | None,
     filename_pattern: str | None,
     filename_custom_label: str | None,
+    emphasis_font: str | None = None,
 ) -> None:
     """Apply optional template-level settings into a model_copy(update=...) dict.
 
@@ -743,6 +754,8 @@ def _apply_template_settings_updates(
         updates["filename_pattern"] = filename_pattern
     if filename_custom_label is not None:
         updates["filename_custom_label"] = filename_custom_label.strip()
+    if emphasis_font is not None:
+        updates["emphasis_font"] = emphasis_font.strip()
 
 
 def _save_uploaded_docx_template_package(
@@ -1037,15 +1050,23 @@ def _default_latex_template(document_type: str) -> str:
 
 \begin{document}
 
+\begin{flushright}
 {\large\textbf{ {{applicant.name}} }}\\
 {{applicant.contact}}
+\end{flushright}
 
-{{recipient.company}}
+{{date}}
+
+{{recipient.block}}
+
+Dear Hiring Manager,
 
 {{cover_letter.body}}
 
-Sincerely,\\
+Sincerely,\\[1.5em]
 {{signature}}
+
+Enclosure
 
 \end{document}
 """
@@ -1087,11 +1108,12 @@ def _create_default_cover_letter_template(path: Path) -> None:
     doc.add_paragraph("{{applicant.name}}", style="CoverLetter.Header")
     doc.add_paragraph("{{applicant.contact}}", style="CoverLetter.Header")
     doc.add_paragraph("{{date}}", style="CoverLetter.Date")
-    doc.add_paragraph("{{recipient.company}}", style="CoverLetter.Recipient")
+    doc.add_paragraph("{{recipient.block}}", style="CoverLetter.Recipient")
     doc.add_paragraph("Dear Hiring Manager,", style="CoverLetter.Body")
     doc.add_paragraph("{{cover_letter.body}}", style="CoverLetter.Body")
     doc.add_paragraph("Sincerely,", style="CoverLetter.Signature")
     doc.add_paragraph("{{signature}}", style="CoverLetter.Signature")
+    doc.add_paragraph("Enclosure", style="CoverLetter.Signature")
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(path))
 
@@ -1108,6 +1130,7 @@ def _ensure_style(
     font: str = "Arial",
     line_spacing: float | None = None,
     right_tab: bool = False,
+    alignment: int | None = None,
 ) -> None:
     try:
         style = doc.styles[name]
@@ -1127,6 +1150,8 @@ def _ensure_style(
         style.paragraph_format.line_spacing = line_spacing
     if right_tab:
         style.paragraph_format.tab_stops.add_tab_stop(Inches(7.0), WD_TAB_ALIGNMENT.RIGHT)
+    if alignment is not None:
+        style.paragraph_format.alignment = alignment
 
 
 def _ensure_default_styles(doc: Document, document_type: str) -> None:
@@ -1143,7 +1168,14 @@ def _ensure_default_styles(doc: Document, document_type: str) -> None:
         _ensure_style(doc, "Resume.Bullet", size=9, base="List Bullet")
         return
     cover_font = "Times New Roman"
-    _ensure_style(doc, "CoverLetter.Header", size=11, bold=True, font=cover_font)
+    _ensure_style(
+        doc,
+        "CoverLetter.Header",
+        size=11,
+        bold=True,
+        font=cover_font,
+        alignment=WD_ALIGN_PARAGRAPH.RIGHT,
+    )
     _ensure_style(doc, "CoverLetter.Date", size=11, font=cover_font, space_before=10)
     _ensure_style(doc, "CoverLetter.Recipient", size=11, font=cover_font, space_after=10)
     _ensure_style(
@@ -1214,13 +1246,15 @@ def _ensure_required_markers(package: TemplatePackage) -> None:
         _apply_style_overrides(
             doc, package.document_type, package.manifest.style_overrides
         )
-    text = _document_text(doc)
     changed = False
-    if (
+    is_default_cover_letter = (
         package.document_type == "cover_letter"
         and package.template_id == DEFAULT_TEMPLATE_IDS["cover_letter"]
-    ):
+    )
+    if is_default_cover_letter:
+        changed = _ensure_default_cover_letter_layout(doc, package.manifest.styles) or changed
         changed = True
+    text = _document_text(doc)
     if package.document_type == "resume":
         style = package.manifest.styles.get("normal")
     else:
@@ -1230,12 +1264,59 @@ def _ensure_required_markers(package: TemplatePackage) -> None:
             _add_marker_paragraph(doc, marker, style)
             changed = True
     if package.document_type == "cover_letter":
-        changed = _ensure_cover_letter_frame(doc, package.manifest.styles) or changed
+        changed = _ensure_cover_letter_frame(
+            doc,
+            package.manifest.styles,
+            repair_legacy_placeholders=is_default_cover_letter,
+        ) or changed
     if changed:
         doc.save(str(package.template_path))
 
 
-def _ensure_cover_letter_frame(doc: Document, styles: dict[str, str]) -> bool:
+def _ensure_default_cover_letter_layout(doc: Document, styles: dict[str, str]) -> bool:
+    expected = [
+        "{{applicant.name}}",
+        "{{applicant.contact}}",
+        "{{date}}",
+        "{{recipient.block}}",
+        "Dear Hiring Manager,",
+        "{{cover_letter.body}}",
+        "Sincerely,",
+        "{{signature}}",
+        "Enclosure",
+    ]
+    texts = [(paragraph.text or "").strip() for paragraph in doc.paragraphs]
+    if texts == expected:
+        return False
+
+    body = doc._body._element
+    for child in list(body):
+        if child.tag.endswith("}sectPr"):
+            continue
+        body.remove(child)
+
+    frame = [
+        ("{{applicant.name}}", styles.get("header")),
+        ("{{applicant.contact}}", styles.get("header")),
+        ("{{date}}", styles.get("date")),
+        ("{{recipient.block}}", styles.get("recipient")),
+        ("Dear Hiring Manager,", styles.get("body")),
+        ("{{cover_letter.body}}", styles.get("body")),
+        ("Sincerely,", styles.get("signature")),
+        ("{{signature}}", styles.get("signature")),
+        ("Enclosure", styles.get("signature")),
+    ]
+    for text, style in frame:
+        _add_marker_paragraph(doc, text, style)
+    return True
+
+
+def _ensure_cover_letter_frame(
+    doc: Document,
+    styles: dict[str, str],
+    *,
+    repair_legacy_placeholders: bool = False,
+) -> bool:
     """Repair old default cover-letter templates that only had body text.
 
     Existing ``classic_v1`` packages were created before the renderer
@@ -1252,6 +1333,12 @@ def _ensure_cover_letter_frame(doc: Document, styles: dict[str, str]) -> bool:
         return False
 
     changed = False
+    if repair_legacy_placeholders:
+        for paragraph in paragraphs:
+            if (paragraph.text or "").strip() == "{{recipient.company}}":
+                _replace_template_paragraph_text(paragraph, "{{recipient.block}}")
+                changed = True
+
     has_date = any("{{date}}" in text for text in texts)
     if not has_date:
         insert_before = paragraphs[marker_idx]
@@ -1277,21 +1364,60 @@ def _ensure_cover_letter_frame(doc: Document, styles: dict[str, str]) -> bool:
         )
         changed = True
 
-    texts = [(paragraph.text or "").strip().lower().rstrip(",") for paragraph in doc.paragraphs]
-    has_closing = any(text in {"sincerely", "best regards", "kind regards"} for text in texts)
-    if not has_closing:
+    closing_para = _find_cover_letter_closing_paragraph(doc)
+    if closing_para is None:
         marker_para = next(
             paragraph
             for paragraph in doc.paragraphs
             if "{{cover_letter.body}}" in (paragraph.text or "")
         )
-        _insert_template_paragraph_after(
+        closing_para = _insert_template_paragraph_after(
             marker_para,
             "Sincerely,",
             styles.get("signature"),
         )
         changed = True
+    signature_para = next(
+        (paragraph for paragraph in doc.paragraphs if "{{signature}}" in (paragraph.text or "")),
+        None,
+    )
+    if signature_para is None:
+        signature_para = _insert_template_paragraph_after(
+            closing_para,
+            "{{signature}}",
+            styles.get("signature"),
+        )
+        changed = True
+    has_enclosure = any(
+        (paragraph.text or "").strip().lower() == "enclosure"
+        for paragraph in doc.paragraphs
+    )
+    if not has_enclosure:
+        _insert_template_paragraph_after(
+            signature_para,
+            "Enclosure",
+            styles.get("signature"),
+        )
+        changed = True
     return changed
+
+
+def _find_cover_letter_closing_paragraph(doc: Document):
+    closings = {"sincerely", "best regards", "kind regards"}
+    for paragraph in doc.paragraphs:
+        text = (paragraph.text or "").strip().lower().rstrip(",")
+        if text in closings:
+            return paragraph
+    return None
+
+
+def _replace_template_paragraph_text(paragraph, text: str) -> None:
+    if paragraph.runs:
+        paragraph.runs[0].text = text
+        for run in paragraph.runs[1:]:
+            run.text = ""
+        return
+    paragraph.add_run(text)
 
 
 def _insert_template_paragraph_before(paragraph, text: str, style: str | None) -> None:
@@ -1305,7 +1431,7 @@ def _insert_template_paragraph_before(paragraph, text: str, style: str | None) -
     new_paragraph.add_run(text)
 
 
-def _insert_template_paragraph_after(paragraph, text: str, style: str | None) -> None:
+def _insert_template_paragraph_after(paragraph, text: str, style: str | None):
     from docx.oxml import OxmlElement  # noqa: PLC0415
     from docx.text.paragraph import Paragraph  # noqa: PLC0415
 
@@ -1314,6 +1440,7 @@ def _insert_template_paragraph_after(paragraph, text: str, style: str | None) ->
     new_paragraph = Paragraph(new_element, paragraph._parent)
     _style_template_paragraph(new_paragraph, style)
     new_paragraph.add_run(text)
+    return new_paragraph
 
 
 def _style_template_paragraph(paragraph, style: str | None) -> None:

@@ -600,6 +600,7 @@ def _serialize_application(app, job) -> dict:
         "submitted_at": _isoformat(app.submitted_at),
         "fields_filled": app.fields_filled,
         "fields_total": app.fields_total,
+        "fill_details": getattr(app, "fill_details", None) or [],
         "files_uploaded": getattr(app, "files_uploaded", None) or [],
         "qa_responses": getattr(app, "qa_responses", None) or {},
         "screenshot_paths": getattr(app, "screenshot_paths", None) or [],

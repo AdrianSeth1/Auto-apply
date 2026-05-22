@@ -64,6 +64,25 @@ class TestLinkedInURLUtils:
             href="https://www.linkedin.com/safety/go/?url=https%3A%2F%2Fjobs.example.com%2F123",
         )
 
+    def test_is_primary_apply_candidate_rejects_visit_company_website_link(self):
+        from src.intake.linkedin import _is_primary_apply_candidate
+
+        assert not _is_primary_apply_candidate(
+            text="Visit company website",
+            aria_label="Visit Fitzrovia website",
+            href="https://www.linkedin.com/safety/go/?url=https%3A%2F%2Ffitzrovia.ca",
+        )
+
+    def test_is_primary_apply_candidate_accepts_classed_apply_safety_link(self):
+        from src.intake.linkedin import _is_primary_apply_candidate
+
+        assert _is_primary_apply_candidate(
+            text="",
+            aria_label="",
+            href="https://www.linkedin.com/safety/go/?url=https%3A%2F%2Fjobs.example.com%2F123",
+            class_name="jobs-apply-button artdeco-button",
+        )
+
     def test_is_primary_apply_candidate_rejects_similar_jobs_links(self):
         from src.intake.linkedin import _is_primary_apply_candidate
 

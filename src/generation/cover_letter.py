@@ -187,7 +187,7 @@ def _length_feedback_message(
             f"({actual_words} words) but the template only allows "
             f"{target_pages} page(s). Rewrite the body to be SHORTER "
             f"({min_words}-{max_words} words, aim for {target_words}). "
-            f"Cut about {delta} page worth of prose -- tighten sentences, "
+            f"Cut about {delta} page worth of prose, tighten sentences, "
             "drop the least-impactful evidence, and remove repetition. "
             "Keep every grounded factual claim from the evidence list."
         )
@@ -201,7 +201,7 @@ def _length_feedback_message(
         "deeper into each evidence paragraph, expanding the company / role "
         "tie-in, and adding a separate paragraph that connects an "
         "additional applicant experience to a job requirement. Do NOT "
-        "fabricate experiences -- only elaborate on what is grounded in "
+        "fabricate experiences, only elaborate on what is grounded in "
         "the evidence list."
     )
 
@@ -279,9 +279,9 @@ def generate_cover_letter(
             )
         except (LLMError, Exception) as e:
             logger.warning("LLM cover letter generation failed (%s), using template", e)
-            text = _generate_template(job, identity, evidence_bullets)
+            text = _generate_template(job, identity, evidence_bullets, profile_data)
     else:
-        text = _generate_template(job, identity, evidence_bullets)
+        text = _generate_template(job, identity, evidence_bullets, profile_data)
 
     paths = get_output_paths(
         company=job.company,
@@ -361,9 +361,9 @@ def generate_cover_letter_latex(
             )
         except (LLMError, Exception) as exc:
             logger.warning("LLM cover letter generation failed (%s), using template", exc)
-            text = _generate_template(job, identity, evidence_bullets)
+            text = _generate_template(job, identity, evidence_bullets, profile_data)
     else:
-        text = _generate_template(job, identity, evidence_bullets)
+        text = _generate_template(job, identity, evidence_bullets, profile_data)
 
     paths = get_output_paths(
         company=job.company,
@@ -425,15 +425,26 @@ def build_cover_letter_document(
 ) -> CoverLetterDocument:
     """Create a structured cover letter IR from generated body text."""
     identity = profile_data.get("identity", {})
+    strategy = _infer_cover_letter_strategy(job, evidence_bullets, profile_data)
+    quality_issues = _cover_letter_quality_issues(body_text, job_title=job.title)
     return CoverLetterDocument(
-        recipient={"company": job.company, "hiring_manager": None},
+        recipient={"company": job.company, "hiring_manager": None, "location": job.location},
         applicant={
             "name": identity.get("full_name", ""),
             "email": identity.get("email", ""),
             "phone": identity.get("phone", ""),
+            "location": identity.get("location", ""),
         },
         paragraphs=_cover_paragraphs_from_text(body_text, evidence_bullets),
-        metadata={"target_role": job.title, "company": job.company},
+        metadata={
+            "target_role": job.title,
+            "company": job.company,
+            "role_type": strategy["role_type"],
+            "capability_buckets": [
+                bucket["name"] for bucket in strategy["capability_buckets"]
+            ],
+            "quality_issues": quality_issues,
+        },
     )
 
 
@@ -491,45 +502,75 @@ def _length_window_for(target_pages: int) -> tuple[int, int, int]:
     )
 
 
-def _cl_system_prompt(target_pages: int) -> str:
+def _cl_system_prompt(
+    target_pages: int,
+    strategy: dict[str, Any] | None = None,
+) -> str:
     pages = max(1, int(target_pages))
     min_words, target_words, max_words = _length_window_for(pages)
+    strategy = strategy or {}
+    role_type = strategy.get("role_type") or "software_development"
+    capability_block = _format_capability_buckets_for_prompt(
+        strategy.get("capability_buckets") or []
+    )
     if pages == 1:
         structure = (
-            "1. OPENING (2-3 sentences): State the role and connect interest "
-            "to the job's actual technical work.\n\n"
-            "2. EVIDENCE PARAGRAPH 1 (3-4 sentences): Map one applicant "
-            "experience to one job requirement.\n\n"
-            "3. EVIDENCE PARAGRAPH 2 (3-4 sentences): Map a different "
-            "experience to another requirement.\n\n"
-            "4. COMPANY / ROLE TIE-IN (2-3 sentences): Explain why this role's "
-            "domain and responsibilities fit.\n\n"
-            "5. CLOSE (2 sentences): Express enthusiasm and availability. "
-            "Keep it professional and brief."
+            "1. OPENING (2 sentences): Candidate positioning, role title, "
+            "company, and the specific engineering direction this role fits.\n\n"
+            "2. CAPABILITY PARAGRAPH 1 (3-4 sentences): Use Claim -> Evidence "
+            "-> Relevance for capability bucket #1.\n\n"
+            "3. CAPABILITY PARAGRAPH 2 (3-4 sentences): Use Claim -> Evidence "
+            "-> Relevance for capability bucket #2.\n\n"
+            "4. WORK STYLE / COMPANY CONTEXT (2-3 sentences): Connect the "
+            "role/company context to engineering habits such as maintainability, "
+            "testing, reliability, documentation, or collaboration.\n\n"
+            "5. CLOSE (2 sentences): Concisely return to the role's most "
+            "important capability keywords."
         )
         paragraph_rule = "Use exactly 5 paragraphs separated by blank lines"
     else:
         extra_evidence = max(1, pages - 1)
         structure = (
-            "1. OPENING (3-4 sentences): State the role and connect interest "
-            "to the job's actual technical work.\n\n"
-            "2. EVIDENCE PARAGRAPHS (multiple): Provide "
+            "1. OPENING (3-4 sentences): Candidate positioning, role title, "
+            "company, and the specific engineering direction this role fits.\n\n"
+            "2. CAPABILITY PARAGRAPHS (multiple): Provide "
             f"{2 + extra_evidence} evidence paragraphs of 4-5 sentences each, "
-            "each mapping a different applicant experience to a different "
-            "job requirement. Go into more depth than a one-pager would.\n\n"
-            "3. COMPANY / ROLE TIE-IN (3-4 sentences): Explain why this role's "
-            "domain, team, and responsibilities fit your background and "
-            "interests.\n\n"
-            "4. CLOSE (2-3 sentences): Express enthusiasm and availability."
+            "each organized around one role-relevant capability bucket with "
+            "Claim -> Evidence -> Relevance.\n\n"
+            "3. WORK STYLE / COMPANY CONTEXT (3-4 sentences): Explain how the "
+            "role's constraints fit the applicant's engineering habits.\n\n"
+            "4. CLOSE (2-3 sentences): Return to the role's most important "
+            "capability keywords."
         )
         paragraph_count = 2 + extra_evidence + 2  # opening + evidence + tie-in + close
         paragraph_rule = (
             f"Use exactly {paragraph_count} paragraphs separated by blank lines"
         )
     return f"""You are a professional cover letter writer. Generate a compelling
-cover letter body sized for a {pages}-page letter, following this EXACT structure:
+cover letter body sized for a {pages}-page letter.
+
+Primary objective:
+Do not summarize the resume. Build an evidence-based argument that the candidate
+fits this specific role.
+
+Role type: {role_type}
+
+Capability buckets to use:
+{capability_block}
+
+Follow this EXACT structure:
 
 {structure}
+
+Process:
+- Structure the letter around role-relevant capabilities, not project names.
+- Use project/work examples only as evidence for a capability claim.
+- For each body paragraph, use Claim -> Evidence -> Relevance.
+- Include one company or role-context sentence that is specific but not flattering.
+- Use specific engineering fit instead of generic enthusiasm.
+- Mention the exact job title at most once. If the title contains a term,
+  season, year, or slash-heavy label, rephrase it naturally after the opening
+  as "this role", "the position", "the team", or a concise role family.
 
 Rules:
 - Total length: {min_words}-{max_words} words (aim for around {target_words}).
@@ -537,10 +578,42 @@ Rules:
 - Tone: confident but not arrogant, specific but not verbose.
 - Do NOT use clichés like "I am writing to express my interest"
   or "I believe I would be a great fit".
+- Do NOT use generic phrases like "passionate", "strong candidate",
+  "valuable addition", or "perfect fit".
 - Do NOT fabricate experiences, skills, or achievements not in the provided profile.
 - Do NOT include a greeting line (Dear Hiring Manager)
-  or sign-off (Sincerely) -- those are added separately.
+  or sign-off (Sincerely), those are added separately.
+- Do NOT use em dashes or en dashes. Prefer commas, periods, or semicolons.
+- Do NOT list more than 4 technologies in one sentence.
+- Every technology mention must support maintainability, testing/debugging,
+  reliability, integration, security, performance, or user-facing impact.
+
+Inline formatting (use sparingly, OPTIONAL):
+- ``**text**`` -- bold for a small number of named technologies or
+  quantified outcomes ("**1.5M+ requests/day**", "**FastAPI**") so the
+  reader's eye lands on the strongest evidence. Aim for at most 2-3
+  bolded spans per letter; one per paragraph is plenty.
+- ``*text*`` -- italics for proper nouns / product / paper names where
+  italicisation is conventional.
+- Do NOT use any other Markdown -- no headings, lists, links, code
+  fences, or ``_underscores_``.
+
 - Output ONLY the body text of the cover letter."""
+
+
+def _format_capability_buckets_for_prompt(buckets: list[dict[str, Any]]) -> str:
+    if not buckets:
+        return "- software development and maintainability"
+    lines = []
+    for index, bucket in enumerate(buckets[:3], start=1):
+        evidence = bucket.get("candidate_evidence") or []
+        evidence_text = "; ".join(str(item) for item in evidence[:2]) or "selected profile evidence"
+        signals = ", ".join(bucket.get("jd_signals") or []) or bucket.get("name", "")
+        lines.append(
+            f"{index}. {bucket.get('name')} | JD signals: {signals} | "
+            f"candidate evidence: {evidence_text}"
+        )
+    return "\n".join(lines)
 
 
 # Back-compat alias for any callers that imported the constant directly.
@@ -556,6 +629,310 @@ _INVALID_LLM_OUTPUT_PATTERNS = (
     "tokens used",
     "reading additional input from stdin",
 )
+
+_FORBIDDEN_COVER_LETTER_PHRASES = (
+    "i am passionate about",
+    "i believe my skills",
+    "i believe i would",
+    "strong candidate",
+    "valuable addition",
+    "perfect fit",
+)
+
+_TECH_TERMS = (
+    "python",
+    "java",
+    "javascript",
+    "typescript",
+    "react",
+    "next.js",
+    "fastapi",
+    "flask",
+    "postgresql",
+    "sqlite",
+    "redis",
+    "docker",
+    "kubernetes",
+    "aws",
+    "nginx",
+    "https",
+    "cloudflare",
+    "systemd",
+    "kafka",
+    "graphql",
+    "rest",
+    "api",
+    "apis",
+)
+
+
+def _infer_cover_letter_strategy(
+    job: RawJob,
+    evidence_bullets: list[str],
+    profile_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    del profile_data  # reserved for future evidence-aware scoring without changing callers
+    role_type = _classify_cover_letter_role(job)
+    job_text = _job_signal_text(job).lower()
+    buckets = []
+    for bucket in _capability_bucket_library():
+        score = sum(2 for signal in bucket["signals"] if signal in job_text)
+        if bucket["name"] in _role_bucket_boosts(role_type):
+            score += _role_bucket_boosts(role_type)[bucket["name"]]
+        matched_evidence = _match_bucket_evidence(bucket, evidence_bullets)
+        if matched_evidence:
+            score += 1
+        buckets.append(
+            {
+                **bucket,
+                "score": score,
+                "candidate_evidence": matched_evidence or evidence_bullets[:1],
+            }
+        )
+
+    buckets.sort(key=lambda bucket: bucket["score"], reverse=True)
+    selected = buckets[:3]
+    if len(selected) < 3:
+        selected.extend(bucket for bucket in buckets if bucket not in selected)
+    return {
+        "role_type": role_type,
+        "capability_buckets": selected[:3],
+        "quality_focus": _quality_focus_for_role(role_type),
+    }
+
+
+def _classify_cover_letter_role(job: RawJob) -> str:
+    text = _job_signal_text(job).lower()
+    if any(term in text for term in ("embedded", "firmware", "microcontroller", "rtos")):
+        return "embedded_firmware"
+    if any(term in text for term in ("test", "testing", "verification", "qa", "quality")):
+        return "software_development_test"
+    if re.search(r"\b(ai|agent|automation|workflow)\b", text):
+        return "ai_automation"
+    if any(term in text for term in ("security", "defense", "mission", "secure")):
+        return "security_mission_systems"
+    if any(term in text for term in ("backend", "api", "database", "service")):
+        return "backend"
+    return "software_development"
+
+
+def _job_signal_text(job: RawJob) -> str:
+    requirements = getattr(job, "requirements", None)
+    parts = [job.title or "", job.company or "", job.description or ""]
+    if requirements is not None:
+        for attr in (
+            "must_have_skills",
+            "preferred_skills",
+            "responsibilities",
+            "soft_skills",
+            "keywords",
+        ):
+            values = getattr(requirements, attr, []) or []
+            parts.extend(str(value) for value in values if value)
+        parts.extend(
+            str(value)
+            for value in (
+                requirements.domain,
+                requirements.role_family,
+                requirements.seniority,
+            )
+            if value
+        )
+    return "\n".join(parts)
+
+
+def _capability_bucket_library() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "software development and maintainability",
+            "signals": [
+                "software development",
+                "implementation",
+                "maintainable",
+                "api",
+                "backend",
+                "data model",
+            ],
+            "evidence_terms": ["api", "backend", "data", "model", "validation"],
+            "claim": "building maintainable software systems",
+            "relevance": (
+                "it depends on clear interfaces, validation, and implementation "
+                "choices that remain understandable after the first version works"
+            ),
+        },
+        {
+            "name": "testing, debugging, and reliability",
+            "signals": [
+                "test",
+                "testing",
+                "debug",
+                "verification",
+                "reliability",
+                "quality",
+                "edge case",
+            ],
+            "evidence_terms": ["test", "debug", "reliab", "edge", "coverage", "trace"],
+            "claim": "testing, debugging, and reliability-focused implementation",
+            "relevance": (
+                "the work rewards engineers who verify assumptions, trace failures "
+                "carefully, and treat correctness as part of implementation"
+            ),
+        },
+        {
+            "name": "systems integration and collaboration",
+            "signals": [
+                "integration",
+                "collaboration",
+                "team",
+                "service",
+                "workflow",
+                "cross-functional",
+            ],
+            "evidence_terms": [
+                "integrat",
+                "service",
+                "workflow",
+                "frontend",
+                "backend",
+                "team",
+            ],
+            "claim": "working across system boundaries",
+            "relevance": (
+                "many engineering failures appear between components, so integration "
+                "work requires communication, careful debugging, and attention to "
+                "end-to-end behavior"
+            ),
+        },
+        {
+            "name": "security, correctness, and controlled change",
+            "signals": [
+                "security",
+                "secure",
+                "defense",
+                "mission",
+                "correctness",
+                "documentation",
+                "risk",
+            ],
+            "evidence_terms": ["security", "auth", "document", "reliab", "correct", "risk"],
+            "claim": "reliability and careful engineering judgment",
+            "relevance": (
+                "secure or mission-sensitive systems need controlled changes, "
+                "documentation, and a habit of checking assumptions before relying "
+                "on software behavior"
+            ),
+        },
+        {
+            "name": "workflow automation and data quality",
+            "signals": ["automation", "ai", "agent", "workflow", "data quality", "review"],
+            "evidence_terms": ["automation", "agent", "workflow", "data", "review"],
+            "claim": "designing automation around data quality and review boundaries",
+            "relevance": (
+                "useful automation depends on reliable inputs, explicit failure "
+                "handling, and human review where software should not overreach"
+            ),
+        },
+        {
+            "name": "embedded interfaces and low-level debugging",
+            "signals": ["embedded", "firmware", "hardware", "interface", "real-time", "rtos"],
+            "evidence_terms": ["embedded", "hardware", "interface", "control", "system"],
+            "claim": "reasoning about software at interface boundaries",
+            "relevance": (
+                "embedded work requires careful debugging where software behavior is "
+                "constrained by hardware, timing, and resource limits"
+            ),
+        },
+    ]
+
+
+def _role_bucket_boosts(role_type: str) -> dict[str, int]:
+    return {
+        "software_development_test": {
+            "testing, debugging, and reliability": 5,
+            "software development and maintainability": 3,
+            "systems integration and collaboration": 2,
+        },
+        "backend": {
+            "software development and maintainability": 5,
+            "systems integration and collaboration": 3,
+            "testing, debugging, and reliability": 2,
+        },
+        "security_mission_systems": {
+            "security, correctness, and controlled change": 5,
+            "testing, debugging, and reliability": 3,
+            "software development and maintainability": 2,
+        },
+        "ai_automation": {
+            "workflow automation and data quality": 5,
+            "testing, debugging, and reliability": 2,
+            "systems integration and collaboration": 2,
+        },
+        "embedded_firmware": {
+            "embedded interfaces and low-level debugging": 5,
+            "testing, debugging, and reliability": 3,
+            "software development and maintainability": 1,
+        },
+    }.get(role_type, {"software development and maintainability": 3})
+
+
+def _match_bucket_evidence(bucket: dict[str, Any], evidence_bullets: list[str]) -> list[str]:
+    terms = [str(term).lower() for term in bucket.get("evidence_terms", [])]
+    matches = [
+        evidence
+        for evidence in evidence_bullets
+        if any(term in evidence.lower() for term in terms)
+    ]
+    return matches[:2]
+
+
+def _quality_focus_for_role(role_type: str) -> list[str]:
+    focus = {
+        "software_development_test": [
+            "testability",
+            "verification",
+            "edge cases",
+            "debugging discipline",
+            "reliability",
+        ],
+        "backend": ["API design", "data modeling", "service boundaries", "maintainability"],
+        "security_mission_systems": [
+            "reliability",
+            "documentation",
+            "controlled change",
+            "correctness",
+            "secure systems",
+        ],
+        "ai_automation": [
+            "workflow design",
+            "data quality",
+            "human review",
+            "error handling",
+        ],
+        "embedded_firmware": [
+            "hardware/software boundaries",
+            "low-level debugging",
+            "interfaces",
+            "resource constraints",
+        ],
+    }
+    return focus.get(role_type, ["maintainability", "debugging", "collaboration"])
+
+
+def _format_cover_strategy_for_prompt(strategy: dict[str, Any]) -> str:
+    focus = ", ".join(strategy.get("quality_focus") or [])
+    return (
+        f"Role type: {strategy.get('role_type')}\n"
+        f"Quality focus: {focus}\n"
+        f"Capability buckets:\n"
+        f"{_format_capability_buckets_for_prompt(strategy.get('capability_buckets') or [])}"
+    )
+
+
+def _format_role_references_for_prompt(role_refs: dict[str, str]) -> str:
+    return (
+        f"opening={role_refs['opening']}; body={role_refs['body']}; "
+        f"context={role_refs['context']}; closing={role_refs['closing']}"
+    )
 
 
 def _generate_with_llm(
@@ -576,7 +953,9 @@ def _generate_with_llm(
     """
     identity = profile_data.get("identity", {})
     skills = profile_data.get("skills", {})
-    system_prompt = _cl_system_prompt(target_pages)
+    strategy = _infer_cover_letter_strategy(job, evidence_bullets, profile_data)
+    system_prompt = _cl_system_prompt(target_pages, strategy)
+    role_refs = _role_references(job, strategy)
 
     # Build context for the LLM
     evidence_text = "\n".join(f"- {b}" for b in evidence_bullets)
@@ -612,6 +991,7 @@ def _generate_with_llm(
 <job>
 Company: {job.company}
 Role: {job.title}
+Natural role references: {_format_role_references_for_prompt(role_refs)}
 Location: {job.location or "Not specified"}
 
 Job Description:
@@ -621,6 +1001,9 @@ Job Description:
 <applicant>
 Name: {identity.get("full_name", "")}
 Education: {_format_education_brief(profile_data.get("education", []))}
+
+Role strategy:
+{_format_cover_strategy_for_prompt(strategy)}
 
 Key evidence points from my experience:
 {evidence_text}
@@ -632,10 +1015,19 @@ Skills:
 Generate the cover letter body following the instructions above."""
 
     raw = generate_text(prompt, system=system_prompt, timeout=90)
-    return _clean_llm_cover_letter_output(raw, target_pages=target_pages)
+    return _clean_llm_cover_letter_output(
+        raw,
+        target_pages=target_pages,
+        job_title=job.title,
+    )
 
 
-def _clean_llm_cover_letter_output(raw: str, *, target_pages: int = 1) -> str:
+def _clean_llm_cover_letter_output(
+    raw: str,
+    *,
+    target_pages: int = 1,
+    job_title: str | None = None,
+) -> str:
     """Reject CLI/meta responses so they fall back to deterministic templates.
 
     The min/max word window scales with ``target_pages`` so the same
@@ -663,13 +1055,68 @@ def _clean_llm_cover_letter_output(raw: str, *, target_pages: int = 1) -> str:
     min_paragraphs = 4 if target_pages == 1 else 4 + (target_pages - 1)
     if len(paragraphs) < min_paragraphs:
         raise LLMError("LLM returned a cover letter without enough paragraph structure.")
+    text = _normalize_cover_letter_dashes(text)
+    quality_issues = _cover_letter_quality_issues(text, job_title=job_title)
+    if quality_issues:
+        raise LLMError(
+            "LLM returned a cover letter that failed quality checks: "
+            + "; ".join(quality_issues)
+        )
     return text
+
+
+def _normalize_cover_letter_dashes(text: str) -> str:
+    """Remove dash punctuation that makes cover letters read AI-generated."""
+    cleaned = re.sub(r"\s*[—–]\s*", ", ", text)
+    cleaned = re.sub(r",\s*,+", ",", cleaned)
+    return re.sub(r" {2,}", " ", cleaned).strip()
+
+
+def _cover_letter_quality_issues(text: str, *, job_title: str | None = None) -> list[str]:
+    issues: list[str] = []
+    lower = text.lower()
+    for phrase in _FORBIDDEN_COVER_LETTER_PHRASES:
+        if phrase in lower:
+            issues.append(f"generic_phrase:{phrase}")
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        terms = _technology_terms_in_sentence(sentence)
+        if len(terms) > 4:
+            issues.append(f"technology_dumping:{', '.join(sorted(terms))}")
+    title_repetitions = _raw_role_title_repetitions(text, job_title)
+    if title_repetitions > 1:
+        issues.append(f"repeated_raw_job_title:{title_repetitions}")
+    return issues
+
+
+def _raw_role_title_repetitions(text: str, job_title: str | None) -> int:
+    title = _normalize_role_title_for_repetition(job_title)
+    if not title or len(title.split()) < 3:
+        return 0
+    normalized_text = _normalize_role_title_for_repetition(text)
+    return len(re.findall(rf"(?<!\w){re.escape(title)}(?!\w)", normalized_text))
+
+
+def _normalize_role_title_for_repetition(value: str | None) -> str:
+    text = (value or "").lower()
+    text = re.sub(r"[–—]", "-", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _technology_terms_in_sentence(sentence: str) -> set[str]:
+    lower = sentence.lower()
+    found = set()
+    for term in _TECH_TERMS:
+        if re.search(rf"(?<![\w.+-]){re.escape(term)}(?![\w.+-])", lower):
+            found.add(term)
+    return found
 
 
 def _generate_template(
     job: RawJob,
     identity: dict[str, Any],
     evidence_bullets: list[str],
+    profile_data: dict[str, Any] | None = None,
 ) -> str:
     """Generate a deterministic fallback body when the LLM is unavailable.
 
@@ -678,14 +1125,18 @@ def _generate_template(
     a complete professional cover-letter body. The DOCX/PDF renderer
     adds the salutation and sign-off around these paragraphs.
     """
-    del identity  # fallback body stays first-person; renderer owns the signature.
-    focus = _job_focus_phrase(job)
-    role_label = _role_label(job)
+    strategy = _infer_cover_letter_strategy(job, evidence_bullets, profile_data)
+    buckets = strategy["capability_buckets"]
+    background = _candidate_background(identity, profile_data)
+    capability_phrase = _join_natural(
+        [bucket["claim"] for bucket in buckets[:3]], conjunction="and"
+    )
+    role_refs = _role_references(job, strategy)
+    context = _role_context_sentence(job, strategy)
     opening = (
-        f"I am excited to apply for the {job.title} position at {job.company} because "
-        f"the role centers on {focus}. I am looking for a co-op environment where I "
-        f"can contribute to production software, learn from experienced engineers, "
-        f"and take ownership of implementation details that affect reliability and user experience."
+        f"As a {background} with hands-on experience in {capability_phrase}, I am "
+        f"applying for {role_refs['opening']} at {job.company}. What draws me to "
+        f"this role is {context}."
     )
 
     evidence_parts = [_clean_evidence_sentence(bullet) for bullet in evidence_bullets[:3]]
@@ -699,38 +1150,199 @@ def _generate_template(
             "tools quickly.",
         ]
 
-    first_evidence = evidence_parts[0]
-    second_evidence = evidence_parts[1] if len(evidence_parts) > 1 else evidence_parts[0]
-    third_evidence = evidence_parts[2] if len(evidence_parts) > 2 else evidence_parts[-1]
-    evidence_one = (
-        f"A strong part of my preparation for this role is hands-on engineering work. "
-        f"{first_evidence} That experience is relevant to {role_label} because it required "
-        f"careful API design, debugging discipline, and attention to maintainability rather "
-        f"than simply making features work once."
+    first_evidence = _evidence_for_bucket(buckets[0], evidence_parts, 0)
+    second_evidence = _evidence_for_bucket(buckets[1], evidence_parts, 1)
+    evidence_one = _fallback_capability_paragraph(
+        bucket=buckets[0],
+        evidence=first_evidence,
+        role_label=role_refs["body"],
+        company=job.company,
+        ordinal="A central area of fit",
     )
 
-    evidence_two = (
-        f"I have also worked across system boundaries where correctness depends on how "
-        f"services, data, and user workflows fit together. {second_evidence} {third_evidence} "
-        f"Those projects strengthened my ability to trace problems end to end, document "
-        f"technical decisions, and keep implementation choices grounded in user needs."
+    evidence_two = _fallback_capability_paragraph(
+        bucket=buckets[1],
+        evidence=second_evidence,
+        role_label=role_refs["alternate"],
+        company=job.company,
+        ordinal="A second area of fit",
     )
 
     company_tie = (
-        "The responsibilities in this posting suggest a team that values practical "
-        "software development, testing, and collaboration. I would bring a careful "
-        "engineering mindset, willingness to ask precise questions, and enough full-stack "
-        "context to contribute while continuing to grow. I am especially interested in "
-        "work where quality, security, and long-term maintainability matter, because those "
-        "constraints reward engineers who test assumptions and communicate clearly."
+        f"The context of {job.company}'s {role_refs['context']} matters to me because "
+        f"{context}. My work style is to make assumptions visible, document decisions, "
+        "and debug from the user workflow back to implementation details. That approach "
+        "fits teams where maintainability, testing, and reliability matter as much as "
+        "initial delivery."
     )
 
+    closing_terms = _join_natural([bucket["name"] for bucket in buckets[:2]], conjunction="and")
     close = (
-        f"I would welcome the opportunity to discuss how my background can support "
-        f"{job.company}'s work in this position. Thank you for your time and consideration."
+        f"I would welcome the opportunity to discuss how my experience with "
+        f"{closing_terms} could support {job.company}'s {role_refs['closing']}. "
+        "Thank you for your time and consideration."
     )
 
-    return f"{opening}\n\n{evidence_one}\n\n{evidence_two}\n\n{company_tie}\n\n{close}"
+    return _normalize_cover_letter_dashes(
+        f"{opening}\n\n{evidence_one}\n\n{evidence_two}\n\n{company_tie}\n\n{close}"
+    )
+
+
+def _candidate_background(
+    identity: dict[str, Any],
+    profile_data: dict[str, Any] | None,
+) -> str:
+    headline = str(identity.get("headline") or "").strip()
+    if headline:
+        return headline
+    for education in (profile_data or {}).get("education", []) or []:
+        if not isinstance(education, dict):
+            continue
+        field = str(education.get("field") or "").strip()
+        degree = str(education.get("degree") or "").strip()
+        if field:
+            if "computer" in field.lower() or "software" in field.lower():
+                return f"{field} student"
+            return f"student in {field}"
+        if degree:
+            return f"{degree} student"
+    return "software engineering candidate"
+
+
+def _role_context_sentence(job: RawJob, strategy: dict[str, Any]) -> str:
+    role_type = strategy.get("role_type")
+    company_text = (job.company or "").lower()
+    job_text = _job_signal_text(job).lower()
+    if role_type == "software_development_test":
+        return (
+            "the combination of implementation, verification, and "
+            "reliability-focused engineering"
+        )
+    if role_type == "security_mission_systems" or any(
+        term in company_text or term in job_text
+        for term in ("mission", "defense", "secure", "security")
+    ):
+        return (
+            "the unusual weight the work places on reliability, clear "
+            "documentation, and careful verification"
+        )
+    if role_type == "ai_automation":
+        return (
+            "the need for automation that is useful, bounded, and reliable "
+            "under real workflow constraints"
+        )
+    if role_type == "embedded_firmware":
+        return (
+            "the connection between software correctness, interfaces, timing, "
+            "and system-level constraints"
+        )
+    if role_type == "backend":
+        return (
+            "the emphasis on maintainable services, data flow, and debugging "
+            "across system boundaries"
+        )
+    return (
+        "the focus on practical software development, maintainability, and "
+        "clear engineering judgment"
+    )
+
+
+def _role_references(job: RawJob, strategy: dict[str, Any]) -> dict[str, str]:
+    concise = _cover_letter_role_title(job.title)
+    role_family = _role_family_phrase(strategy.get("role_type"), concise)
+    opening = f"the {concise} position" if concise else "this position"
+    return {
+        "opening": opening,
+        "body": "this role",
+        "alternate": "the position",
+        "context": f"{role_family} work",
+        "closing": f"{role_family} team",
+    }
+
+
+def _cover_letter_role_title(title: str) -> str:
+    text = re.sub(r"\s+", " ", (title or "").strip())
+    if not text:
+        return "software engineering"
+    parts = [part.strip() for part in re.split(r"\s+[-–—|]\s+", text) if part.strip()]
+    if len(parts) > 1 and any(_looks_like_term_label(part) for part in parts[1:]):
+        text = parts[0]
+    text = re.sub(r"\b(20\d{2}|19\d{2})\b", "", text)
+    text = re.sub(r"\b(spring|summer|fall|autumn|winter)\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" -/,")
+    text = re.sub(r"\bIntern\s*/\s*Co-?op\b", "internship/co-op", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bCo-?op\s*/\s*Intern\b", "internship/co-op", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bIntern\b", "internship", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bCo-?op\b", "co-op", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" -/,")
+    return text.lower() if text else "software engineering"
+
+
+def _looks_like_term_label(text: str) -> bool:
+    lower = text.lower()
+    return bool(re.search(r"\b(20\d{2}|19\d{2}|spring|summer|fall|autumn|winter)\b", lower))
+
+
+def _role_family_phrase(role_type: str | None, concise_title: str) -> str:
+    if role_type == "software_development_test":
+        return "software development and test"
+    if role_type == "backend":
+        return "backend engineering"
+    if role_type == "security_mission_systems":
+        return "reliability-focused engineering"
+    if role_type == "ai_automation":
+        return "automation engineering"
+    if role_type == "embedded_firmware":
+        return "embedded software"
+    if "software" in concise_title:
+        return "software engineering"
+    return "engineering"
+
+
+def _evidence_for_bucket(
+    bucket: dict[str, Any],
+    evidence_parts: list[str],
+    fallback_index: int,
+) -> str:
+    for evidence in bucket.get("candidate_evidence") or []:
+        cleaned = _clean_evidence_sentence(evidence)
+        if cleaned:
+            return cleaned
+    if not evidence_parts:
+        return (
+            "My project work has required me to turn ambiguous requirements "
+            "into testable software components."
+        )
+    return evidence_parts[min(fallback_index, len(evidence_parts) - 1)]
+
+
+def _fallback_capability_paragraph(
+    *,
+    bucket: dict[str, Any],
+    evidence: str,
+    role_label: str,
+    company: str,
+    ordinal: str,
+) -> str:
+    claim = bucket.get("claim") or bucket.get("name") or "practical engineering work"
+    relevance = bucket.get("relevance") or "the role depends on careful technical judgment"
+    return (
+        f"{ordinal} for {role_label} is {claim}. {evidence} I treated that work "
+        "as more than feature delivery, focusing on the engineering constraints "
+        "behind the implementation. That is relevant to "
+        f"{company} because {relevance}."
+    )
+
+
+def _join_natural(values: list[str], *, conjunction: str = "and") -> str:
+    cleaned = [value.strip() for value in values if value and value.strip()]
+    if not cleaned:
+        return "software development"
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f" {conjunction} ".join(cleaned)
+    return f"{', '.join(cleaned[:-1])}, {conjunction} {cleaned[-1]}"
 
 
 def _clean_evidence_sentence(text: str) -> str:
