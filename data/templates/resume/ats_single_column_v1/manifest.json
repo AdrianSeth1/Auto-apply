@@ -58,8 +58,9 @@
       "enabled": true,
       "max_items": null,
       "max_bullets_per_item": null,
+      "_note": "max_lines raised 4->6 (2026-07-10): the 4-line cap silently dropped Certifications and Domains from every render",
       "max_words_per_bullet": null,
-      "max_lines": 4
+      "max_lines": 6
     }
   },
   "section_order": [

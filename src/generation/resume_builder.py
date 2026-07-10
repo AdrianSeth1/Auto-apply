@@ -662,7 +662,13 @@ def _prioritize_skills(skills: dict[str, Any], jd_tags: list[str]) -> dict[str, 
     for category, values in skills.items():
         if not isinstance(values, list):
             continue
-        clean_values = [str(value) for value in values if str(value).strip()]
+        # 2026-07-10: dict-shaped entries (certifications: {name, issuer,
+        # date}) were stringified to their repr — render their name.
+        clean_values = [
+            str(value.get("name") if isinstance(value, dict) else value)
+            for value in values
+            if str(value.get("name") if isinstance(value, dict) else value).strip()
+        ]
         prioritized[category] = sorted(
             clean_values,
             key=lambda value: _normalize_tag(value) in tag_set,
