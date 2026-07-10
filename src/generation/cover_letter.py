@@ -578,7 +578,8 @@ def _cl_system_prompt(
         paragraph_rule = (
             f"Use exactly {paragraph_count} paragraphs separated by blank lines"
         )
-    return f"""You write cover letters that sound like a capable person talking,
+    return f"""/no_think
+You write cover letters that sound like a capable person talking,
 not like an AI or a formal essay. A good cover letter is a clear, honest note
 from the applicant to the hiring manager: here's what you need done, here's
 proof I've done that kind of thing. Sized for a {pages}-page letter.
@@ -971,7 +972,8 @@ def _format_role_references_for_prompt(role_refs: dict[str, str]) -> str:
     )
 
 
-_CRITIQUE_SYSTEM_PROMPT = """You are a strict editor reviewing a cover letter draft \
+_CRITIQUE_SYSTEM_PROMPT = """/no_think
+You are a strict editor reviewing a cover letter draft \
 against a checklist. Return ONLY JSON: {"pass": bool, "problems": ["..."]}.
 
 A draft PASSES only if ALL of the following hold:
@@ -1327,67 +1329,51 @@ def _generate_template(
     a complete professional cover-letter body. The DOCX/PDF renderer
     adds the salutation and sign-off around these paragraphs.
     """
+    # 2026-07-09 rewrite (user report, Epic letter): the previous fallback
+    # stitched hardcoded engineering "capability bucket" claims around
+    # whatever evidence existed — a therapy-technician bullet was presented
+    # TWICE as proof of "building maintainable software systems", with the
+    # raw entity key interpolated mid-sentence, and the result shipped with
+    # no flag. A fallback that runs precisely when the LLM CAN'T help must
+    # UNDER-claim: say who the applicant is, quote their real bullets once
+    # each, close plainly. Short and honest beats long and fabricated.
     if strategy is None:
         strategy = _infer_cover_letter_strategy(job, evidence_bullets)
-    buckets = strategy["capability_buckets"]
     background = _candidate_background(identity, profile_data)
-    capability_phrase = _join_natural(
-        [bucket["claim"] for bucket in buckets[:3]], conjunction="and"
-    )
     role_refs = _role_references(job, strategy)
-    context = _role_context_sentence(job, strategy)
+
     opening = (
-        f"As a {background} with hands-on experience in {capability_phrase}, I am "
-        f"applying for {role_refs['opening']} at {job.company}. What draws me to "
-        f"this role is {context}."
+        f"I am applying for {role_refs['opening']} at {job.company}. "
+        f"I am a {background}, and the experience below is the part of my "
+        f"background most relevant to this role."
     )
 
-    evidence_parts = [_clean_evidence_sentence(bullet) for bullet in evidence_bullets[:3]]
-    if not evidence_parts:
-        evidence_parts = [
-            "My project work has required me to break ambiguous requirements into testable "
-            "software components.",
-            "I have built and debugged full-stack systems where backend reliability and "
-            "frontend usability both mattered.",
-            "I have practiced communicating tradeoffs clearly while continuing to learn new "
-            "tools quickly.",
-        ]
-
-    first_evidence = _evidence_for_bucket(buckets[0], evidence_parts, 0)
-    second_evidence = _evidence_for_bucket(buckets[1], evidence_parts, 1)
-    evidence_one = _fallback_capability_paragraph(
-        bucket=buckets[0],
-        evidence=first_evidence,
-        role_label=role_refs["body"],
-        company=job.company,
-        ordinal="A central area of fit",
+    seen: set[str] = set()
+    proofs: list[str] = []
+    for bullet in evidence_bullets:
+        cleaned = _clean_evidence_sentence(bullet)
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            proofs.append(cleaned)
+        if len(proofs) == 3:
+            break
+    evidence_paragraph = (
+        " ".join(proofs)
+        if proofs
+        else (
+            "My recent work spans client-facing operations and hands-on "
+            "technical projects; my resume lists the specifics."
+        )
     )
 
-    evidence_two = _fallback_capability_paragraph(
-        bucket=buckets[1],
-        evidence=second_evidence,
-        role_label=role_refs["alternate"],
-        company=job.company,
-        ordinal="A second area of fit",
-    )
-
-    company_tie = (
-        f"The context of {job.company}'s {role_refs['context']} matters to me because "
-        f"{context}. My work style is to make assumptions visible, document decisions, "
-        "and debug from the user workflow back to implementation details. That approach "
-        "fits teams where maintainability, testing, and reliability matter as much as "
-        "initial delivery."
-    )
-
-    closing_terms = _join_natural([bucket["name"] for bucket in buckets[:2]], conjunction="and")
     close = (
-        f"I would welcome the opportunity to discuss how my experience with "
-        f"{closing_terms} could support {job.company}'s {role_refs['closing']}. "
-        "Thank you for your time and consideration."
+        f"My resume covers the rest. I would welcome the chance to talk about how "
+        f"this experience applies to the work at {job.company}. "
+        "Thank you for your time."
     )
 
     return _normalize_cover_letter_dashes(
-        f"{opening}\n\n{evidence_one}\n\n{evidence_two}\n\n{company_tie}\n\n{close}"
+        f"{opening}\n\n{evidence_paragraph}\n\n{close}"
     )
 
 
@@ -1554,12 +1540,15 @@ def _clean_evidence_sentence(text: str) -> str:
         return ""
     at_match = re.match(r"^At\s+([^,]+),\s+(.+)$", cleaned)
     if at_match:
-        entity = at_match.group(1).strip()
+        # Entity keys look like "Encompass Health - Therapy Technician";
+        # only the company belongs in prose (2026-07-09 user report:
+        # the full key was interpolated mid-sentence).
+        entity = at_match.group(1).strip().split(" - ")[0].strip()
         body = _lowercase_initial(at_match.group(2).strip())
         if body.lower().startswith("i "):
-            cleaned = f"In my work with {entity}, {body}"
+            cleaned = f"At {entity}, {body}"
         else:
-            cleaned = f"In my work with {entity}, I {body}"
+            cleaned = f"At {entity}, I {body}"
     if not cleaned.endswith(('.', '!', '?')):
         cleaned += "."
     return cleaned

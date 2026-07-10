@@ -1065,20 +1065,42 @@ class TestSelectEvidence:
 
 class TestGenerateTemplate:
     def test_produces_text(self):
+        # 2026-07-09 rewrite: the fallback must UNDER-claim (see the Epic
+        # incident — capability-bucket stitching presented a therapy-tech
+        # bullet as software-engineering evidence, twice). New contract:
+        # honest opening, each real bullet quoted once, plain close.
         job = _make_job()
         identity = _PROFILE["identity"]
         evidence = ["At Acme Corp, Built REST APIs with Python and FastAPI"]
         text = _generate_template(job, identity, evidence, _PROFILE)
         assert "backend engineering internship" in text
         assert "TestCo" in text
-        assert text.startswith("As a Computer Science student")
-        assert "A central area of fit" in text
-        assert "A second area of fit" in text
-        assert "Built REST APIs" not in text
         assert "built REST APIs" in text
+        # No fabricated capability claims and no stitched essay scaffolding.
+        assert "central area of fit" not in text
+        assert "hands-on experience in" not in text
         assert "I am excited" not in text
-        assert len(text.split("\n\n")) == 5
-        assert len(text.split()) >= 260
+        assert len(text.split("\n\n")) == 3
+        # Evidence must never repeat.
+        assert text.count("built REST APIs") == 1
+
+    def test_evidence_bullets_never_duplicate(self):
+        job = _make_job()
+        evidence = [
+            "At Acme Corp, Built REST APIs with Python and FastAPI",
+            "At Acme Corp, Built REST APIs with Python and FastAPI",
+        ]
+        text = _generate_template(job, _PROFILE["identity"], evidence, _PROFILE)
+        assert text.count("built REST APIs") == 1
+
+    def test_entity_key_titles_stripped_from_prose(self):
+        job = _make_job()
+        evidence = [
+            "At Encompass Health - Therapy Technician, Managed patient relationships"
+        ]
+        text = _generate_template(job, _PROFILE["identity"], evidence, _PROFILE)
+        assert "Encompass Health - Therapy Technician" not in text
+        assert "At Encompass Health, I managed patient relationships" in text
 
     def test_role_references_simplify_seasonal_titles(self):
         job = _make_job(title="Software Engineering Intern/Co-op - 2026 Spring")
@@ -1139,8 +1161,12 @@ class TestGenerateTemplate:
         assert result["validation"].metrics["cover_letter_quality_issues"] == []
         assert result["validation"].metrics["font_family"] == "Times New Roman"
         assert result["validation"].metrics["font_size_pt"] == 11
-        assert result["validation"].metrics["estimated_page_fill_ratio"] >= 0.58
-        assert result["validation"].metrics["cover_letter_word_count"] >= 260
+        # 2026-07-09: the no-LLM fallback letter is deliberately SHORT.
+        # The old >=260-word requirement pressured the fallback into
+        # fabricated capability stitching (the Epic incident). Full-page
+        # expectations apply to the LLM path, not the honest fallback.
+        assert result["validation"].metrics["estimated_page_fill_ratio"] >= 0.15
+        assert result["validation"].metrics["cover_letter_word_count"] >= 60
 
         from docx import Document
 
