@@ -353,7 +353,13 @@ class OpenAICompatibleProvider(ApiKeyProvider):
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        payload = {"model": model, "messages": messages}
+        # 2026-07-09: hard output cap. Without max_tokens a thinking-mode
+        # local model was observed decoding 40k+ tokens through repeated
+        # context shifts (losing its instructions each shift) until the
+        # HTTP timeout fired — one call burned 4+ GPU-minutes to produce
+        # garbage. No legitimate artifact in this codebase needs more
+        # than a few thousand output tokens.
+        payload = {"model": model, "messages": messages, "max_tokens": 4096}
 
         try:
             with self._client(timeout) as client:

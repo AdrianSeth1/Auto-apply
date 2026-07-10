@@ -50,6 +50,37 @@ class OllamaProvider(OpenAICompatibleProvider):
 
     # ----- helpers -----
 
+    def generate(
+        self,
+        prompt: str,
+        *,
+        system: str = "",
+        timeout: int = 120,
+        output_format: str = "text",
+        model: str | None = None,
+    ) -> str:
+        """OpenAI-compat generate with Qwen3 thinking-mode suppression.
+
+        2026-07-09: Qwen3's ``/no_think`` soft switch is only honored in
+        the USER turn — placing it in the system prompt (our first
+        attempt) did nothing, and thinking-mode output was burning
+        thousands of hidden tokens per call: cover letters came back
+        "too short" (the visible text under the think stream) and one
+        call decoded 40k+ tokens through repeated context shifts.
+        Appending the switch to the user prompt for qwen3-family models
+        disables thinking per-turn; other models never see it.
+        """
+        resolved = (model or "").strip() or self.get_model()
+        if resolved.lower().startswith("qwen3"):
+            prompt = f"{prompt}\n\n/no_think"
+        return super().generate(
+            prompt,
+            system=system,
+            timeout=timeout,
+            output_format=output_format,
+            model=resolved,
+        )
+
     def _native_api_root(self) -> str:
         """Return the native (non-/v1) Ollama API root.
 

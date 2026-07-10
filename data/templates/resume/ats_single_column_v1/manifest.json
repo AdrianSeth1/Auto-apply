@@ -42,8 +42,8 @@
     },
     "experience": {
       "enabled": true,
-      "max_items": 3,
-      "max_bullets_per_item": 4,
+      "max_items": 4,
+      "max_bullets_per_item": 5,
       "max_words_per_bullet": 24,
       "max_lines": null
     },
