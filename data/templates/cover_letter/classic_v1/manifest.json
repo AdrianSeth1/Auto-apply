@@ -1,6 +1,12 @@
 {
   "template_id": "classic_v1",
   "document_type": "cover_letter",
+  "template_format": "docx",
+  "renderer": "docx",
+  "supported_outputs": [
+    "docx",
+    "pdf"
+  ],
   "name": "Classic Cover Letter",
   "description": "Simple one-page cover letter with editable Word styles.",
   "page": {
@@ -16,11 +22,18 @@
   },
   "sections": {
     "header": {
-      "enabled": true
+      "enabled": true,
+      "max_items": null,
+      "max_bullets_per_item": null,
+      "max_words_per_bullet": null,
+      "max_lines": null
     },
     "body": {
       "enabled": true,
-      "max_items": 5
+      "max_items": 5,
+      "max_bullets_per_item": null,
+      "max_words_per_bullet": null,
+      "max_lines": null
     }
   },
   "section_order": [
@@ -31,9 +44,66 @@
   ],
   "capacity": {
     "max_pages": 1,
-    "max_sections": 4
+    "max_sections": 4,
+    "max_experience_items": null,
+    "max_project_items": null,
+    "max_bullets_total": null,
+    "max_words_per_bullet": null,
+    "max_skill_lines": null
   },
   "blocks": {
     "body": "{{cover_letter.body}}"
-  }
+  },
+  "latex": null,
+  "style_overrides": {
+    "header": {
+      "font": "Times New Roman",
+      "size": null,
+      "bold": null,
+      "italic": null,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    },
+    "date": {
+      "font": "Times New Roman",
+      "size": null,
+      "bold": null,
+      "italic": null,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    },
+    "recipient": {
+      "font": "Times New Roman",
+      "size": null,
+      "bold": null,
+      "italic": null,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    },
+    "body": {
+      "font": "Times New Roman",
+      "size": null,
+      "bold": null,
+      "italic": null,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    },
+    "signature": {
+      "font": "Times New Roman",
+      "size": null,
+      "bold": null,
+      "italic": null,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    }
+  },
+  "target_pages": 1,
+  "filename_pattern": "company_role_date",
+  "filename_custom_label": "",
+  "emphasis_font": ""
 }

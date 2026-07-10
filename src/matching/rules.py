@@ -73,9 +73,12 @@ class ApplicantContext:
     willing_to_relocate: bool = True
     years_of_experience: int = 0  # total relevant years
     education_level: str = ""  # highest: "PhD", "Master's", "Bachelor's"
-    preferred_employment_types: list[str] = field(
-        default_factory=lambda: ["internship", "coop"],
-    )
+    # Empty list = "no preference" (the employment_type rule passes
+    # everything). This used to default to ["internship", "coop"], which
+    # silently hard-disqualified every fulltime job for any profile that
+    # didn't override it -- load_applicant_context never did, so web
+    # search scoring returned 0.0 for all fulltime roles.
+    preferred_employment_types: list[str] = field(default_factory=list)
     target_locations: list[str] = field(default_factory=list)  # accepted job locations
 
 
@@ -482,19 +485,15 @@ def load_applicant_context(profile_data: dict[str, Any]) -> ApplicantContext:
     education = profile_data.get("education", [])
     experiences = profile_data.get("work_experiences", [])
 
-    # Calculate total experience years from work history
-    total_years = 0
-    for exp in experiences:
-        if isinstance(exp, dict):
-            start = exp.get("start_date", "")
-            end = exp.get("end_date", "")
-            if start:
-                try:
-                    start_year = int(start[:4])
-                    end_year = int(end[:4]) if end and end != "Present" else datetime.now().year
-                    total_years += max(0, end_year - start_year)
-                except (ValueError, IndexError):
-                    pass
+    # Calculate total experience years from work history.
+    # 2026-07-07: overlapping date ranges are MERGED before summing.
+    # The old per-experience sum double-counted concurrent jobs (two
+    # part-time roles held 2023-2025 counted as 4 years), inflating
+    # years_of_experience and letting senior roles pass the experience
+    # rule for junior applicants. Month-granular now, too — the old
+    # year-subtraction called an 11-month role 0 years and a
+    # Dec 2024 - Jan 2025 role 1 year.
+    total_years = _merged_experience_years(experiences)
 
     # Highest education
     edu_level = ""
@@ -516,4 +515,81 @@ def load_applicant_context(profile_data: dict[str, Any]) -> ApplicantContext:
         willing_to_relocate=identity.get("willing_to_relocate", True),
         years_of_experience=total_years,
         education_level=edu_level,
+        preferred_employment_types=_load_employment_preferences(profile_data),
     )
+
+
+def _merged_experience_years(experiences: list[Any]) -> int:
+    """Total years worked, counting overlapping employment once.
+
+    Parses ``start_date`` / ``end_date`` (``YYYY-MM`` or ``YYYY``;
+    empty / "Present" end = now) into month intervals, merges overlaps,
+    and floors the merged total to whole years — the conservative
+    reading a recruiter would use.
+    """
+    intervals: list[tuple[int, int]] = []
+    now = datetime.now()
+    now_months = now.year * 12 + (now.month - 1)
+
+    for exp in experiences:
+        if not isinstance(exp, dict):
+            continue
+        start = _months_since_epoch(exp.get("start_date", ""))
+        if start is None:
+            continue
+        end_raw = exp.get("end_date", "")
+        end = (
+            now_months
+            if not end_raw or str(end_raw).strip().lower() == "present"
+            else _months_since_epoch(end_raw)
+        )
+        if end is None:
+            end = now_months
+        if end > start:
+            intervals.append((start, min(end, now_months)))
+
+    if not intervals:
+        return 0
+
+    intervals.sort()
+    merged_months = 0
+    current_start, current_end = intervals[0]
+    for start, end in intervals[1:]:
+        if start <= current_end:  # overlaps or touches the current block
+            current_end = max(current_end, end)
+        else:
+            merged_months += current_end - current_start
+            current_start, current_end = start, end
+    merged_months += current_end - current_start
+
+    return merged_months // 12
+
+
+def _months_since_epoch(value: Any) -> int | None:
+    """``"2024-01"`` -> absolute month index; ``"2024"`` -> January of it."""
+    text = str(value or "").strip()
+    match = re.match(r"^(\d{4})(?:-(\d{1,2}))?", text)
+    if not match:
+        return None
+    year = int(match.group(1))
+    month = int(match.group(2)) if match.group(2) else 1
+    if not 1 <= month <= 12:
+        month = 1
+    return year * 12 + (month - 1)
+
+
+def _load_employment_preferences(profile_data: dict[str, Any]) -> list[str]:
+    """Read preferred employment types from the profile YAML.
+
+    Looks for ``preferences.employment_types`` (list of strings matching
+    RawJob.employment_type values: internship / fulltime / parttime /
+    contract / coop). Absent or empty means "no preference" and the
+    employment_type hard rule passes every job.
+    """
+    preferences = profile_data.get("preferences")
+    if not isinstance(preferences, dict):
+        return []
+    raw = preferences.get("employment_types")
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip().lower() for item in raw if str(item).strip()]

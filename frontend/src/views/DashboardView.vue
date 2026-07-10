@@ -272,9 +272,24 @@ function goToPipeline(status) {
   router.push(pipelineDestination(status))
 }
 
+const analytics = reactive({ loading: false, data: null })
+
+async function loadOutcomeAnalytics() {
+  analytics.loading = true
+  try {
+    const response = await api.outcomeAnalytics()
+    analytics.data = response.ok ? response : null
+  } catch {
+    analytics.data = null
+  } finally {
+    analytics.loading = false
+  }
+}
+
 onMounted(() => {
   load()
   loadCostTrend()
+  loadOutcomeAnalytics()
 })
 </script>
 
@@ -570,6 +585,43 @@ onMounted(() => {
             >
               <template #icon><Building2 /></template>
             </EmptyState>
+          </CardContent>
+        </Card>
+
+        <Card v-if="analytics.data && analytics.data.total_submitted">
+          <CardHeader>
+            <CardTitle class="flex items-center gap-2 text-sm">
+              <Percent class="h-4 w-4 text-muted-foreground" />
+              Does the score predict replies?
+            </CardTitle>
+          </CardHeader>
+          <CardContent class="space-y-3">
+            <div v-if="analytics.data.by_score_band.length">
+              <div class="mb-1 text-xs font-medium text-muted-foreground">By match-score band</div>
+              <div
+                v-for="band in analytics.data.by_score_band"
+                :key="band.band"
+                class="flex items-center justify-between gap-3 rounded-md border border-border bg-card px-3 py-1.5 text-sm"
+              >
+                <span class="tabular-nums text-foreground">{{ band.band }}</span>
+                <span class="text-xs tabular-nums text-muted-foreground">
+                  {{ band.total }} sent · {{ formatPercent(band.response_rate, "0%") }} reply · {{ formatPercent(band.positive_rate, "0%") }} positive
+                </span>
+              </div>
+            </div>
+            <div v-if="analytics.data.by_profile.length">
+              <div class="mb-1 text-xs font-medium text-muted-foreground">By resume profile</div>
+              <div
+                v-for="row in analytics.data.by_profile"
+                :key="row.profile"
+                class="flex items-center justify-between gap-3 rounded-md border border-border bg-card px-3 py-1.5 text-sm"
+              >
+                <span class="truncate text-foreground">{{ row.profile }}</span>
+                <span class="text-xs tabular-nums text-muted-foreground">
+                  {{ row.total }} sent · {{ formatPercent(row.positive_rate, "0%") }} positive
+                </span>
+              </div>
+            </div>
           </CardContent>
         </Card>
 

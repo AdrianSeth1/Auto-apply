@@ -112,6 +112,77 @@ class BulkRejectByFilterPayload(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
+def _entry_artifacts(materials_path: str | None) -> list[dict[str, str]]:
+    """Derive downloadable artifact links from the entry's materials path.
+
+    2026-07-08: plan-run entries store one path (usually the resume);
+    the cover letter and alternate formats live next to it following the
+    ``{type}_{company}_{role}_{date}`` naming pattern. Probe the
+    resume_/cover_letter_ prefix swaps and .pdf/.docx variants and
+    return only files that exist, so the kanban card can link everything
+    the worker actually produced.
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    if not materials_path:
+        return []
+    base = Path(materials_path)
+    stems = {base.stem}
+    # The naming pattern's {type} is "resume" / "cover" (with legacy
+    # "cover_letter" seen in older artifacts) — probe all spellings.
+    for resume_prefix, cover_prefix in (
+        ("resume_", "cover_"),
+        ("resume_", "cover_letter_"),
+    ):
+        if base.stem.startswith(resume_prefix):
+            stems.add(cover_prefix + base.stem[len(resume_prefix):])
+        elif base.stem.startswith(cover_prefix):
+            stems.add(resume_prefix + base.stem[len(cover_prefix):])
+
+    artifacts: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for stem in sorted(stems):
+        for ext in (".pdf", ".docx"):
+            candidate = base.with_name(stem + ext)
+            key = str(candidate)
+            if key in seen or not candidate.exists():
+                continue
+            seen.add(key)
+            kind = "Cover letter" if stem.startswith("cover") else "Resume"
+            artifacts.append(
+                {"label": f"{kind} {ext[1:].upper()}", "path": key}
+            )
+    return artifacts
+
+
+def _entry_application_url(session, entry) -> str | None:
+    """Posting URL for the kanban card: legacy Job first, then Job Index."""
+    from src.core.models import Job, JobPosting  # noqa: PLC0415
+
+    if entry.job_id is None:
+        return None
+    job = session.get(Job, entry.job_id)
+    if job is not None and job.application_url:
+        return job.application_url
+    posting = session.get(JobPosting, entry.job_id)
+    if posting is not None:
+        return posting.canonical_url
+    return None
+
+
+def _serialize_enriched(session, entry) -> dict[str, Any]:
+    """serialize_entry + the fields a human needs to apply manually.
+
+    The bare serializer left the operator dead-ended: no posting link,
+    no artifact links — the review card showed a company and title and
+    nothing actionable (user report, 2026-07-08).
+    """
+    payload = serialize_entry(entry)
+    payload["application_url"] = _entry_application_url(session, entry)
+    payload["artifacts"] = _entry_artifacts(entry.materials_path)
+    return payload
+
+
 @router.get("")
 async def list_review_entries(
     status: str | None = Query(default=None),
@@ -130,7 +201,7 @@ async def list_review_entries(
         )
         return {
             "ok": True,
-            "entries": [serialize_entry(e) for e in entries],
+            "entries": [_serialize_enriched(session, e) for e in entries],
         }
 
 
@@ -143,7 +214,7 @@ async def get_review_entry(entry_id: str) -> dict[str, Any]:
             # Treat cross-tenant access as not-found so we don't leak
             # whether an id exists in another tenant's scope.
             raise HTTPException(404, "review entry not found")
-        return {"ok": True, "entry": serialize_entry(entry)}
+        return {"ok": True, "entry": _serialize_enriched(session, entry)}
 
 
 # --------------------------------------------------------------------------- #
@@ -461,4 +532,135 @@ async def submit_route(
                 "ATS click-submit. "
                 "The review entry remains approved and must not be counted as submitted."
             ),
+        }
+
+
+@router.post("/{entry_id}/mark-submitted")
+async def mark_submitted_manually_route(
+    entry_id: str, payload: ReviewActionPayload
+) -> dict[str, Any]:
+    """2026-07-07: the user submitted this application BY HAND on the ATS.
+
+    Phase 18 rightly refuses to auto-mark rows SUBMITTED because the
+    external click-submit worker doesn't exist — but a manual submission
+    the user personally performed IS a confirmed submission. Without
+    this action the only way to clear a finished application from the
+    review pile was Discard, which kept it out of outcome tracking
+    entirely (email ingestion, follow-up nudges, and analytics all key
+    off ``Application.submitted_at``).
+
+    Transitions, atomically:
+      * review entry: pending → approved → submitted (or approved →
+        submitted); 409 for anything else.
+      * matching Application (latest for the entry's job): status →
+        SUBMITTED, ``submitted_at`` = now, state_history breadcrumb
+        ``USER_CONFIRMED_MANUAL_SUBMISSION``.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from src.application.review import approve as approve_entry  # noqa: PLC0415
+    from src.application.review import mark_submitted as mark_entry_submitted  # noqa: PLC0415
+    from src.core.models import Application  # noqa: PLC0415
+    from src.core.state_machine import AppStatus  # noqa: PLC0415
+
+    factory = get_session_factory()
+    with factory() as session, session.begin():
+        entry = get_entry_db(session, entry_id)
+        if entry is None or entry.tenant_id != _tenant():
+            raise HTTPException(404, "review entry not found")
+        if entry.status not in ("pending", "approved"):
+            raise HTTPException(
+                409,
+                f"entry status is {entry.status!r}; only pending/approved entries "
+                "can be marked manually submitted",
+            )
+
+        if entry.status == "pending":
+            approve_entry(
+                session,
+                entry.id,
+                reviewer=payload.reviewer or "operator",
+                reason=payload.reason or "manual submission",
+            )
+        entry = mark_entry_submitted(
+            session,
+            entry.id,
+            reviewer=payload.reviewer or "operator",
+            reason=payload.reason or "user submitted manually on the ATS",
+        )
+
+        app = None
+        if entry.job_id is not None:
+            app = session.execute(
+                select(Application)
+                .where(Application.tenant_id == entry.tenant_id)
+                .where(Application.job_id == entry.job_id)
+                .order_by(Application.created_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+
+        now = datetime.now(UTC)
+        if app is None and entry.job_id is not None:
+            # 2026-07-08: plan-run review entries don't create Application
+            # rows up front, so a manual submission had nothing to track
+            # against — the user's application vanished from outcomes,
+            # email matching, and follow-ups. Materialize the row here;
+            # the manual submission is the moment it becomes real.
+            from src.core.models import Job  # noqa: PLC0415
+
+            legacy_job = session.get(Job, entry.job_id)
+            if legacy_job is not None:
+                score = None
+                if isinstance(entry.score_breakdown, dict):
+                    score = entry.score_breakdown.get("final_score")
+                app = Application(
+                    tenant_id=entry.tenant_id,
+                    job_id=legacy_job.id,
+                    job_snapshot_id=entry.job_snapshot_id,
+                    status=str(AppStatus.SUBMITTED),
+                    match_score=score,
+                    resume_version=entry.materials_path,
+                    submitted_at=now,
+                    state_history=[
+                        {
+                            "timestamp": now.isoformat(),
+                            "event": "USER_CONFIRMED_MANUAL_SUBMISSION",
+                            "from": "NONE",
+                            "to": str(AppStatus.SUBMITTED),
+                            "meta": {
+                                "review_entry_id": str(entry.id),
+                                "note": (
+                                    "Application row materialized from a plan-run review "
+                                    "entry when the user confirmed a manual ATS submission."
+                                ),
+                            },
+                        }
+                    ],
+                )
+                session.add(app)
+                session.flush()
+        elif app is not None and app.status != str(AppStatus.SUBMITTED):
+            history = list(app.state_history or [])
+            history.append(
+                {
+                    "timestamp": now.isoformat(),
+                    "event": "USER_CONFIRMED_MANUAL_SUBMISSION",
+                    "from": str(app.status),
+                    "to": str(AppStatus.SUBMITTED),
+                    "meta": {
+                        "review_entry_id": str(entry.id),
+                        "note": "User confirmed they submitted on the external ATS by hand.",
+                    },
+                }
+            )
+            app.state_history = history
+            app.status = str(AppStatus.SUBMITTED)
+            app.submitted_at = now
+
+        return {
+            "ok": True,
+            "status": "submitted",
+            "entry": serialize_entry(entry),
+            "application_id": str(app.id) if app is not None else None,
+            "message": "Marked as submitted — it's now in outcome tracking.",
         }

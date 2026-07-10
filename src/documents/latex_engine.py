@@ -485,6 +485,11 @@ def _resolved_section_order(document) -> list[str]:
 
 
 def _format_date_range(start: str, end: str) -> str:
+    # 2026-07-09: shares the docx engine's date humanizer so LaTeX output
+    # also renders "Aug. 2022 -- Present" instead of raw ISO "2022-08".
+    from src.documents.docx_engine import _humanize_date  # noqa: PLC0415
+
+    start, end = _humanize_date(start), _humanize_date(end)
     if start and end:
         return f"{start} -- {end}"
     return start or end or ""

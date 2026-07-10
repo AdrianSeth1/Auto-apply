@@ -399,14 +399,16 @@ class TestHeadline:
 
 
 class TestBeatWiring:
-    def test_morning_digest_entry_at_0800(self):
+    def test_morning_digest_entry_at_1200(self):
+        # 2026-07-07: 12:00 UTC = 7am Central, after the overnight
+        # automation plans (08:00-09:00 UTC) finish.
         from src.tasks.beat import get_schedule
 
         schedule = get_schedule()
         assert "morning_digest" in schedule
         entry = schedule["morning_digest"]
         assert entry["task"] == "notifications.morning_digest"
-        assert entry["schedule"].hour == {8}
+        assert entry["schedule"].hour == {12}
         assert entry["schedule"].minute == {0}
 
     def test_morning_digest_in_known_task_names(self):

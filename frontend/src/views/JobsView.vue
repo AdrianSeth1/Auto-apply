@@ -247,11 +247,37 @@ const filterProfileOptions = computed(() => [
   { value: "", label: "Select saved profile" },
   ...state.filterProfiles.map((profile) => ({ value: profile.id, label: profile.id })),
 ])
-const currentViewJobs = computed(() => {
-  if (state.viewMode === "shown") {
-    return state.filteredJobs
+const sortOptions = [
+  { value: "match", label: "Best match" },
+  { value: "newest", label: "Newest" },
+  { value: "company", label: "Company A–Z" },
+  { value: "title", label: "Title A–Z" },
+]
+
+function compareJobs(a, b) {
+  if (state.sortMode === "company") {
+    return (a.company || "").localeCompare(b.company || "") || (a.title || "").localeCompare(b.title || "")
   }
-  return state.resultSets[state.viewMode] || []
+  if (state.sortMode === "title") {
+    return (a.title || "").localeCompare(b.title || "")
+  }
+  if (state.sortMode === "newest") {
+    return new Date(b.discovered_at || 0) - new Date(a.discovered_at || 0)
+  }
+  // Default: match score descending; deterministic company/title tie-break
+  // so unscored ties don't render in arbitrary scrape order.
+  return (
+    (score(b) ?? -1) - (score(a) ?? -1)
+    || (a.company || "").localeCompare(b.company || "")
+    || (a.title || "").localeCompare(b.title || "")
+  )
+}
+
+const currentViewJobs = computed(() => {
+  const jobs = state.viewMode === "shown"
+    ? state.filteredJobs
+    : state.resultSets[state.viewMode] || []
+  return [...jobs].sort(compareJobs)
 })
 const totalPages = computed(() => Math.max(1, Math.ceil(currentViewJobs.value.length / state.pageSize)))
 const paginatedJobs = computed(() => {
@@ -282,7 +308,7 @@ const activeFilterLabels = computed(() => {
   if (form.profile.trim()) {
     labels.push(`Profile: ${form.profile.trim()}`)
   }
-  if (sourceUsesLinkedIn.value && form.keywords.length) {
+  if (form.keywords.length) {
     labels.push(...form.keywords.map((keyword) => `Keyword: ${keyword}`))
   }
   if (sourceUsesAts.value && form.ats) {
@@ -324,7 +350,6 @@ watch(
   () => form.source,
   (source) => {
     if (source === "ats") {
-      form.keywords = []
       form.time_filter = "all"
     }
 
@@ -728,7 +753,7 @@ async function generateSelectedMaterials() {
   const settled = await Promise.allSettled(
     targets.map((target) =>
       api
-        .generateJobMaterial(job, target.materialType, materialModal.templateIds[target.id])
+        .generateJobMaterial(job, target.materialType, materialModal.templateIds[target.id], bestProfile(job) || "")
         .then((response) => ({ target, response })),
     ),
   )
@@ -879,6 +904,21 @@ function parseOptionalNumber(value) {
 
 function score(job) {
   return job.match_score ?? job.raw_data?.match_score ?? null
+}
+
+function bestProfile(job) {
+  return job.best_profile ?? job.raw_data?.best_profile ?? null
+}
+
+function profileScoresTitle(job) {
+  const scores = job.profile_scores ?? job.raw_data?.profile_scores ?? null
+  if (!scores) {
+    return "Best-matching resume profile"
+  }
+  return Object.entries(scores)
+    .sort((a, b) => b[1] - a[1])
+    .map(([id, value]) => `${id}: ${Number(value).toFixed(2)}`)
+    .join("\n")
 }
 
 function isLinkedInUrl(url) {
@@ -1062,9 +1102,9 @@ function setResultSets(views) {
 function buildFetchSignature() {
   return JSON.stringify({
     source: form.source,
-    keywords: sourceUsesLinkedIn.value
-      ? [...form.keywords].map((value) => value.trim().toLowerCase())
-      : [],
+    // Keywords affect BOTH LinkedIn scraping and ATS narrowing, so they
+    // are always part of the fetch signature.
+    keywords: [...form.keywords].map((value) => value.trim().toLowerCase()),
     time_filter: sourceUsesLinkedIn.value ? form.time_filter : "all",
     search_locations: sourceUsesLinkedIn.value
       ? [...form.locations].map((value) => value.trim().toLowerCase()).filter(Boolean)
@@ -1092,20 +1132,40 @@ function filterFetchedJobs(jobs) {
   return jobs.filter((job) => matchesLocalFilters(job))
 }
 
+// "Unknown passes" (mirrors _passes_category in src/application/jobs.py):
+// classifiers are heuristic and most JDs omit pay/education/employment
+// terms, so only a KNOWN violating value excludes a job. Excluding
+// unclassifiable jobs made stacked Advanced filters delete everything.
+function passesCategory(value, selected) {
+  if (!selected.length) {
+    return true
+  }
+  if (!value || value === "unknown") {
+    return true
+  }
+  return selected.includes(value)
+}
+
 function matchesLocalFilters(job) {
-  if (form.experience_levels.length && !form.experience_levels.includes(job.experience_level)) {
+  if (!passesCategory(job.experience_level, form.experience_levels)) {
     return false
   }
-  if (form.employment_types.length && !form.employment_types.includes(job.employment_category)) {
+  if (!passesCategory(job.employment_category, form.employment_types)) {
     return false
   }
-  if (form.location_types.length && !form.location_types.includes(job.location_type)) {
+  if (!passesCategory(job.location_type, form.location_types)) {
     return false
   }
-  if (form.education_levels.length && !form.education_levels.includes(job.education_level)) {
+  if (!passesCategory(job.education_level, form.education_levels)) {
     return false
   }
-  if (!shouldSkipLocalLocationFilter() && form.locations.length && !matchesLocations(job.location, form.locations)) {
+  // Only LinkedIn jobs may skip the location filter (LinkedIn already
+  // geo-filtered them server-side). ATS boards return every job worldwide,
+  // so those must always pass the local location check. The old check
+  // skipped the filter for ALL jobs whenever the source included LinkedIn,
+  // which let unfiltered global ATS jobs leak into the results.
+  const skipLocationFilter = job.source === "linkedin" && sourceUsesLinkedIn.value && form.locations.length > 0
+  if (!skipLocationFilter && form.locations.length && !matchesLocations(job.location, form.locations)) {
     return false
   }
 
@@ -1126,8 +1186,98 @@ function matchesLocalFilters(job) {
   return true
 }
 
-function shouldSkipLocalLocationFilter() {
-  return sourceUsesLinkedIn.value && form.locations.length > 0
+// Whole-word location matching with US-state + country aliases; mirrors
+// _matches_locations in src/application/jobs.py. The old raw substring test
+// matched "ny" inside "Germany" and "us" inside "Australia".
+const LOCATION_ALIASES = {
+  "us": ["us", "usa", "u.s.", "united states", "america"],
+  "usa": ["us", "usa", "u.s.", "united states", "america"],
+  "united states": ["us", "usa", "u.s.", "united states", "america"],
+  "uk": ["uk", "u.k.", "united kingdom", "england", "scotland", "wales"],
+  "united kingdom": ["uk", "u.k.", "united kingdom", "england", "scotland", "wales"],
+  "remote": ["remote", "anywhere", "work from home", "wfh"],
+}
+
+const US_STATE_BY_ABBREV = {
+  al: "alabama", ak: "alaska", az: "arizona", ar: "arkansas", ca: "california",
+  co: "colorado", ct: "connecticut", de: "delaware", fl: "florida", ga: "georgia",
+  hi: "hawaii", id: "idaho", il: "illinois", in: "indiana", ia: "iowa",
+  ks: "kansas", ky: "kentucky", la: "louisiana", me: "maine", md: "maryland",
+  ma: "massachusetts", mi: "michigan", mn: "minnesota", ms: "mississippi", mo: "missouri",
+  mt: "montana", ne: "nebraska", nv: "nevada", nh: "new hampshire", nj: "new jersey",
+  nm: "new mexico", ny: "new york", nc: "north carolina", nd: "north dakota", oh: "ohio",
+  ok: "oklahoma", or: "oregon", pa: "pennsylvania", ri: "rhode island", sc: "south carolina",
+  sd: "south dakota", tn: "tennessee", tx: "texas", ut: "utah", vt: "vermont",
+  va: "virginia", wa: "washington", wv: "west virginia", wi: "wisconsin", wy: "wyoming",
+  dc: "district of columbia",
+}
+const US_ABBREV_BY_STATE = Object.fromEntries(
+  Object.entries(US_STATE_BY_ABBREV).map(([abbrev, name]) => [name, abbrev]),
+)
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function wordMatch(term, text) {
+  return new RegExp(`(^|[^a-z0-9])${escapeRegExp(term)}([^a-z0-9]|$)`).test(text)
+}
+
+function locationCandidateMatches(candidate, location) {
+  const normalized = candidate.trim().toLowerCase()
+  if (!normalized) {
+    return false
+  }
+
+  // "City, ST" style chips: require every comma-part to match, so
+  // "Portland, OR" matches "Portland, Oregon Metropolitan Area" and
+  // "Portland, OR (Remote)" but not "Portland, Maine" or bare "US".
+  if (normalized.includes(",")) {
+    const parts = normalized.split(",").map((part) => part.trim()).filter(Boolean)
+    if (parts.length > 1) {
+      return parts.every((part) => locationCandidateMatches(part, location))
+    }
+  }
+
+  const terms = new Set(LOCATION_ALIASES[normalized] || [normalized])
+  const abbrevs = new Set()
+
+  if (US_STATE_BY_ABBREV[normalized]) {
+    terms.delete(normalized)
+    terms.add(US_STATE_BY_ABBREV[normalized])
+    abbrevs.add(normalized)
+  } else if (US_ABBREV_BY_STATE[normalized]) {
+    abbrevs.add(US_ABBREV_BY_STATE[normalized])
+  }
+
+  for (const term of terms) {
+    if (US_STATE_BY_ABBREV[term]) {
+      abbrevs.add(term)
+      continue
+    }
+    if (wordMatch(term, location)) {
+      return true
+    }
+  }
+
+  // Two-letter state codes collide with English words ("or", "in", "me"),
+  // so they only match in the ", XX" form: "Portland, OR".
+  for (const abbrev of abbrevs) {
+    if (new RegExp(`,\\s*${escapeRegExp(abbrev)}($|[^a-z0-9])`).test(location)) {
+      return true
+    }
+  }
+
+  // "united states" should also match US locations that only name a
+  // city/state ("San Francisco, CA", "Dallas, Texas").
+  if (["us", "usa", "united states", "america"].includes(normalized)) {
+    const abbrevMatch = location.match(/,\s*([a-z]{2})(?![a-z0-9])/)
+    if (abbrevMatch && US_STATE_BY_ABBREV[abbrevMatch[1]]) {
+      return true
+    }
+    return Object.keys(US_ABBREV_BY_STATE).some((name) => wordMatch(name, location))
+  }
+  return false
 }
 
 function matchesLocations(location, candidates) {
@@ -1135,13 +1285,15 @@ function matchesLocations(location, candidates) {
   if (!normalizedLocation) {
     return false
   }
-  return candidates.some((candidate) => normalizedLocation.includes(candidate.toLowerCase()))
+  return candidates.some((candidate) => locationCandidateMatches(candidate, normalizedLocation))
 }
 
 function matchesNumericRange(minValue, maxValue, operator, target) {
   if (minValue === null || minValue === undefined) {
     if (maxValue === null || maxValue === undefined) {
-      return false
+      // Unknown passes: pay/experience are regex-extracted from JD text
+      // and usually absent; excluding on missing data nuked most results.
+      return true
     }
   }
 
@@ -1283,13 +1435,16 @@ function buildPageButtons(total, current) {
                       <span>Max Pages</span>
                       <input v-model="form.max_pages" class="input" type="number" min="1" max="100" step="1" />
                     </label>
-
-                    <label class="field field-span-full">
-                      <span>Keywords</span>
-                      <TagInput v-model="form.keywords" placeholder="Add a keyword or phrase" />
-                      <div class="muted-inline">Any keyword tag found in the title or description will keep the result.</div>
-                    </label>
                   </template>
+
+                  <label class="field field-span-full">
+                    <span>Keywords</span>
+                    <TagInput v-model="form.keywords" placeholder="Add a keyword or phrase" />
+                    <div class="muted-inline">
+                      Keeps results whose title or description contains any keyword.
+                      Drives the LinkedIn search and narrows ATS board results.
+                    </div>
+                  </label>
 
                   <template v-if="sourceUsesAts">
                     <label class="field">
@@ -1305,7 +1460,11 @@ function buildPageButtons(total, current) {
 
                   <label class="field field-span-full">
                     <span>Candidate Locations</span>
-                    <TagInput v-model="form.locations" placeholder="San Francisco, CA, United States" />
+                    <TagInput v-model="form.locations" placeholder="Portland, United States, Remote" />
+                    <div class="muted-inline">
+                      Company boards often label jobs at country level ("US", "Ireland") —
+                      add "united states" or "remote" alongside a city to keep country-wide roles.
+                    </div>
                     <div v-if="searchLocationNote" class="muted-inline">
                       {{ searchLocationNote }}
                     </div>
@@ -1492,6 +1651,7 @@ function buildPageButtons(total, current) {
           </div>
 
           <div class="jobs-page-size">
+            <AppSelect v-model="state.sortMode" :options="sortOptions" compact aria-label="Sort results" />
             <AppSelect v-model="state.pageSize" :options="pageSizeOptions" compact aria-label="Results per page" />
           </div>
         </div>
@@ -1512,6 +1672,11 @@ function buildPageButtons(total, current) {
               <div class="job-card-copy">
                 <div class="chip-row job-card-topline">
                   <span v-if="score(job) !== null" class="chip job-chip-strong">{{ formatPercent(score(job), "0%") }}</span>
+                  <span
+                    v-if="bestProfile(job)"
+                    class="chip"
+                    :title="profileScoresTitle(job)"
+                  >Best fit: {{ bestProfile(job) }}</span>
                   <span class="chip">{{ sourceLabel(job) }}</span>
                   <span v-if="chipLabel(job.location_type)" class="chip">{{ chipLabel(job.location_type) }}</span>
                   <span v-if="job.raw_data?.search_mode === 'public_guest'" class="chip subtle">Guest</span>
@@ -1629,6 +1794,7 @@ function buildPageButtons(total, current) {
           </div>
 
           <div class="jobs-page-size">
+            <AppSelect v-model="state.sortMode" :options="sortOptions" compact aria-label="Sort results" />
             <AppSelect v-model="state.pageSize" :options="pageSizeOptions" compact aria-label="Results per page" />
           </div>
         </div>

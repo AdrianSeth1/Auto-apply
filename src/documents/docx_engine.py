@@ -705,7 +705,30 @@ def _add_bullet(doc: Document, text: str) -> None:
         doc.add_paragraph(f"• {text}")
 
 
+_MONTH_ABBREV = {
+    "01": "Jan.", "02": "Feb.", "03": "Mar.", "04": "Apr.",
+    "05": "May", "06": "June", "07": "July", "08": "Aug.",
+    "09": "Sept.", "10": "Oct.", "11": "Nov.", "12": "Dec.",
+}
+
+
+def _humanize_date(value: str) -> str:
+    """``"2022-08"`` -> ``"Aug. 2022"``; anything unparseable passes through.
+
+    2026-07-09: raw ISO dates on rendered resumes read as machine output
+    (user report). Every strong example resume uses ``Mon. Year``.
+    """
+    text = (value or "").strip()
+    match = re.fullmatch(r"(\d{4})-(\d{1,2})(?:-\d{1,2})?", text)
+    if not match:
+        return text
+    month = match.group(2).zfill(2)
+    abbrev = _MONTH_ABBREV.get(month)
+    return f"{abbrev} {match.group(1)}" if abbrev else match.group(1)
+
+
 def _format_date_range(start: str, end: str) -> str:
+    start, end = _humanize_date(start), _humanize_date(end)
     if start and end:
         return f"{start} – {end}"
     return start or end or ""
@@ -828,7 +851,7 @@ def _rebuild_education_block(doc: Document, education: list[dict]) -> None:
     for edu in education:
         institution = edu.get("institution", "")
         degree = f"{edu.get('degree', '')} in {edu.get('field', '')}"
-        dates = f"{edu.get('start_date', '')} – {edu.get('end_date', '')}"
+        dates = _format_date_range(edu.get('start_date', ''), edu.get('end_date', ''))
         gpa = f"GPA: {edu['gpa']}" if edu.get("gpa") else ""
 
         _add_paragraph_after(doc, insert_idx, f"{institution} | {dates}", bold=True)
@@ -865,7 +888,7 @@ def _rebuild_experience_block(
     for exp in experiences:
         company = exp.get("company", "")
         title = exp.get("title", "")
-        dates = f"{exp.get('start_date', '')} – {exp.get('end_date', '')}"
+        dates = _format_date_range(exp.get('start_date', ''), exp.get('end_date', ''))
         location = exp.get("location", "")
 
         _add_paragraph_after(doc, insert_idx, f"{company} | {location}", bold=True)
@@ -903,7 +926,7 @@ def _rebuild_projects_block(
     for proj in projects:
         name = proj.get("name", "")
         tech = ", ".join(proj.get("tech_stack", []))
-        dates = f"{proj.get('start_date', '')} – {proj.get('end_date', '')}".strip(" –")
+        dates = _format_date_range(proj.get('start_date', ''), proj.get('end_date', ''))
 
         header = f"{name} | {tech}"
         if dates:

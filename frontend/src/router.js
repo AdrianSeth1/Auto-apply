@@ -3,8 +3,10 @@ import { createRouter, createWebHistory } from "vue-router"
 import ApplicationsView from "./views/ApplicationsView.vue"
 import CacheSettingsView from "./views/CacheSettingsView.vue"
 import DashboardView from "./views/DashboardView.vue"
+import JobDatabaseView from "./views/JobDatabaseView.vue"
 import JobsView from "./views/JobsView.vue"
 import MaterialsLibraryView from "./views/MaterialsLibraryView.vue"
+import MaterialsQuestionsView from "./views/MaterialsQuestionsView.vue"
 import MaterialsView from "./views/MaterialsView.vue"
 import ProfileView from "./views/ProfileView.vue"
 import ReviewQueueView from "./views/ReviewQueueView.vue"
@@ -16,6 +18,7 @@ import TemplateLibraryView from "./views/TemplateLibraryView.vue"
 const routes = [
   { path: "/", component: DashboardView, meta: { label: "Dashboard" } },
   { path: "/jobs", component: JobsView, meta: { label: "Jobs" } },
+  { path: "/jobs-db", component: JobDatabaseView, meta: { label: "Job Database" } },
   { path: "/materials", component: MaterialsView, meta: { label: "Materials" } },
   {
     path: "/materials/library",
@@ -26,6 +29,11 @@ const routes = [
     path: "/materials/templates",
     component: TemplateLibraryView,
     meta: { label: "Template Library" },
+  },
+  {
+    path: "/materials/questions",
+    component: MaterialsQuestionsView,
+    meta: { label: "Application Questions" },
   },
   {
     path: "/materials/templates/:documentType/:templateId",

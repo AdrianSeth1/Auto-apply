@@ -19,14 +19,19 @@ import argparse
 import asyncio
 import logging
 import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from src.intake.ashby import AshbyScraper
 from src.intake.base import ScraperError
 from src.intake.batch import enrich_requirements, load_company_list
 from src.intake.filters import load_filter_profiles
 from src.intake.greenhouse import GreenhouseScraper
 from src.intake.lever import LeverScraper
 from src.intake.schema import RawJob
+from src.intake.storage import persist_and_sync_ids
 
 # Phase 13.8: the file-backed `src.intake.search_cache` module has been
 # retired. Per-search caching is now the Job Index (Phase 13.4
@@ -54,6 +59,56 @@ KEYWORD_STOPWORDS = {
 }
 SHORT_KEYWORD_EXCEPTIONS = {"ai", "ml", "qa", "ui", "ux", "c#", "c++"}
 
+# In-process TTL cache for ATS board fetches. Boards change slowly relative
+# to how often a user iterates on search filters, and every filter tweak
+# used to re-download every configured board. Entries are deep-copied on
+# both write and read because downstream code mutates RawJob in place
+# (scoring writes raw_data, persist_and_sync_ids rewrites ids).
+#
+# 2026-07-07: TTL is now config-driven (search_cache.board_ttl_minutes,
+# default 60) so the overnight automation plans staggered 20 min apart
+# share one board download instead of four. The Jobs-tab Refresh button
+# (force_refresh) remains the escape hatch for a truly fresh pull.
+BOARD_CACHE_TTL_S = 15 * 60  # legacy fallback, see _board_cache_ttl_s()
+
+
+def _board_cache_ttl_s() -> float:
+    try:
+        from src.core.config import load_config  # noqa: PLC0415
+
+        raw = load_config().get("search_cache", {})
+        minutes = int(raw.get("board_ttl_minutes", 60))
+        return float(max(minutes, 1) * 60)
+    except Exception:  # noqa: BLE001 -- config trouble -> legacy default
+        return float(BOARD_CACHE_TTL_S)
+
+_board_cache: dict[tuple[str, str, bool], tuple[float, list[RawJob]]] = {}
+_board_cache_lock = threading.Lock()
+
+
+def _board_cache_get(key: tuple[str, str, bool]) -> list[RawJob] | None:
+    with _board_cache_lock:
+        entry = _board_cache.get(key)
+        if entry is None:
+            return None
+        stored_at, jobs = entry
+        if time.monotonic() - stored_at > _board_cache_ttl_s():
+            del _board_cache[key]
+            return None
+    return [job.model_copy(deep=True) for job in jobs]
+
+
+def _board_cache_put(key: tuple[str, str, bool], jobs: list[RawJob]) -> None:
+    snapshot = [job.model_copy(deep=True) for job in jobs]
+    with _board_cache_lock:
+        _board_cache[key] = (time.monotonic(), snapshot)
+
+
+def clear_board_cache() -> None:
+    """Drop all cached ATS board results (tests / manual refresh)."""
+    with _board_cache_lock:
+        _board_cache.clear()
+
 
 def search_jobs(
     profile: str | None = "default",
@@ -61,6 +116,7 @@ def search_jobs(
     companies: dict[str, list[str]] | None = None,
     parse_jds: bool = True,
     use_llm: bool = False,
+    force_refresh: bool = False,
 ) -> list[RawJob]:
     """Search for jobs from ATS boards matching a filter profile.
 
@@ -70,6 +126,7 @@ def search_jobs(
         companies: Override company slugs (if None, loaded from companies.yaml).
         parse_jds: Whether to parse JDs for structured requirements.
         use_llm: Whether to use LLM for JD parsing.
+        force_refresh: Bypass the board TTL cache and re-fetch every board.
 
     Returns:
         List of RawJob objects that passed the filter.
@@ -93,24 +150,49 @@ def search_jobs(
     scraper_map = {
         "greenhouse": GreenhouseScraper,
         "lever": LeverScraper,
+        "ashby": AshbyScraper,
     }
 
     all_jobs: list[RawJob] = []
     errors = 0
 
+    # Company boards are independent HTTP fetches, so run them concurrently
+    # instead of serially -- with many configured boards this cuts the ATS
+    # scrape from sum(latencies) to roughly max(latencies). Results are
+    # re-assembled in config order so output stays deterministic.
+    board_tasks: list[tuple[str, str]] = []
     for ats, slugs in companies.items():
-        scraper_cls = scraper_map.get(ats)
-        if not scraper_cls:
+        if ats not in scraper_map:
             logger.warning("No scraper for ATS '%s'", ats)
             continue
+        board_tasks.extend((ats, slug) for slug in slugs)
 
-        with scraper_cls() as scraper:
-            for slug in slugs:
+    def _fetch_board(ats: str, slug: str) -> list[RawJob]:
+        cache_key = (ats, slug, parse_jds)
+        if not force_refresh:
+            cached = _board_cache_get(cache_key)
+            if cached is not None:
+                logger.info("[%s/%s] board cache hit (%d jobs)", ats, slug, len(cached))
+                return cached
+        with scraper_map[ats]() as scraper:
+            jobs = scraper.fetch_jobs(slug)
+        if parse_jds:
+            jobs = enrich_requirements(jobs, use_llm=use_llm)
+        _board_cache_put(cache_key, jobs)
+        return jobs
+
+    board_results: dict[tuple[str, str], list[RawJob]] = {}
+    if board_tasks:
+        max_workers = min(8, len(board_tasks))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_fetch_board, ats, slug): (ats, slug) for ats, slug in board_tasks
+            }
+            for future in as_completed(futures):
+                ats, slug = futures[future]
                 try:
-                    jobs = scraper.fetch_jobs(slug)
-                    if parse_jds:
-                        jobs = enrich_requirements(jobs, use_llm=use_llm)
-                    all_jobs.extend(jobs)
+                    jobs = future.result()
+                    board_results[(ats, slug)] = jobs
                     logger.info("[%s/%s] fetched %d jobs", ats, slug, len(jobs))
                 except ScraperError as e:
                     logger.error("[%s/%s] %s", ats, slug, e)
@@ -118,6 +200,9 @@ def search_jobs(
                 except Exception as e:
                     logger.error("[%s/%s] %s", ats, slug, e, exc_info=True)
                     errors += 1
+
+    for task_key in board_tasks:
+        all_jobs.extend(board_results.get(task_key, []))
 
     logger.info("Total scraped: %d jobs (%d errors)", len(all_jobs), errors)
 
@@ -128,6 +213,17 @@ def search_jobs(
         matched = all_jobs
 
     logger.info("Matched: %d/%d jobs", len(matched), len(all_jobs))
+
+    # Persist to Job table and sync RawJob.id to the stable DB primary key so
+    # downstream tasks (materials.generate) can look jobs up by id.
+    try:
+        from src.core.database import get_session_factory  # noqa: PLC0415
+        factory = get_session_factory()
+        with factory() as session:
+            persist_and_sync_ids(session, matched)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to persist ATS jobs to Job table: %s", exc)
+
     return matched
 
 

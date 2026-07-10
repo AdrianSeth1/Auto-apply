@@ -149,25 +149,56 @@ export const api = {
       "waiting_human",
     ])
     const deadline = Date.now() + timeoutMs
-    let row = await api.getTask(taskId)
-    if (onTick) onTick(row)
-    while (!terminal.has(row.status)) {
+    // 2026-07-07: transient poll failures must NOT abandon the task.
+    // The worker keeps running regardless of whether the browser can
+    // reach the web server for a moment (busy event loop, provider
+    // health probe blocking, brief restart) — a single dropped
+    // ``getTask`` used to surface "Failed to fetch" while the
+    // artifacts were being written successfully. Tolerate up to 12
+    // consecutive failures (~90s with backoff) before giving up.
+    const maxConsecutiveFailures = 12
+    let consecutiveFailures = 0
+
+    let row = null
+    for (;;) {
+      try {
+        row = await api.getTask(taskId)
+        consecutiveFailures = 0
+        if (onTick) onTick(row)
+        if (terminal.has(row.status)) {
+          return row
+        }
+      } catch (error) {
+        consecutiveFailures += 1
+        if (consecutiveFailures > maxConsecutiveFailures) {
+          error.row = row
+          throw error
+        }
+      }
       if (Date.now() > deadline) {
         const err = new Error(`pollTask timed out after ${timeoutMs}ms`)
         err.row = row
         throw err
       }
-      await new Promise((resolve) => setTimeout(resolve, intervalMs))
-      row = await api.getTask(taskId)
-      if (onTick) onTick(row)
+      const backoff = Math.min(intervalMs * (consecutiveFailures + 1), 10000)
+      await new Promise((resolve) => setTimeout(resolve, backoff))
     }
-    return row
   },
   dashboard() {
     return request("/api/dashboard")
   },
   searchJobs(payload) {
     return request("/api/jobs/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+  },
+  listDbJobs(params) {
+    return request(`/api/jobs/db${toQuery(params)}`)
+  },
+  generateDbJobMaterials(payload) {
+    return request("/api/jobs/db/generate-materials", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -420,6 +451,56 @@ export const api = {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ outcome }),
+    })
+  },
+  generatePrepPack(applicationId, profileId = "") {
+    const suffix = profileId ? `?profile_id=${encodeURIComponent(profileId)}` : ""
+    return request(`/api/applications/${applicationId}/prep-pack${suffix}`, {
+      method: "POST",
+    })
+  },
+  draftQuestionAnswer({ question, company = "", title = "", profileId = "", clarifications = [] }) {
+    return request("/api/qa/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question,
+        company,
+        title,
+        profile_id: profileId,
+        clarifications,
+      }),
+    })
+  },
+  saveQuestionAnswer(question, answer) {
+    return request("/api/qa/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, answer }),
+    })
+  },
+  questionBank() {
+    return request("/api/qa/bank")
+  },
+  deleteQuestionAnswer(entryId) {
+    return request(`/api/qa/bank/${encodeURIComponent(entryId)}`, { method: "DELETE" })
+  },
+  ingestEmailReplies(dryRun = false) {
+    return request(`/api/email/ingest${dryRun ? "?dry_run=true" : ""}`, {
+      method: "POST",
+    })
+  },
+  emailFollowups(afterDays = 10) {
+    return request(`/api/email/followups?after_days=${afterDays}`)
+  },
+  outcomeAnalytics() {
+    return request("/api/analytics/outcomes")
+  },
+  markApplicationSubmitted(applicationId) {
+    return request(`/api/applications/${encodeURIComponent(applicationId)}/mark-submitted`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
     })
   },
   submitApplication(applicationId) {
@@ -690,6 +771,16 @@ export const api = {
   },
   reviewRefresh(entryId, payload = {}) {
     return request(`/api/review/${encodeURIComponent(entryId)}/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+  },
+  reviewMarkSubmitted(entryId, payload = {}) {
+    // 2026-07-07: "I applied by hand on the ATS" — flips the entry to
+    // submitted AND marks the Application SUBMITTED with submitted_at,
+    // so email ingestion / follow-ups / analytics track it.
+    return request(`/api/review/${encodeURIComponent(entryId)}/mark-submitted`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),

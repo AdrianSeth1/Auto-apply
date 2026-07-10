@@ -67,13 +67,14 @@ def get_schedule() -> dict[str, dict[str, object]]:
             "schedule": crontab(hour=23, minute=0),
             "options": _ORCHESTRATION_OPTS,
         },
-        # Phase 17.6: morning digest at 08:00 UTC. Produces the
-        # dashboard banner payload + (future hook) desktop
-        # notification. Routed to the maintenance queue since it's
-        # cheap (one DB query + a directory scan).
+        # Phase 17.6: morning digest. 2026-07-07: moved 08:00 -> 12:00 UTC
+        # so it lands at 7am Central (the user's morning) instead of 3am,
+        # right after the overnight automation plans (08:00-09:00 UTC)
+        # have finished generating materials. Routed to the maintenance
+        # queue since it's cheap (one DB query + a directory scan).
         "morning_digest": {
             "task": "notifications.morning_digest",
-            "schedule": crontab(hour=8, minute=0),
+            "schedule": crontab(hour=12, minute=0),
             "options": _MAINTENANCE_OPTS,
         },
         "jd_health_check": {
@@ -84,11 +85,24 @@ def get_schedule() -> dict[str, dict[str, object]]:
         # Phase 18.1: ``application_status_sync`` removed from Beat
         # because ``maintenance.status_sync`` is explicitly
         # ``not_implemented``. Restore it when ATS/application-portal
-        # polling lands; email / HR-reply ingestion can follow as a
-        # second status source.
+        # polling lands.
+        # 2026-07-07: email reply ingestion (the "second status source"
+        # anticipated above). The task no-ops with a structured result
+        # when email.enabled is false, so the entry is safe on fresh
+        # installs. Every 6 hours — recruiter mail isn't latency-critical.
+        "email_ingest": {
+            "task": "maintenance.email_ingest",
+            "schedule": crontab(minute=15, hour="*/6"),
+            "options": _MAINTENANCE_OPTS,
+        },
+        # 2026-07-07: moved 03:00 -> 07:15 UTC (2:15am Central) so it runs
+        # right after the overnight Task Scheduler start (07:00 UTC) and
+        # just BEFORE the 07:30-08:15 UTC automation plans that need the
+        # LinkedIn session. At 03:00 UTC (10pm Central) the stack was
+        # usually down.
         "linkedin_cookie_refresh": {
             "task": "maintenance.linkedin_cookie_refresh",
-            "schedule": crontab(hour=3, minute=0),  # 03:00 UTC every day
+            "schedule": crontab(hour=7, minute=15),
             "options": _MAINTENANCE_OPTS,
         },
         "cache_eviction": {

@@ -28,8 +28,9 @@ from src.matching.rules import ApplicantContext, RuleResult, RuleVerdict, check_
 from src.matching.semantic import (
     build_applicant_text,
     collect_applicant_skills,
-    compute_keyword_similarity,
     compute_skill_overlap,
+    compute_text_similarity,
+    embed_text_local,
 )
 
 logger = logging.getLogger("autoapply.matching.scorer")
@@ -100,6 +101,10 @@ class ScoringContext:
     applicant_skills: list[str]
     applicant_text: str
     weights: dict[str, float] = field(default_factory=lambda: DEFAULT_WEIGHTS.copy())
+    # Pre-computed local embedding of ``applicant_text`` (None when the
+    # local embedding path is disabled/unavailable). Embedding once per
+    # profile here instead of once per job keeps batch scoring cheap.
+    applicant_vector: list[float] | None = None
 
 
 def build_scoring_context(
@@ -116,11 +121,15 @@ def build_scoring_context(
     """
     from src.matching.rules import load_applicant_context
 
+    applicant_text = build_applicant_text(profile_data)
     return ScoringContext(
         applicant_ctx=applicant_ctx or load_applicant_context(profile_data),
         applicant_skills=collect_applicant_skills(profile_data),
-        applicant_text=build_applicant_text(profile_data),
+        applicant_text=applicant_text,
         weights=weights or DEFAULT_WEIGHTS.copy(),
+        # Redis-cached by content hash, so repeat searches (and repeat
+        # profiles with identical text) don't re-embed.
+        applicant_vector=embed_text_local(applicant_text),
     )
 
 
@@ -166,9 +175,14 @@ def score_job(
     pref_score = compute_skill_overlap(job.requirements.preferred_skills, ctx.applicant_skills)
     breakdown.skill_overlap = must_score * 0.7 + pref_score * 0.3
 
-    # 3. Keyword similarity
+    # 3. Text similarity — local embedding cosine (calibrated) when
+    # Ollama + nomic-embed-text are available, TF keyword overlap
+    # otherwise. Stored in the existing ``keyword_similarity`` field so
+    # breakdown consumers (UI popover, traces) need no schema change.
     jd_text = job.description or job.title
-    breakdown.keyword_similarity = compute_keyword_similarity(jd_text, ctx.applicant_text)
+    breakdown.keyword_similarity = compute_text_similarity(
+        jd_text, ctx.applicant_text, applicant_vector=ctx.applicant_vector
+    )
 
     # 4. Quality multiplier
     breakdown.quality_multiplier = _compute_quality_multiplier(job)
@@ -249,7 +263,10 @@ def _compute_quality_multiplier(job: RawJob) -> float:
     Signals:
       - Very short description → likely incomplete / spam
       - No application URL → can't apply
-      - Generic title → likely ghost posting
+      - Posting age → long-lived postings are likely evergreen/ghost
+        (companies collecting resumes without an open req). Age comes
+        from ``raw_data.first_seen_at`` (Job Index), Greenhouse's
+        ``first_published``/``updated_at``, or Lever's ``createdAt``.
     """
     multiplier = 1.0
 
@@ -262,4 +279,61 @@ def _compute_quality_multiplier(job: RawJob) -> float:
     if not job.application_url:
         multiplier *= 0.7  # No apply link
 
+    age_days = _posting_age_days(job)
+    if age_days is not None:
+        if age_days > 90:
+            multiplier *= 0.6  # Almost certainly evergreen/ghost
+        elif age_days > 60:
+            multiplier *= 0.75
+        elif age_days > 30:
+            multiplier *= 0.9
+
     return round(multiplier, 2)
+
+
+def _posting_age_days(job: RawJob) -> float | None:
+    """Best-effort posting age in days from whatever date signal exists.
+
+    Returns ``None`` when no parseable signal is present — unknown age
+    must never penalize (same "unknown passes" convention as the search
+    filters).
+    """
+    from datetime import UTC, datetime
+
+    raw = job.raw_data or {}
+    candidates = (
+        raw.get("first_seen_at"),  # Job Index (stashed by application.jobs)
+        raw.get("first_published"),  # Greenhouse API
+        raw.get("updated_at"),  # Greenhouse API fallback
+        raw.get("createdAt"),  # Lever API (epoch millis)
+        raw.get("publishedAt"),  # Ashby API (ISO string)
+    )
+    for value in candidates:
+        posted = _parse_posting_datetime(value)
+        if posted is not None:
+            age = (datetime.now(UTC) - posted).total_seconds() / 86400
+            return max(age, 0.0)
+    return None
+
+
+def _parse_posting_datetime(value: Any):
+    from datetime import UTC, datetime
+
+    if value is None:
+        return None
+    if isinstance(value, int | float):
+        # Lever uses epoch milliseconds; anything > 1e11 can't be seconds.
+        try:
+            seconds = value / 1000 if value > 1e11 else value
+            return datetime.fromtimestamp(seconds, tz=UTC)
+        except (ValueError, OSError, OverflowError):
+            return None
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed
+    return None

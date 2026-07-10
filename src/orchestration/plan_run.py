@@ -248,14 +248,23 @@ async def run_plan(
     del scrape_enabled  # Search currently always refreshes through search_jobs.
     search_fn = search_fn or _default_search_fn
     try:
-        search_result = await search_fn(
-            profile=search_profile_id or profile_id,
-            source="all",
-            score=False,  # we run scoring ourselves below so we can
-                          # capture the structured breakdowns
-            use_job_index=True,
-            include_views=True,
-        )
+        search_kwargs: dict[str, Any] = {
+            "profile": search_profile_id or profile_id,
+            "source": "all",
+            "score": False,  # we run scoring ourselves below so we can
+                             # capture the structured breakdowns
+            "use_job_index": True,
+            "include_views": True,
+        }
+        # 2026-07-08: apply the SAVED SEARCH PROFILE's filters. Previously
+        # only ``profile=`` (the intake filter-profile name) was passed, so
+        # the keywords / locations / experience levels / pay floor the
+        # user configured in config/search_profiles.yaml were silently
+        # ignored — overnight runs fetched entire company boards and
+        # surfaced London / ANZ / senior roles against a Portland+Dallas
+        # entry-level profile.
+        search_kwargs.update(_saved_search_profile_kwargs(search_profile_id))
+        search_result = await search_fn(**search_kwargs)
     except Exception as exc:  # noqa: BLE001 -- worker must keep going
         logger.exception("plan_run search failed; run_id=%s", run_id)
         finished_at = now_fn()
@@ -499,6 +508,71 @@ async def _default_search_fn(**kwargs: Any) -> dict[str, Any]:
     from src.application.jobs import search_jobs
 
     return await search_jobs(**kwargs)
+
+
+def _saved_search_profile_kwargs(search_profile_id: str | None) -> dict[str, Any]:
+    """Map a config/search_profiles.yaml entry onto search_jobs kwargs.
+
+    Mirrors the field mapping in ``POST /api/jobs/search`` so an
+    overnight plan run applies exactly the same filters the user sees
+    when running the identical saved profile in the Jobs tab. Missing /
+    unreadable profiles return ``{}`` (legacy behavior: board-wide
+    fetch filtered only by the intake filter profile).
+    """
+    if not search_profile_id:
+        return {}
+    try:
+        from src.application.search_profiles import load_search_profiles_data
+
+        profiles = {
+            entry["id"]: entry
+            for entry in load_search_profiles_data().get("profiles", [])
+        }
+    except Exception:  # noqa: BLE001 -- config trouble -> legacy behavior
+        logger.warning(
+            "Saved search profile lookup failed for %r; searching unfiltered.",
+            search_profile_id,
+            exc_info=True,
+        )
+        return {}
+    saved = profiles.get(search_profile_id)
+    if not isinstance(saved, dict):
+        logger.warning(
+            "Saved search profile %r not found in search_profiles.yaml; "
+            "overnight search will be unfiltered.",
+            search_profile_id,
+        )
+        return {}
+
+    kwargs: dict[str, Any] = {}
+    if saved.get("source"):
+        kwargs["source"] = saved["source"]
+    if saved.get("keywords"):
+        kwargs["keywords"] = list(saved["keywords"])
+    for field in (
+        "ats",
+        "company",
+        "time_filter",
+        "pay_operator",
+        "experience_operator",
+    ):
+        if saved.get(field):
+            kwargs[field] = saved[field]
+    for field in (
+        "experience_levels",
+        "employment_types",
+        "location_types",
+        "locations",
+        "education_levels",
+    ):
+        if saved.get(field):
+            kwargs[field] = list(saved[field])
+    for field in ("pay_amount", "experience_years", "max_pages"):
+        if saved.get(field) is not None:
+            kwargs[field] = saved[field]
+    if saved.get("location"):
+        kwargs["search_location"] = saved["location"]
+    return kwargs
 
 
 def _coerce_job_to_rawjob(job: Any) -> Any | None:

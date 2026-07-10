@@ -470,24 +470,132 @@ def _max_bullets_per_entity(manifest: TemplateManifest) -> int:
     return max(limits) if limits else 4
 
 
+_BATCH_REWRITE_SYSTEM = """/no_think
+You are a resume bullet editor. Rewrite each numbered bullet to naturally incorporate relevant job keywords while preserving every fact.
+
+Return ONLY a JSON object:
+{"rewritten_bullets": ["...", "...", ...]}
+
+Rules:
+- Return exactly as many bullets as given, in the same order
+- If a bullet ALREADY contains a target keyword, return it unchanged — never
+  paraphrase an existing keyword match away
+- Preserve every number, metric, and named tool exactly as written; NEVER add
+  a number that is not in the original bullet
+- Do NOT invent claims not present in the original bullet
+- Never swap plain words for fancier synonyms; only change wording to insert
+  a target keyword truthfully
+- Spread keywords across bullets — avoid repeating the same keyword in multiple bullets
+- Keep professional tone throughout
+- Inline markup (optional, use sparingly): **bold** for one key skill or metric per bullet, *italics* for proper nouns"""
+
+# The leading "/no_think" is Qwen3's soft switch disabling thinking mode for
+# the turn — a 16-bullet structured-JSON task on a thinking model was
+# producing 300s timeouts and malformed outputs (2026-07-09 logs). Other
+# model families ignore the token harmlessly.
+
+# Bullets per LLM call. One 16-bullet JSON was fragile (wrong-count /
+# non-list responses discarded ALL tailoring); smaller chunks fail
+# independently and parse reliably.
+_BATCH_REWRITE_CHUNK_SIZE = 8
+
+
 def _rewrite_grouped_evidence(
     grouped: dict[str, list[EvidenceBullet]],
     jd_tags: list[str],
     *,
     mode: str = "balanced",
 ) -> dict[str, list[EvidenceBullet]]:
-    rewritten_text = rewrite_bullets(
-        {entity: [item.text for item in items] for entity, items in grouped.items()},
-        jd_tags,
-        mode=mode,
-    )
-    rewritten: dict[str, list[EvidenceBullet]] = {}
+    """Rewrite all bullets in a single LLM call (batch mode).
+
+    Sends every bullet at once with the JD keywords and gets back a
+    rewritten list in the same order. Falls back to originals if the
+    call fails or the model returns the wrong number of bullets.
+    """
+    from src.utils.llm import generate_json  # noqa: PLC0415
+
+    if not jd_tags:
+        return grouped
+
+    # Flatten all bullets, tracking position so we can reconstruct later
+    flat: list[str] = []
+    index_map: list[tuple[str, int]] = []
     for entity, items in grouped.items():
-        texts = rewritten_text.get(entity, [])
-        rewritten[entity] = [
-            item.model_copy(update={"render_text": texts[index]}) if index < len(texts) else item
-            for index, item in enumerate(items)
-        ]
+        for i, item in enumerate(items):
+            flat.append(item.text)
+            index_map.append((entity, i))
+
+    if not flat:
+        return grouped
+
+    keywords_str = ", ".join(jd_tags[:15])
+
+    mode_hint = {
+        "conservative": "Make the smallest possible change — swap at most 1-2 words per bullet.",
+        "aggressive": "Rewrite freely while keeping every fact and number grounded.",
+    }.get(mode, "Sensible rewrites — adjust word choice, keep meaning and structure.")
+
+    # 2026-07-09: chunked + guarded. The previous single 16-bullet call
+    # had two failure modes seen in production logs the same day:
+    # (1) malformed / wrong-count responses discarded ALL tailoring for
+    # a resume; (2) the batch path skipped _rewrite_regression_guard,
+    # so an invented number reached a rendered resume (caught only as a
+    # post-hoc validation WARNING). Chunks fail independently, and every
+    # accepted rewrite now passes the same deterministic guard as the
+    # per-bullet path.
+    validated: list[str] = list(flat)  # default: originals
+    call_count = 0
+    for chunk_start in range(0, len(flat), _BATCH_REWRITE_CHUNK_SIZE):
+        chunk = flat[chunk_start : chunk_start + _BATCH_REWRITE_CHUNK_SIZE]
+        bullets_block = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(chunk))
+        prompt = (
+            f"Target keywords: {keywords_str}\n\n"
+            f"Mode: {mode_hint}\n\n"
+            f"Bullets to rewrite:\n{bullets_block}\n\n"
+            f"Return a JSON object with key 'rewritten_bullets' — "
+            f"a list of exactly {len(chunk)} rewritten bullets in the same order."
+        )
+        try:
+            result = generate_json(prompt, system=_BATCH_REWRITE_SYSTEM, timeout=300)
+            call_count += 1
+            rewrites = (
+                (result or {}).get("rewritten_bullets") if isinstance(result, dict) else None
+            )
+            if not (isinstance(rewrites, list) and len(rewrites) == len(chunk)):
+                logger.warning(
+                    "Batch rewrite chunk returned %s bullets, expected %d — "
+                    "keeping originals for this chunk",
+                    len(rewrites) if isinstance(rewrites, list) else "non-list",
+                    len(chunk),
+                )
+                continue
+            for offset, (orig, rw) in enumerate(zip(chunk, rewrites)):
+                rw_text = str(rw).strip() if rw else ""
+                if not rw_text or len(rw_text) > len(orig) * 2.5 or len(rw_text) < len(orig) * 0.25:
+                    continue  # keep original
+                validated[chunk_start + offset] = _rewrite_regression_guard(
+                    orig, rw_text, keywords_str
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Batch rewrite chunk failed (%s), keeping originals for this chunk", exc
+            )
+
+    rewritten: dict[str, list[EvidenceBullet]] = {
+        e: list(items) for e, items in grouped.items()
+    }
+    for idx, (entity, bullet_idx) in enumerate(index_map):
+        item = rewritten[entity][bullet_idx]
+        rewritten[entity][bullet_idx] = item.model_copy(
+            update={"render_text": validated[idx]}
+        )
+    changed = sum(1 for orig, final in zip(flat, validated) if orig != final)
+    logger.info(
+        "Batch bullet rewrite: %d bullets, %d LLM call(s), %d accepted rewrites",
+        len(flat),
+        call_count,
+        changed,
+    )
     return rewritten
 
 
@@ -668,6 +776,17 @@ def extract_jd_tags(job: RawJob) -> list[str]:
         elif keyword in searchable_tokens:
             tags.append(keyword)
 
+    # 2026-07-08: augment with small-tier LLM extraction. The hardcoded
+    # tech vocabulary above is SWE-only — for solutions-consultant / TAM /
+    # CSM / analyst JDs it fires on almost nothing, which starved bullet
+    # selection, rewrite targeting, and skill prioritization for the
+    # user's actual target roles. The LLM sees the real JD language
+    # ("technical discovery", "time to value", "demos", "design systems")
+    # and returns it. Cached by prompt, heuristic-only on any failure.
+    # Only generation paths call extract_jd_tags, so search speed is
+    # unaffected.
+    tags.extend(_llm_jd_keywords(job))
+
     # Deduplicate preserving order
     seen = set()
     unique = []
@@ -677,6 +796,51 @@ def extract_jd_tags(job: RawJob) -> list[str]:
             unique.append(tag)
 
     return unique
+
+
+_JD_KEYWORDS_SYSTEM = """You extract resume-targeting keywords from job descriptions.
+
+Return ONLY a JSON array of 10-15 lowercase strings. Each entry must be:
+- a skill, tool, methodology, deliverable, or role-specific competency the
+  employer screens for (e.g. "technical discovery", "demos", "time to value",
+  "sql", "stakeholder management", "design systems", "presales")
+- 1-4 words, exactly as a resume should mirror it
+- concrete — never generic filler like "communication" alone, "fast-paced
+  environment", "team player", or benefits/EEO language
+
+No prose, no objects, no explanations — just the JSON array."""
+
+
+def _llm_jd_keywords(job: RawJob) -> list[str]:
+    """Small-tier keyword extraction with strict output validation."""
+    description = (job.description or "").strip()
+    if len(description) < 200:
+        return []
+    from src.utils.llm import generate_json  # noqa: PLC0415
+
+    try:
+        result = generate_json(
+            f"Job title: {job.title}\n\nJob description:\n{description[:6000]}",
+            system=_JD_KEYWORDS_SYSTEM,
+            timeout=120,
+            cache=True,
+            tier="small",
+        )
+    except Exception:  # noqa: BLE001 -- extraction is an enhancement, never a blocker
+        logger.debug("LLM JD keyword extraction skipped", exc_info=True)
+        return []
+
+    if not isinstance(result, list):
+        return []
+    keywords = []
+    for item in result[:20]:
+        if not isinstance(item, str):
+            continue
+        cleaned = item.strip().lower()
+        # Reject mega-tags (whole requirement sentences) and junk.
+        if 2 <= len(cleaned) <= 40 and len(cleaned.split()) <= 4:
+            keywords.append(cleaned)
+    return keywords
 
 
 def select_bullets_for_jd(
@@ -787,9 +951,8 @@ async def _rewrite_bullets_async(
                 )
                 new_text = rewrite.rewritten_bullet
                 if (
-                    rewrite.changed_claims
-                    or len(new_text) > len(bullet) * 2
-                    or len(new_text) < len(bullet) * 0.3
+                    len(new_text) > len(bullet) * 2.5
+                    or len(new_text) < len(bullet) * 0.25
                 ):
                     logger.warning("Rewrite drift detected for bullet, keeping original")
                     return bullet
@@ -807,6 +970,19 @@ async def _rewrite_bullets_async(
 
 _REWRITE_SYSTEM_BASE = """You are a resume bullet point editor. Your job is to adjust
 a resume bullet to better match target job keywords while preserving facts.
+
+CRITICAL constraints (apply in every mode):
+- If the original bullet ALREADY contains a target keyword, that exact
+  wording is sacred — never paraphrase it away. ("cutting time-to-value"
+  must stay "time-to-value" when time-to-value is a target keyword;
+  "demo conversion" must keep the word "demo" when demos are targeted.)
+- NEVER swap plain words for fancier synonyms. "Redesigned onboarding"
+  must not become "Overhauled the customer integration lifecycle".
+  Recruiters and screening software both prefer the plain term.
+- The ONLY permitted change is inserting or substituting toward TARGET
+  KEYWORDS where truthful. If no keyword fits naturally, return the
+  original bullet verbatim.
+- Never make the bullet longer than the original by more than a few words.
 
 Return ONLY a JSON object with exactly this shape:
 {
@@ -951,14 +1127,94 @@ def _rewrite_single_bullet(
         f"Original bullet: {bullet}\n\n"
         f"Rewrite the bullet to naturally incorporate relevant keywords."
     )
-    result = generate_json(prompt, system=_rewrite_system_for(mode), timeout=60)
+    result = generate_json(prompt, system=_rewrite_system_for(mode), timeout=300)
     if isinstance(result, str):
         cleaned = _clean_llm_bullet_rewrite_output(result, bullet)
+        cleaned = _rewrite_regression_guard(bullet, cleaned, keywords)
         return BulletRewriteResult(rewritten_bullet=cleaned)
 
     parsed = BulletRewriteResult.model_validate(result)
     cleaned = _clean_llm_bullet_rewrite_output(parsed.rewritten_bullet, bullet)
+    cleaned = _rewrite_regression_guard(bullet, cleaned, keywords)
     return parsed.model_copy(update={"rewritten_bullet": cleaned})
+
+
+def _rewrite_regression_guard(original: str, rewritten: str, keywords: str) -> str:
+    """Return ``original`` when the rewrite made the bullet WORSE.
+
+    2026-07-08 (user report, Figma resume): the local-model rewriter was
+    paraphrasing exact JD matches out of bullets — the JD said "time to
+    value" and "demos", the original bullets contained both, and the
+    rewrite replaced them with "initial value realization" and
+    "trial-to-pipeline progression". A rewrite exists to ADD keyword
+    alignment; any rewrite that reduces it is strictly worse than a
+    no-op, so we detect three regressions deterministically and keep the
+    original bullet:
+
+      1. a target keyword present in the original is missing from the
+         rewrite (keyword destruction — the Figma case);
+      2. a number/metric in the original is missing (fact loss);
+      3. the rewrite inflates the word count noticeably (thesaurus prose).
+    """
+    if not rewritten or not rewritten.strip():
+        return original
+
+    def _plain(text: str) -> str:
+        # Strip the permitted **bold** / *italic* markup and normalize
+        # separators so "time-to-value" == "time to value".
+        text = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", text)
+        return re.sub(r"[\s\-–—/]+", " ", text.lower())
+
+    original_plain = _plain(original)
+    rewritten_plain = _plain(rewritten)
+
+    # 1. Keyword destruction. Match on word boundaries and accept simple
+    # singular/plural variants ("demos" keyword must recognise "demo
+    # conversion" in the original — the exact Figma failure).
+    def _contains(text: str, phrase: str) -> bool:
+        variants = {phrase}
+        variants.add(phrase[:-1] if phrase.endswith("s") else phrase + "s")
+        return any(
+            re.search(rf"\b{re.escape(variant)}\b", text) for variant in variants
+        )
+
+    for raw_keyword in (keywords or "").split(","):
+        phrase = _plain(raw_keyword.strip())
+        if len(phrase) < 3:
+            continue
+        if _contains(original_plain, phrase) and not _contains(rewritten_plain, phrase):
+            logger.info(
+                "rewrite guard: keeping original bullet (rewrite dropped "
+                "matched keyword %r)",
+                raw_keyword.strip(),
+            )
+            return original
+    # 2. Fact loss: every number in the original must survive.
+    for number in re.findall(r"\d+(?:[.,]\d+)?%?", original_plain):
+        if number not in rewritten_plain:
+            logger.info(
+                "rewrite guard: keeping original bullet (rewrite dropped %r)",
+                number,
+            )
+            return original
+    # 2b. Fact invention: the rewrite must not ADD numbers either — an
+    # invented metric reached a rendered resume on 2026-07-09
+    # ("added_unverified_number" validation warning, Foundation
+    # Medicine). Rewritten numbers must be a subset of the original's.
+    original_numbers = set(re.findall(r"\d+(?:[.,]\d+)?", original_plain))
+    for number in re.findall(r"\d+(?:[.,]\d+)?", rewritten_plain):
+        if number not in original_numbers:
+            logger.info(
+                "rewrite guard: keeping original bullet (rewrite ADDED %r)",
+                number,
+            )
+            return original
+    # 3. Thesaurus inflation.
+    if len(rewritten_plain.split()) > len(original_plain.split()) * 1.35 + 3:
+        logger.info("rewrite guard: keeping original bullet (rewrite inflated length)")
+        return original
+
+    return rewritten
 
 
 _LENGTH_REWRITE_SYSTEM = """You are a resume bullet editor adjusting bullet
@@ -1020,7 +1276,7 @@ def _rewrite_bullet_for_length(
         f"{instruction}\n\n"
         "Return the JSON object specified by the system instructions."
     )
-    result = generate_json(prompt, system=_LENGTH_REWRITE_SYSTEM, timeout=60)
+    result = generate_json(prompt, system=_LENGTH_REWRITE_SYSTEM, timeout=300)
     if isinstance(result, str):
         return _clean_llm_bullet_rewrite_output(result, bullet)
     parsed = BulletRewriteResult.model_validate(result)
@@ -1062,7 +1318,7 @@ def _resize_document_bullets(
 # Upper bound on Fit-Planner rounds. Each round = at most 1 LLM call +
 # 1 render + 1 PDF convert. Two rounds keep the total wall time within
 # the front-end's poll budget even on slow LLM providers.
-_MAX_FIT_PLAN_ROUNDS = 2
+_MAX_FIT_PLAN_ROUNDS = 1
 
 
 def _render_resume_to_target_pages(
@@ -1338,7 +1594,7 @@ def _generate_resume_fit_plan(
         "\nReturn the JSON object specified by the system instructions.\n"
     )
 
-    result = generate_json(prompt, system=_FIT_PLAN_SYSTEM, timeout=60)
+    result = generate_json(prompt, system=_FIT_PLAN_SYSTEM, timeout=300)
     if not isinstance(result, dict):
         raise ValueError(f"Fit plan response is not a JSON object: {type(result).__name__}")
     sections_raw = result.get("sections")

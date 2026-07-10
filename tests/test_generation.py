@@ -799,6 +799,14 @@ class TestResumeIR:
             patch("src.generation.resume_builder.build_resume_from_ir", side_effect=fake_render),
             patch("src.generation.resume_builder.convert_to_pdf", side_effect=fake_pdf),
             patch("src.documents.page_count.get_pdf_page_count", side_effect=fake_page_count),
+            # Keep the fit planner's LLM length-rewrite out of this test:
+            # unpatched it makes a REAL Ollama call when the server is up
+            # (minutes per attempt) and only falls back to the bullet-drop
+            # path under test when Ollama is unreachable.
+            patch(
+                "src.generation.resume_builder._rewrite_bullet_for_length",
+                side_effect=lambda bullet, **kwargs: bullet,
+            ),
         ):
             final_doc, docx_path, pdf_path = _render_resume_to_target_pages(
                 resume_document=document,

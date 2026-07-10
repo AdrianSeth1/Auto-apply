@@ -165,6 +165,11 @@ class JobApplyPayload(BaseModel):
     url: str
 
 
+class DbJobsGeneratePayload(BaseModel):
+    job_ids: list[str]
+    document_types: list[str] = Field(default_factory=lambda: ["resume", "cover_letter"])
+
+
 class JobMaterialPayload(BaseModel):
     job: dict
     material_type: str
@@ -391,6 +396,111 @@ async def dashboard_data() -> dict:
     return load_dashboard_data()
 
 
+class QuestionDraftPayload(BaseModel):
+    """Materials → Questions: collaborative application-answer drafting."""
+
+    question: str
+    company: str = ""
+    title: str = ""
+    profile_id: str = ""
+    clarifications: list[dict] = []
+
+
+class QuestionSavePayload(BaseModel):
+    question: str
+    answer: str
+
+
+@router.post("/qa/draft")
+async def qa_draft(payload: QuestionDraftPayload) -> dict:
+    """Draft a grounded answer; may return clarifying questions for the user.
+
+    Runs in its own thread so the (long) local-LLM call doesn't stall
+    the shared event loop — same rationale as /jobs/apply.
+    """
+    import asyncio
+
+    from src.application.question_answers import draft_question_answer
+
+    return await asyncio.to_thread(
+        lambda: draft_question_answer(
+            question=payload.question,
+            company=payload.company,
+            title=payload.title,
+            profile_id=payload.profile_id or None,
+            clarifications=[
+                {"question": str(c.get("question", "")), "answer": str(c.get("answer", ""))}
+                for c in payload.clarifications
+                if isinstance(c, dict)
+            ],
+        )
+    )
+
+
+@router.post("/qa/save")
+async def qa_save(payload: QuestionSavePayload) -> dict:
+    from src.application.question_answers import save_question_answer
+
+    result = save_question_answer(question=payload.question, answer=payload.answer)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@router.get("/qa/bank")
+async def qa_bank() -> dict:
+    from src.application.question_answers import list_saved_answers
+
+    return {"ok": True, **list_saved_answers()}
+
+
+@router.delete("/qa/bank/{entry_id}")
+async def qa_delete(entry_id: str) -> dict:
+    from src.application.question_answers import delete_saved_answer
+
+    result = delete_saved_answer(entry_id=entry_id)
+    if not result["ok"]:
+        status = 404 if result["error_code"] == "not_found" else 400
+        raise HTTPException(status_code=status, detail=result["error"])
+    return result
+
+
+@router.post("/email/ingest")
+async def email_ingest_now(dry_run: bool = False) -> dict:
+    """Run Gmail reply ingestion immediately (also runs on Beat 4x/day).
+
+    ``dry_run=true`` classifies and matches without writing outcomes —
+    useful for verifying the classifier before trusting it.
+    """
+    from src.intake.email_ingest import ingest_replies
+
+    return ingest_replies(dry_run=dry_run)
+
+
+@router.get("/email/followups")
+async def email_followups(after_days: int = 10) -> dict:
+    """Submitted applications with no reply in ``after_days`` days."""
+    from src.intake.email_ingest import list_followup_candidates
+
+    return {
+        "ok": True,
+        "after_days": after_days,
+        "followups": list_followup_candidates(after_days=max(1, min(after_days, 90))),
+    }
+
+
+@router.get("/analytics/outcomes")
+async def outcome_analytics() -> dict:
+    """Response/positive rates by score band and resume profile.
+
+    Answers "does a 0.75 match score actually predict replies?" and
+    "which of my resume variants converts?" from submitted applications.
+    """
+    from src.application.analytics import load_outcome_analytics
+
+    return load_outcome_analytics()
+
+
 @router.post("/jobs/search")
 async def search_jobs(payload: JobSearchPayload) -> dict:
     return await search_jobs_usecase(
@@ -416,8 +526,48 @@ async def search_jobs(payload: JobSearchPayload) -> dict:
         use_job_index=True,
         headless=True,
         score=True,
+        # Surface "results could not be scored" instead of silently
+        # returning unsorted jobs when no applicant profile is active.
+        warn_on_missing_profile=True,
         allow_public_linkedin_fallback=False,
         include_views=True,
+    )
+
+
+@router.get("/jobs/db")
+def list_db_jobs(
+    q: str = "",
+    location: str = "",
+    employment_type: str = "",
+    seniority: str = "",
+    source: str = "",
+    company: str = "",
+    limit: int = 20,
+    offset: int = 0,
+) -> dict:
+    """Browse jobs persisted in the local database with filters."""
+    from src.application.job_database import list_db_jobs as list_db_jobs_usecase
+
+    return list_db_jobs_usecase(
+        q=q,
+        location=location,
+        employment_type=employment_type,
+        seniority=seniority,
+        source=source,
+        company=company,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post("/jobs/db/generate-materials")
+def generate_db_job_materials(payload: DbJobsGeneratePayload) -> dict:
+    """Queue materials generation for selected stored jobs."""
+    from src.application.job_database import generate_materials_for_db_jobs
+
+    return generate_materials_for_db_jobs(
+        job_ids=payload.job_ids,
+        document_types=payload.document_types,
     )
 
 
@@ -973,11 +1123,24 @@ async def _read_upload_limited(upload: UploadFile) -> bytes:
 
 @router.post("/jobs/apply")
 async def apply_job(payload: JobApplyPayload) -> dict:
-    result = await apply_to_url(
-        url=payload.url,
-        auto_submit=False,
-        headless=True,
-        dry_run=False,
+    # 2026-07-07: run the whole apply pipeline in its own thread + event
+    # loop. The pipeline contains blocking sections (LLM calls, DOCX/PDF
+    # rendering, Playwright startup) that previously stalled the shared
+    # event loop — clicking AutoApply on several jobs left EVERY button
+    # stuck on "Applying…" until the last one finished, because completed
+    # jobs' HTTP responses couldn't be flushed past the blocked loop.
+    # LLM concurrency stays bounded: the Phase 18.5 gates are
+    # threading.Semaphore, shared across threads and event loops.
+    import asyncio
+
+    result = await asyncio.to_thread(
+        asyncio.run,
+        apply_to_url(
+            url=payload.url,
+            auto_submit=False,
+            headless=True,
+            dry_run=False,
+        ),
     )
 
     if result["ok"]:
@@ -1043,6 +1206,45 @@ async def update_outcome(application_id: str, payload: OutcomePayload) -> dict:
         if result["error_code"] == "application_not_found":
             raise HTTPException(status_code=404, detail=result["error"])
         raise HTTPException(status_code=500, detail=result["error"])
+
+    # Auto-generate an interview prep pack the moment an outcome flips
+    # to "interview" — that's when the user actually needs it.
+    # Best-effort: never fails the outcome update.
+    from src.application.prep import maybe_generate_prep_pack_on_interview
+
+    maybe_generate_prep_pack_on_interview(
+        application_id=application_uuid, outcome=payload.outcome
+    )
+    return result
+
+
+@router.post("/applications/{application_id}/prep-pack")
+async def create_prep_pack(application_id: str, profile_id: str = "") -> dict:
+    """Generate a one-page interview prep pack for an application.
+
+    Maps the profile's story bank onto the JD (deterministic, no LLM) and
+    writes markdown under ``data/output/prep/``. Uses the job's
+    ``best_profile`` when recorded, else the active profile; an explicit
+    ``profile_id`` query param overrides both.
+    """
+    try:
+        from uuid import UUID
+
+        application_uuid = UUID(application_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid application ID") from exc
+
+    from src.application.prep import generate_prep_pack
+
+    result = generate_prep_pack(
+        application_id=application_uuid, profile_id=profile_id or None
+    )
+    if not result["ok"]:
+        if result["error_code"] == "application_not_found":
+            raise HTTPException(status_code=404, detail=result["error"])
+        if result["error_code"] == "profile_missing":
+            raise HTTPException(status_code=409, detail=result["error"])
+        raise HTTPException(status_code=500, detail=result["error"])
     return result
 
 
@@ -1068,6 +1270,31 @@ async def delete_application(
     result = soft_delete_application(
         application_id=application_uuid, cascade=cascade
     )
+    if not result["ok"]:
+        if result["error_code"] == "application_not_found":
+            raise HTTPException(status_code=404, detail=result["error"])
+        raise HTTPException(status_code=500, detail=result["error"])
+    return result
+
+
+@router.post("/applications/{application_id}/mark-submitted")
+async def mark_application_submitted(application_id: str) -> dict:
+    """User confirms a manual (by-hand) ATS submission.
+
+    Sets SUBMITTED + submitted_at and clears matching review entries —
+    the honest counterpart to the Phase 18 rule that automation must
+    never fake a submission.
+    """
+    try:
+        from uuid import UUID
+
+        application_uuid = UUID(application_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid application ID") from exc
+
+    from src.application.tracking import mark_application_submitted_manually
+
+    result = mark_application_submitted_manually(application_id=application_uuid)
     if not result["ok"]:
         if result["error_code"] == "application_not_found":
             raise HTTPException(status_code=404, detail=result["error"])

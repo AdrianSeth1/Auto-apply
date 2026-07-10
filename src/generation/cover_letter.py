@@ -550,78 +550,77 @@ def _cl_system_prompt(
     )
     if pages == 1:
         structure = (
-            "1. OPENING (2 sentences): Candidate positioning, role title, "
-            "company, and the specific engineering direction this role fits.\n\n"
-            "2. CAPABILITY PARAGRAPH 1 (3-4 sentences): Use Claim -> Evidence "
-            "-> Relevance for capability bucket #1.\n\n"
-            "3. CAPABILITY PARAGRAPH 2 (3-4 sentences): Use Claim -> Evidence "
-            "-> Relevance for capability bucket #2.\n\n"
-            "4. WORK STYLE / COMPANY CONTEXT (2-3 sentences): Connect the "
-            "role/company context to engineering habits such as maintainability, "
-            "testing, reliability, documentation, or collaboration.\n\n"
-            "5. CLOSE (2 sentences): Concisely return to the role's most "
-            "important capability keywords."
+            "1. OPEN (2-3 sentences): Who the applicant is in ONE plain sentence, "
+            "then connect their background to the single most important thing the "
+            "job description says this person will DO (the top item under 'what "
+            "you'll do' or equivalent). Never open with enthusiasm boilerplate or "
+            "an identity that doesn't match the job title.\n\n"
+            "2-3. TWO PROOF PARAGRAPHS (3-4 sentences each): Each one picks a "
+            "different top task/pain point from the job description and tells ONE "
+            "specific thing the applicant actually did about that kind of problem, "
+            "with the outcome. Tell it plainly, like relaying it to a colleague: "
+            "'At SDS, I redesigned onboarding and cut time-to-value about 30%.' "
+            "Not a thesis. Not 'This experience demonstrates my ability to...'\n\n"
+            "4. CLOSE (2-3 sentences): One specific observation about the role or "
+            "what the company is building, drawn from the job description (real "
+            "specificity, not flattery), then a simple direct close."
         )
-        paragraph_rule = "Use exactly 5 paragraphs separated by blank lines"
+        paragraph_rule = "Use exactly 4 paragraphs separated by blank lines"
     else:
         extra_evidence = max(1, pages - 1)
+        paragraph_count = 2 + extra_evidence + 2
         structure = (
-            "1. OPENING (3-4 sentences): Candidate positioning, role title, "
-            "company, and the specific engineering direction this role fits.\n\n"
-            "2. CAPABILITY PARAGRAPHS (multiple): Provide "
-            f"{2 + extra_evidence} evidence paragraphs of 4-5 sentences each, "
-            "each organized around one role-relevant capability bucket with "
-            "Claim -> Evidence -> Relevance.\n\n"
-            "3. WORK STYLE / COMPANY CONTEXT (3-4 sentences): Explain how the "
-            "role's constraints fit the applicant's engineering habits.\n\n"
-            "4. CLOSE (2-3 sentences): Return to the role's most important "
-            "capability keywords."
+            "Same philosophy, more room: open plainly, then "
+            f"{2 + extra_evidence} proof paragraphs (each = one of THEIR tasks + "
+            "one specific thing the applicant did about it + outcome), then a "
+            "role-specific close."
         )
-        paragraph_count = 2 + extra_evidence + 2  # opening + evidence + tie-in + close
         paragraph_rule = (
             f"Use exactly {paragraph_count} paragraphs separated by blank lines"
         )
-    return f"""You are a professional cover letter writer. Generate a compelling
-cover letter body sized for a {pages}-page letter.
+    return f"""You write cover letters that sound like a capable person talking,
+not like an AI or a formal essay. A good cover letter is a clear, honest note
+from the applicant to the hiring manager: here's what you need done, here's
+proof I've done that kind of thing. Sized for a {pages}-page letter.
 
 Primary objective:
-Do not summarize the resume. Build an evidence-based argument that the candidate
-fits this specific role.
+Connect the applicant's real experience to THIS job's top 2-3 tasks. Do not
+summarize the resume. Do not build an abstract argument.
 
-Role type: {role_type}
+Role type: {role_type} — the applicant must sound like someone applying for
+THIS kind of role, in this role's vocabulary (use the job description's own
+words for tools and tasks, e.g. if they say "CRM", say "CRM").
 
-Capability buckets to use:
+Capability buckets to draw evidence from:
 {capability_block}
 
-Follow this EXACT structure:
+Follow this structure:
 
 {structure}
 
-Process:
-- Structure the letter around role-relevant capabilities, not project names.
-- Use project/work examples only as evidence for a capability claim.
-- For each body paragraph, use Claim -> Evidence -> Relevance.
-- Include one company or role-context sentence that is specific but not flattering.
-- Use specific engineering fit instead of generic enthusiasm.
-- Mention the exact job title at most once. If the title contains a term,
-  season, year, or slash-heavy label, rephrase it naturally after the opening
-  as "this role", "the position", "the team", or a concise role family.
+Voice rules (the most important part):
+- Read-aloud test: every sentence must sound natural spoken to a colleague.
+  If it sounds like corporate writing, say it plainer.
+- Plain verbs. "built", "ran", "cut", "fixed", "led" — never "spearheaded",
+  "leveraged", "utilized", "orchestrated", "delved", "fostered".
+- Ban these words/phrases entirely: "passionate", "excited to apply",
+  "strong candidate", "valuable addition", "perfect fit", "resonates",
+  "aligns with my", "robust", "comprehensive", "cutting-edge", "seamless",
+  "I believe my skills", "proven track record".
+- Vary sentence length. Some short. It reads human.
+- Confidence without adjectives: let the numbers and specifics carry it.
+- Mention the exact job title at most once; afterwards say "this role" or
+  "the team".
 
-Rules:
+Hard rules:
 - Total length: {min_words}-{max_words} words (aim for around {target_words}).
 - {paragraph_rule}.
-- Tone: confident but not arrogant, specific but not verbose.
-- Do NOT use clichés like "I am writing to express my interest"
-  or "I believe I would be a great fit".
-- Do NOT use generic phrases like "passionate", "strong candidate",
-  "valuable addition", or "perfect fit".
-- Do NOT fabricate experiences, skills, or achievements not in the provided profile.
+- Do NOT fabricate experiences, skills, or achievements not in the provided
+  profile/evidence/stories.
 - Do NOT include a greeting line (Dear Hiring Manager)
   or sign-off (Sincerely), those are added separately.
 - Do NOT use em dashes or en dashes. Prefer commas, periods, or semicolons.
-- Do NOT list more than 4 technologies in one sentence.
-- Every technology mention must support maintainability, testing/debugging,
-  reliability, integration, security, performance, or user-facing impact.
+- Do NOT list more than 3 technologies in one sentence.
 
 Inline formatting (use sparingly, OPTIONAL):
 - ``**text**`` -- bold for a small number of named technologies or
@@ -972,6 +971,114 @@ def _format_role_references_for_prompt(role_refs: dict[str, str]) -> str:
     )
 
 
+_CRITIQUE_SYSTEM_PROMPT = """You are a strict editor reviewing a cover letter draft \
+against a checklist. Return ONLY JSON: {"pass": bool, "problems": ["..."]}.
+
+A draft PASSES only if ALL of the following hold:
+(a) It references the company's actual product, mission, or domain -- not just the
+    company name dropped into a generic sentence.
+(b) It includes at least one concrete, specific accomplishment with a stated outcome
+    (a number, a result, a concrete deliverable) -- not just a listed responsibility.
+(c) It contains no filler sentences that could appear in any cover letter for any
+    company (e.g. "I am excited to apply...", "I believe my skills...", and similar
+    boilerplate).
+(d) It makes no claims that are absent from the evidence/stories provided with the draft.
+(e) The letter's self-description matches the ROLE TYPE in the job title. An
+    application for a consultant / solutions / presales / account / customer-success
+    title must NOT describe the applicant "as an engineer" or center engineering
+    infrastructure work; an engineering title must not frame them as a salesperson.
+    The opening sentence especially must read as the role being applied for.
+
+If any check fails, set "pass": false and list each failing check as a short, specific
+problem in "problems" (e.g. "opening never mentions what the company builds", "no
+accomplishment has a stated outcome", "letter describes an engineer but the title is
+Solutions Consultant"). If all checks pass, return
+{"pass": true, "problems": []}."""
+
+
+def _cover_letter_critique_enabled() -> bool:
+    try:
+        from src.core.config import load_config  # noqa: PLC0415
+
+        raw = load_config().get("generation", {})
+    except Exception:  # noqa: BLE001 -- config trouble must not disable the enhancement path oddly
+        return True
+    if not isinstance(raw, dict):
+        return True
+    return bool(raw.get("cover_letter_critique", True))
+
+
+def _critique_cover_letter(draft: str, *, job: RawJob) -> list[str] | None:
+    """Run the self-critique checklist against ``draft``.
+
+    Returns a non-empty list of problems when the draft fails the
+    checklist, or ``None`` when it passes or the critique call itself
+    fails -- critique is an enhancement, never a blocker.
+    """
+    try:
+        from src.utils.llm import generate_json  # noqa: PLC0415
+
+        result = generate_json(
+            "<draft_cover_letter>\n"
+            f"{draft}\n"
+            "</draft_cover_letter>\n\n"
+            f"<job_title>{job.title}</job_title>\n"
+            "<job_description>\n"
+            f"{(job.description or '')[:2000]}\n"
+            "</job_description>",
+            system=_CRITIQUE_SYSTEM_PROMPT,
+            timeout=120,
+            tier="small",
+        )
+    except Exception:  # noqa: BLE001 -- critique is an enhancement, never a blocker
+        logger.debug("Cover letter critique call failed", exc_info=True)
+        return None
+
+    if not isinstance(result, dict) or result.get("pass"):
+        return None
+    problems = result.get("problems")
+    if not isinstance(problems, list):
+        return None
+    cleaned = [str(p).strip() for p in problems if str(p).strip()]
+    return cleaned or None
+
+
+def _apply_critique_revision(
+    draft: str,
+    *,
+    job: RawJob,
+    prompt: str,
+    system_prompt: str,
+) -> str:
+    """One critique -> revise cycle. Returns ``draft`` unchanged unless
+    the critique found problems AND the revision call succeeds."""
+    problems = _critique_cover_letter(draft, job=job)
+    if not problems:
+        return draft
+
+    critique_block = (
+        "\n<critique>\n"
+        "Your previous draft below has the following specific problems. "
+        "Rewrite it to fix ONLY these problems -- keep every grounded "
+        "claim and roughly the same length as the previous draft. Do not "
+        "introduce new problems.\n\n"
+        "Problems:\n"
+        + "\n".join(f"- {p}" for p in problems)
+        + "\n\nPrevious draft:\n"
+        + draft
+        + "\n</critique>\n\nOutput ONLY the revised cover letter body."
+    )
+    try:
+        from src.utils.llm import generate_text as _generate_text_revision  # noqa: PLC0415
+
+        revised = _generate_text_revision(f"{prompt}\n{critique_block}", system=system_prompt)
+    except Exception:  # noqa: BLE001 -- revision is an enhancement, never a blocker
+        logger.debug("Cover letter critique revision call failed", exc_info=True)
+        return draft
+    revised = (revised or "").strip()
+    return revised or draft
+
+
 def _generate_with_llm(
     job: RawJob,
     profile_data: dict[str, Any],
@@ -1002,8 +1109,42 @@ def _generate_with_llm(
     skill_summary = []
     for category, items in skills.items():
         if isinstance(items, list) and items:
-            skill_summary.append(f"{category}: {', '.join(items[:8])}")
+            str_items = [x for x in items if isinstance(x, str)]
+            if str_items:
+                skill_summary.append(f"{category}: {', '.join(str_items[:8])}")
     skills_text = "\n".join(skill_summary)
+
+    # 2026-07-08: the letter generator never saw the profile's story
+    # bank — its richest material (situation → action → result stories
+    # with real outcomes). Rank stories against THIS JD and hand the
+    # top two to the prompt with instructions to concretely weave ONE
+    # in. Letters built only from bullet fragments read like skill
+    # lists; a story is what makes one memorable.
+    stories_text = ""
+    story_bank = profile_data.get("story_bank") or []
+    if story_bank:
+        try:
+            from src.generation.prep_pack import rank_stories  # noqa: PLC0415
+
+            top_stories = rank_stories(
+                story_bank, title=job.title, description=job.description or ""
+            )[:2]
+            lines = []
+            for story, _score in top_stories:
+                lines.append(
+                    f"- [{story.get('theme', 'story')}] "
+                    f"Situation: {story.get('context', '')} "
+                    f"Action: {story.get('action', '')} "
+                    f"Result: {story.get('result', '')}"
+                )
+            if lines:
+                stories_text = (
+                    "\nProof stories (weave EXACTLY ONE into the letter, told "
+                    "specifically and briefly — the one most relevant to this "
+                    "role; do not summarize both):\n" + "\n".join(lines) + "\n"
+                )
+        except Exception:  # noqa: BLE001 -- stories are an enhancement, never a blocker
+            logger.debug("story ranking for cover letter skipped", exc_info=True)
 
     feedback_block = ""
     if length_feedback:
@@ -1022,6 +1163,13 @@ def _generate_with_llm(
         )
 
     prompt = f"""Write a cover letter body for this application.
+
+CRITICAL ROLE FRAMING: the applicant is applying to be a "{job.title}".
+Describe them in terms of THAT role's work (for consultant/presales/account
+roles: customer discovery, demos, translating between technical and business
+stakeholders — NOT "as an engineer"). Only frame them as an engineer when
+the job title itself is an engineering title. Never invent a team name;
+refer to the team only by the job title or "your team".
 
 <cover_letter_instructions>
 {system_prompt}
@@ -1046,14 +1194,32 @@ Role strategy:
 
 Key evidence points from my experience:
 {evidence_text}
-
+{stories_text}
 Skills:
 {skills_text}
 </applicant>
 {feedback_block}
 Generate the cover letter body following the instructions above."""
 
-    raw = generate_text(prompt, system=system_prompt, timeout=90)
+    # No hardcoded timeout: fall through to the configured ``llm.timeout``
+    # (300s). The previous ``timeout=90`` was shorter than a local model's
+    # cold-load + long-prose generation, so nearly every cover letter
+    # silently fell back to the generic template.
+    raw = generate_text(prompt, system=system_prompt)
+
+    # Self-critique -> revise, once. Skipped for the iterative page-fit
+    # renderer's re-calls (``previous_attempt``/``length_feedback`` set)
+    # -- those already re-ask the LLM for a reason unrelated to quality,
+    # and critiquing every iteration would multiply LLM calls.
+    if (
+        previous_attempt is None
+        and length_feedback is None
+        and _cover_letter_critique_enabled()
+    ):
+        raw = _apply_critique_revision(
+            raw, job=job, prompt=prompt, system_prompt=system_prompt
+        )
+
     return _clean_llm_cover_letter_output(
         raw,
         target_pages=target_pages,

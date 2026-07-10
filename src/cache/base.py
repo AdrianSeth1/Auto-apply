@@ -48,10 +48,16 @@ CACHE_VERSION = "v1"
 #                     (e.g. /api/providers/health snapshot); long
 #                     enough to deduplicate UI polls, short enough that
 #                     mutations show up quickly.
+#   jd_recovery: 24h -- recovered job-description text for a given
+#                     posting URL rarely changes within a day, and the
+#                     fetch is a full page GET against a third-party
+#                     site; a day of reuse avoids re-hitting it on
+#                     every regenerate/retry without going stale.
 NAMESPACE_TTLS: dict[str, int] = {
     "llm": 7 * 24 * 3600,
     "embedding": 30 * 24 * 3600,
     "response": 5 * 60,
+    "jd_recovery": 24 * 3600,
 }
 
 # TTL used when a caller writes to a namespace that the policy table

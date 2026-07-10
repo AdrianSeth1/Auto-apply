@@ -5,6 +5,7 @@ import { ConfigProvider } from "reka-ui"
 import {
   Briefcase,
   ClipboardCheck,
+  Database,
   FileText,
   LayoutDashboard,
   ListChecks,
@@ -37,6 +38,7 @@ let cleanupThemeListeners = () => {}
 const items = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   { to: "/jobs", label: "Jobs", icon: Briefcase },
+  { to: "/jobs-db", label: "Job Database", icon: Database },
   { to: "/materials", label: "Materials", icon: FileText },
   { to: "/review", label: "Awaiting Review", icon: ClipboardCheck },
   { to: "/tasks", label: "Plans", icon: ListChecks },

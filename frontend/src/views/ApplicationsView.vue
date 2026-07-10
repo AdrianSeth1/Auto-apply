@@ -11,6 +11,8 @@ import {
   ExternalLink,
   Filter,
   Loader2,
+  Mail,
+  NotebookPen,
   RotateCcw,
   Send,
   Trash2,
@@ -83,6 +85,9 @@ const state = reactive({
   error: "",
   updatingId: "",
   message: "",
+  emailChecking: false,
+  prepGeneratingId: "",
+  followups: [],
   data: {
     applications: [],
     pipeline: {},
@@ -142,6 +147,53 @@ async function updateOutcome(application, outcome) {
     state.error = error.message
   } finally {
     state.updatingId = ""
+  }
+}
+
+async function loadFollowups() {
+  try {
+    const response = await api.emailFollowups()
+    state.followups = response.followups || []
+  } catch {
+    state.followups = []
+  }
+}
+
+async function checkEmailReplies() {
+  state.emailChecking = true
+  state.message = ""
+
+  try {
+    const result = await api.ingestEmailReplies()
+    if (!result.ok) {
+      state.error = result.error || "Email check failed."
+    } else {
+      const parts = [`${result.processed} emails scanned`, `${result.applied} outcomes updated`]
+      if (result.ambiguous?.length) {
+        parts.push(`${result.ambiguous.length} ambiguous (left untouched)`)
+      }
+      state.message = `Email check: ${parts.join(", ")}.`
+      state.followups = result.followups || state.followups
+      await load()
+    }
+  } catch (error) {
+    state.error = error.message
+  } finally {
+    state.emailChecking = false
+  }
+}
+
+async function generatePrepPack(application) {
+  state.prepGeneratingId = application.id
+  state.message = ""
+
+  try {
+    const result = await api.generatePrepPack(application.id)
+    state.message = `Prep pack saved: ${result.filename}`
+  } catch (error) {
+    state.error = error.message
+  } finally {
+    state.prepGeneratingId = ""
   }
 }
 
@@ -312,7 +364,10 @@ async function confirmPromote() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadFollowups()
+})
 </script>
 
 <template>
@@ -364,6 +419,30 @@ onMounted(load)
       <CheckCircle2 class="h-4 w-4" />
       <AlertDescription>{{ state.message }}</AlertDescription>
     </Alert>
+
+    <Alert v-if="state.followups.length" class="border-amber-500/40 bg-amber-500/5">
+      <Activity class="h-4 w-4" />
+      <AlertDescription>
+        <span class="font-medium">{{ state.followups.length }} application{{ state.followups.length === 1 ? "" : "s" }} waiting on a reply for 10+ days:</span>
+        {{ state.followups.slice(0, 6).map((f) => `${f.company} (${f.days_waiting}d)`).join(", ") }}<span v-if="state.followups.length > 6"> and {{ state.followups.length - 6 }} more</span>.
+        Consider a follow-up note.
+      </AlertDescription>
+    </Alert>
+
+    <div class="flex justify-end">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        :disabled="state.emailChecking"
+        title="Scan Gmail for rejections / OA invites / interview requests and update outcomes"
+        @click="checkEmailReplies"
+      >
+        <Loader2 v-if="state.emailChecking" class="h-4 w-4 animate-spin" />
+        <Mail v-else class="h-4 w-4" />
+        Check email replies
+      </Button>
+    </div>
 
     <Card>
       <CardHeader>
@@ -478,6 +557,18 @@ onMounted(load)
                 </td>
                 <td class="text-right">
                   <div class="inline-flex items-center gap-1">
+                    <Button
+                      v-if="application.status === 'SUBMITTED'"
+                      variant="ghost"
+                      size="sm"
+                      type="button"
+                      :disabled="state.prepGeneratingId === application.id"
+                      title="Generate a one-page interview prep pack (story bank mapped to this JD)"
+                      @click="generatePrepPack(application)"
+                    >
+                      <Loader2 v-if="state.prepGeneratingId === application.id" class="h-4 w-4 animate-spin" />
+                      <NotebookPen v-else class="h-4 w-4" />
+                    </Button>
                     <Button
                       v-if="application.job.application_url"
                       variant="ghost"

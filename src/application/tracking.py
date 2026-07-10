@@ -220,6 +220,105 @@ def submit_paused_application(*, application_id: UUID) -> dict:
         }
 
 
+def mark_application_submitted_manually(*, application_id: UUID) -> dict:
+    """User confirms they submitted this application by hand on the ATS.
+
+    2026-07-07: Phase 18 stopped legacy paths from auto-marking rows
+    SUBMITTED because the external click-submit worker doesn't exist —
+    correct for automation, but it left no way to record a submission
+    the USER personally performed. Without ``submitted_at``, manual
+    applies were invisible to email ingestion, follow-up nudges, and
+    outcome analytics. A user-confirmed manual submission is the
+    strongest confirmation there is.
+
+    Also flips any pending/approved review-queue entry for the same job
+    to ``submitted`` so the review pile clears.
+    """
+    try:
+        from src.application.review import approve as approve_entry
+        from src.application.review import mark_submitted as mark_entry_submitted
+        from src.core.database import get_session_factory
+        from src.core.models import ReviewQueueEntry
+        from src.core.state_machine import AppStatus
+
+        session_factory = get_session_factory(load_config())
+        with session_factory() as session:
+            from src.core.models import Application
+
+            app = session.get(Application, application_id)
+            if app is None:
+                return {
+                    "ok": False,
+                    "error": "Application not found",
+                    "error_code": "application_not_found",
+                }
+            if app.status == str(AppStatus.SUBMITTED):
+                return {
+                    "ok": True,
+                    "status": "already_submitted",
+                    "message": "Already marked submitted.",
+                    "application_id": str(app.id),
+                    "submitted_at": _isoformat(app.submitted_at),
+                }
+
+            now = datetime.now(UTC)
+            history = list(app.state_history or [])
+            history.append(
+                {
+                    "timestamp": now.isoformat(),
+                    "event": "USER_CONFIRMED_MANUAL_SUBMISSION",
+                    "from": str(app.status),
+                    "to": str(AppStatus.SUBMITTED),
+                    "meta": {
+                        "note": "User confirmed they submitted on the external ATS by hand."
+                    },
+                }
+            )
+            app.state_history = history
+            app.status = str(AppStatus.SUBMITTED)
+            app.submitted_at = now
+
+            # Clear matching review entries so the pile empties too.
+            entries = (
+                session.query(ReviewQueueEntry)
+                .filter(
+                    ReviewQueueEntry.job_id == app.job_id,
+                    ReviewQueueEntry.status.in_(("pending", "approved")),
+                )
+                .all()
+            )
+            for entry in entries:
+                try:
+                    if entry.status == "pending":
+                        approve_entry(
+                            session, entry.id, reviewer="operator", reason="manual submission"
+                        )
+                    mark_entry_submitted(
+                        session,
+                        entry.id,
+                        reviewer="operator",
+                        reason="user submitted manually on the ATS",
+                    )
+                except Exception:  # noqa: BLE001 -- entry cleanup is best-effort
+                    logger.debug("review entry cleanup skipped", exc_info=True)
+
+            session.commit()
+            return {
+                "ok": True,
+                "status": "submitted",
+                "message": "Marked as submitted — it's now in outcome tracking.",
+                "application_id": str(app.id),
+                "submitted_at": _isoformat(app.submitted_at),
+                "review_entries_cleared": len(entries),
+            }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"Failed to mark application submitted: {exc}",
+            "error_code": "mark_submitted_failed",
+        }
+
+
 def discard_paused_application(
     *,
     application_id: UUID,

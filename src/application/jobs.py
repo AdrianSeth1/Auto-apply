@@ -92,9 +92,9 @@ async def search_jobs(
     errors: list[str] = []
     error_code: str | None = None
     counts = {"ats": 0, "linkedin": 0, "linkedin_external_ats": 0, "total": 0}
-    experience_levels = _normalize_list(experience_levels)
+    experience_levels = _normalize_experience_levels(_normalize_list(experience_levels))
     employment_types = _normalize_list(employment_types)
-    location_types = _normalize_list(location_types)
+    location_types = _normalize_location_types(_normalize_list(location_types))
     locations = _normalize_list(locations)
     education_levels = _normalize_list(education_levels)
     keywords = _normalize_string_list(keywords)
@@ -118,7 +118,16 @@ async def search_jobs(
                 companies=_build_companies_filter(config_dir, ats, company),
                 parse_jds=not no_parse,
                 use_llm=use_llm,
+                force_refresh=force_refresh,
             )
+            # Keywords must narrow ATS results too. The boards return the
+            # ENTIRE company board (no server-side search exists), so
+            # without this the web UI's keyword box silently did nothing
+            # for ATS sources and users got every role worldwide.
+            if linkedin_keywords:
+                ats_jobs = [
+                    job for job in ats_jobs if _job_matches_keywords(job, linkedin_keywords)
+                ]
             counts["ats"] = len(ats_jobs)
             jobs.extend(ats_jobs)
         except Exception as exc:
@@ -193,6 +202,24 @@ async def search_jobs(
             except Exception as exc:
                 errors.append(f"LinkedIn: {exc}")
 
+    # Cross-source dedupe: with source="all" the same posting often arrives
+    # from both an ATS board and the LinkedIn search. ATS copies win (they
+    # carry the full JD and a direct apply URL) because they were appended
+    # first and _dedupe_jobs_by_signature keeps the first occurrence.
+    jobs = _dedupe_jobs_by_signature(jobs)
+
+    # 2026-07-08: self-growing board registry. LinkedIn postings that
+    # redirect to Greenhouse/Lever reveal boards not yet in
+    # companies.yaml; harvest the slugs so tomorrow's ATS pass covers
+    # them. Best-effort — never blocks or fails the search.
+    if linkedin_jobs:
+        try:
+            from src.intake.board_discovery import register_discovered_boards
+
+            register_discovered_boards(linkedin_jobs, config_dir)
+        except Exception:  # noqa: BLE001
+            logger.debug("Board discovery skipped", exc_info=True)
+
     raw_total = len(jobs)
     fetched_jobs = list(jobs)
 
@@ -227,10 +254,10 @@ async def search_jobs(
         errors.extend(scoring_errors)
 
     if score and include_views:
-        jobs.sort(key=lambda item: item.raw_data.get("match_score", 0.0), reverse=True)
-        ats_jobs.sort(key=lambda item: item.raw_data.get("match_score", 0.0), reverse=True)
-        linkedin_jobs.sort(key=lambda item: item.raw_data.get("match_score", 0.0), reverse=True)
-        fetched_jobs.sort(key=lambda item: item.raw_data.get("match_score", 0.0), reverse=True)
+        jobs.sort(key=_job_sort_key)
+        ats_jobs.sort(key=_job_sort_key)
+        linkedin_jobs.sort(key=_job_sort_key)
+        fetched_jobs.sort(key=_job_sort_key)
 
     counts["total"] = len(jobs)
 
@@ -331,14 +358,26 @@ async def _search_linkedin_with_job_index(
                 freshness_hours=freshness_hours,
             )
             if scraped_jobs:
+                from src.core.models import JobPosting
+
                 for job in scraped_jobs:
-                    enrich_posting(
+                    enriched = enrich_posting(
                         store=store,
                         source=job.source,
                         source_id=job.source_id,
                         company=job.company,
                         content=_raw_job_content(job),
                     )
+                    # Ghost-posting signal: even on a fresh scrape the
+                    # posting may have been first seen weeks ago. Stash
+                    # first_seen_at so the quality multiplier can
+                    # penalize long-lived (likely evergreen/ghost) jobs.
+                    try:
+                        posting = session.get(JobPosting, enriched.posting_id)
+                        if posting is not None and posting.first_seen_at:
+                            job.raw_data["first_seen_at"] = posting.first_seen_at.isoformat()
+                    except Exception:  # noqa: BLE001 -- signal is best-effort
+                        logger.debug("first_seen_at stash skipped", exc_info=True)
                 jobs = scraped_jobs
             else:
                 jobs = _raw_jobs_from_index_postings(session, outcome.postings)
@@ -474,6 +513,10 @@ def _raw_job_from_index_posting(posting, snapshot):
     from src.intake.schema import JobRequirements, RawJob
 
     raw = dict(getattr(snapshot, "raw_data", None) or {})
+    # Ghost-posting signal for the scorer's quality multiplier.
+    first_seen = getattr(posting, "first_seen_at", None)
+    if first_seen is not None:
+        raw["first_seen_at"] = first_seen.isoformat()
     requirements_payload = getattr(snapshot, "requirements", None) or raw.get("requirements") or {}
     try:
         requirements = JobRequirements(**requirements_payload)
@@ -1464,6 +1507,8 @@ def serialize_job(job, match_score: float | None = None) -> dict:
         "application_url": job.application_url,
         "ats_type": job.ats_type,
         "match_score": score,
+        "best_profile": job.raw_data.get("best_profile"),
+        "profile_scores": job.raw_data.get("profile_scores"),
         "disqualified": bool(job.raw_data.get("disqualified")),
         "experience_level": metadata.get("experience_level"),
         "employment_category": metadata.get("employment_category"),
@@ -1499,7 +1544,7 @@ def _build_companies_filter(
     if ats and company:
         return {ats: [company]}
     if company:
-        return {"greenhouse": [company], "lever": [company]}
+        return {"greenhouse": [company], "lever": [company], "ashby": [company]}
     if ats:
         from src.intake.batch import load_company_list
 
@@ -1542,11 +1587,17 @@ def _apply_search_filters(
 
     for job in jobs:
         metadata = _job_search_metadata(job)
-        if experience_levels and metadata.get("experience_level") not in experience_levels:
+        # "Unknown passes" (same convention as intake/filters.py): the
+        # classifiers are heuristic and most JDs omit pay / education /
+        # employment terms, so excluding unclassifiable jobs made stacked
+        # Advanced filters delete nearly everything (a saved profile with
+        # pay>=90k + full-time + remote once yielded "0 shown / 361
+        # fetched"). Only a KNOWN violating value excludes a job.
+        if not _passes_category(metadata.get("experience_level"), experience_levels):
             continue
-        if employment_types and metadata.get("employment_category") not in employment_types:
+        if not _passes_category(metadata.get("employment_category"), employment_types):
             continue
-        if location_types and metadata.get("location_type") not in location_types:
+        if not _passes_category(metadata.get("location_type"), location_types):
             continue
         should_skip_location_filter = job.source == "linkedin" and bool(
             searched_linkedin_locations or search_location
@@ -1557,7 +1608,7 @@ def _apply_search_filters(
             and not _matches_locations(job.location, locations)
         ):
             continue
-        if education_levels and metadata.get("education_level") not in education_levels:
+        if not _passes_category(metadata.get("education_level"), education_levels):
             continue
         if (
             pay_operator
@@ -1784,11 +1835,170 @@ def _parse_money(value: str, suffix: str | None) -> int | None:
     return int(numeric)
 
 
+# Common aliases so "us", "usa", and "united states" all behave the same.
+# Values are matched as whole words/phrases, never raw substrings.
+_LOCATION_ALIASES: dict[str, tuple[str, ...]] = {
+    "us": ("us", "usa", "u.s.", "united states", "america"),
+    "usa": ("us", "usa", "u.s.", "united states", "america"),
+    "united states": ("us", "usa", "u.s.", "united states", "america"),
+    "uk": ("uk", "u.k.", "united kingdom", "england", "scotland", "wales"),
+    "united kingdom": ("uk", "u.k.", "united kingdom", "england", "scotland", "wales"),
+    "remote": ("remote", "anywhere", "work from home", "wfh"),
+}
+
+# US state names <-> postal abbreviations. Abbreviations are matched only in
+# the ", XX" form ("Portland, OR") because many collide with English words
+# ("or", "in", "me", "hi", "ok").
+_US_STATE_BY_ABBREV: dict[str, str] = {
+    "al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas",
+    "ca": "california", "co": "colorado", "ct": "connecticut", "de": "delaware",
+    "fl": "florida", "ga": "georgia", "hi": "hawaii", "id": "idaho",
+    "il": "illinois", "in": "indiana", "ia": "iowa", "ks": "kansas",
+    "ky": "kentucky", "la": "louisiana", "me": "maine", "md": "maryland",
+    "ma": "massachusetts", "mi": "michigan", "mn": "minnesota", "ms": "mississippi",
+    "mo": "missouri", "mt": "montana", "ne": "nebraska", "nv": "nevada",
+    "nh": "new hampshire", "nj": "new jersey", "nm": "new mexico", "ny": "new york",
+    "nc": "north carolina", "nd": "north dakota", "oh": "ohio", "ok": "oklahoma",
+    "or": "oregon", "pa": "pennsylvania", "ri": "rhode island", "sc": "south carolina",
+    "sd": "south dakota", "tn": "tennessee", "tx": "texas", "ut": "utah",
+    "vt": "vermont", "va": "virginia", "wa": "washington", "wv": "west virginia",
+    "wi": "wisconsin", "wy": "wyoming", "dc": "district of columbia",
+}
+_US_ABBREV_BY_STATE: dict[str, str] = {name: abbr for abbr, name in _US_STATE_BY_ABBREV.items()}
+_US_COUNTRY_TERMS = {"us", "usa", "united states", "america"}
+
+
+def _word_match(term: str, text: str) -> bool:
+    return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text) is not None
+
+
 def _matches_locations(location: str | None, candidates: list[str]) -> bool:
+    """Whole-word location matching with US-state and country aliases.
+
+    The previous implementation was a raw substring test, which let short
+    candidates match unrelated regions ("ny" in "Germany", "us" in
+    "Australia") -- the main reason searches surfaced jobs from regions the
+    user never asked for.
+    """
     normalized_location = (location or "").lower()
     if not normalized_location:
         return False
-    return any(candidate in normalized_location for candidate in candidates)
+    return any(
+        _location_candidate_matches(candidate, normalized_location) for candidate in candidates
+    )
+
+
+def _location_candidate_matches(candidate: str, location: str) -> bool:
+    normalized = candidate.strip().lower()
+    if not normalized:
+        return False
+
+    # "City, ST" style chips: require every comma-part to match, so
+    # "Portland, OR" matches "Portland, Oregon Metropolitan Area" and
+    # "Portland, OR (Remote)" but not "Portland, Maine" or bare "US".
+    if "," in normalized:
+        parts = [part.strip() for part in normalized.split(",") if part.strip()]
+        if len(parts) > 1:
+            return all(_location_candidate_matches(part, location) for part in parts)
+
+    terms = set(_LOCATION_ALIASES.get(normalized, (normalized,)))
+    abbrevs: set[str] = set()
+
+    if normalized in _US_STATE_BY_ABBREV:
+        # Candidate is an abbreviation: also match the full state name.
+        terms.discard(normalized)
+        terms.add(_US_STATE_BY_ABBREV[normalized])
+        abbrevs.add(normalized)
+    elif normalized in _US_ABBREV_BY_STATE:
+        abbrevs.add(_US_ABBREV_BY_STATE[normalized])
+
+    for term in terms:
+        # Skip whole-word matching for bare 2-letter state codes (handled
+        # below); "us"/"uk" style aliases are unambiguous enough as words.
+        if term in _US_STATE_BY_ABBREV:
+            abbrevs.add(term)
+            continue
+        if _word_match(term, location):
+            return True
+
+    if any(
+        re.search(rf",\s*{re.escape(abbrev)}(?![a-z0-9])", location) for abbrev in abbrevs
+    ):
+        return True
+
+    # "united states" should also match US locations that only name a
+    # city/state ("San Francisco, CA", "Dallas, Texas").
+    return normalized in _US_COUNTRY_TERMS and _mentions_us_state(location)
+
+
+def _mentions_us_state(location: str) -> bool:
+    match = re.search(r",\s*([a-z]{2})(?![a-z0-9])", location)
+    if match and match.group(1) in _US_STATE_BY_ABBREV:
+        return True
+    return any(_word_match(name, location) for name in _US_ABBREV_BY_STATE)
+
+
+def _job_matches_keywords(job, keywords: list[str]) -> bool:
+    """True if any keyword phrase appears in the job title or description."""
+    haystack = f"{job.title or ''} {job.description or ''}".lower()
+    return any(keyword.lower() in haystack for keyword in keywords if keyword.strip())
+
+
+def _normalize_experience_levels(values: list[str]) -> list[str]:
+    """Map UI/LinkedIn-style tokens onto the classifier vocabulary.
+
+    2026-07-08: saved search profiles in the wild contain
+    ``entry_level`` / ``associate`` / ``mid_senior`` — tokens that
+    neither ``_classify_experience_level`` (emits ``entry`` /
+    ``manager`` / ``senior`` / ``director`` / ``executive``) nor
+    ``_map_linkedin_experience_levels`` understand. The mismatch was
+    perverse: a filter FOR entry-level jobs excluded jobs explicitly
+    titled entry-level (known ``entry`` not in ``{entry_level,
+    associate}``) while passing every unclassifiable title.
+    """
+    aliases = {
+        "entry_level": "entry",
+        "entry-level": "entry",
+        "associate": "entry",
+        "junior": "entry",
+        "internship": "entry",
+        "mid_senior": "senior",
+        "mid-senior": "senior",
+    }
+    normalized = [aliases.get(value, value) for value in values]
+    # Preserve order, drop duplicates introduced by aliasing.
+    return list(dict.fromkeys(normalized))
+
+
+def _normalize_location_types(values: list[str]) -> list[str]:
+    """Same dead-token repair for location types.
+
+    ``_classify_location_type`` emits ``remote`` / ``hybrid`` /
+    ``in_person``; saved profiles say ``onsite``, which excluded every
+    explicitly on-site job while the user believed on-site was included.
+    """
+    aliases = {
+        "onsite": "in_person",
+        "on-site": "in_person",
+        "on_site": "in_person",
+        "office": "in_person",
+    }
+    normalized = [aliases.get(value, value) for value in values]
+    return list(dict.fromkeys(normalized))
+
+
+def _passes_category(value: str | None, selected: list[str]) -> bool:
+    """Category filter with "unknown passes" semantics.
+
+    Mirrors ``JobFilter._check_employment_type`` in intake/filters.py:
+    an empty selection matches everything, an unclassifiable job is
+    kept, and only a known non-matching value excludes.
+    """
+    if not selected:
+        return True
+    if value is None or value == "unknown":
+        return True
+    return value in selected
 
 
 def _matches_numeric_filter(
@@ -1797,8 +2007,10 @@ def _matches_numeric_filter(
     operator: str,
     target: int,
 ) -> bool:
+    # Unknown passes: pay/experience are regex-extracted from JD text and
+    # usually absent; excluding on missing data nuked most results.
     if min_value is None and max_value is None:
-        return False
+        return True
 
     lower = min_value if min_value is not None else max_value
     upper = max_value if max_value is not None else min_value
@@ -1931,34 +2143,92 @@ def _set_job_search_metadata(job, metadata: dict) -> None:
 
 
 def _score_jobs(jobs, *, warn_on_missing_profile: bool) -> tuple[bool, list[str]]:
-    profile_path = get_active_profile_path()
-    if profile_path is None or not profile_path.exists():
-        if warn_on_missing_profile:
-            return False, ["No profile found -- run `autoapply init` first to enable scoring."]
-        return False, []
+    """Score every job against EVERY saved applicant profile, keep the best.
 
+    2026-07-07: previously only the active profile was scored, so a job
+    that perfectly matched the sales-engineer resume looked mediocre while
+    the analyst profile happened to be active. Now each profile in
+    ``data/profile/profiles/`` scores every job; the best-scoring profile
+    wins ``match_score`` and is recorded as ``raw_data.best_profile`` so
+    material generation can auto-select the matching resume. Per-profile
+    scores land in ``raw_data.profile_scores`` for the UI.
+
+    Ties prefer the active profile. A profile that fails to load or score
+    is reported as a warning and skipped rather than failing the search.
+    """
+    from src.application.profile import get_active_profile_id, list_profiles
     from src.matching.scorer import build_scoring_context
     from src.matching.scorer import score_jobs as score_ranked_jobs
     from src.memory.profile import load_profile_yaml
 
-    profile_data = load_profile_yaml(profile_path)
-    scoring_ctx = build_scoring_context(profile_data)
-    ranked = score_ranked_jobs(jobs, scoring_ctx)
-    score_by_id = {score.job_id: score for score in ranked}
+    profiles = list_profiles()
+    if not profiles:
+        if warn_on_missing_profile:
+            return False, ["No profile found -- run `autoapply init` first to enable scoring."]
+        return False, []
+
+    active_id = get_active_profile_id()
+    errors: list[str] = []
+    ranked_by_profile: dict[str, dict] = {}
+    for meta in profiles:
+        try:
+            profile_data = load_profile_yaml(Path(meta["path"]))
+            scoring_ctx = build_scoring_context(profile_data)
+            ranked = score_ranked_jobs(jobs, scoring_ctx)
+        except Exception as exc:  # noqa: BLE001 -- one bad profile must not kill search
+            errors.append(f"Scoring against profile '{meta['id']}' failed: {exc}")
+            continue
+        ranked_by_profile[meta["id"]] = {score.job_id: score for score in ranked}
+
+    if not ranked_by_profile:
+        return False, errors or ["Scoring failed for all profiles."]
 
     for job in jobs:
-        score = score_by_id.get(str(job.id))
-        if score is not None:
-            job.raw_data["match_score"] = score.final_score
-            job.raw_data["disqualified"] = score.disqualified
-            # Phase 16.3: stash the structured breakdown alongside the
-            # legacy scalar fields so the "Why was this filtered?"
-            # popover can render rule_id / verdict / reason /
-            # evidence_excerpt without re-scoring round-trip.
-            job.raw_data["score_breakdown"] = score.to_dict()
+        job_id = str(job.id)
+        profile_scores: dict[str, float] = {}
+        best = None
+        best_profile_id = None
+        for profile_id, score_by_id in ranked_by_profile.items():
+            score = score_by_id.get(job_id)
+            if score is None:
+                continue
+            profile_scores[profile_id] = score.final_score
+            if (
+                best is None
+                or score.final_score > best.final_score
+                or (score.final_score == best.final_score and profile_id == active_id)
+            ):
+                best = score
+                best_profile_id = profile_id
+        if best is None:
+            continue
+        job.raw_data["match_score"] = best.final_score
+        job.raw_data["disqualified"] = best.disqualified
+        job.raw_data["best_profile"] = best_profile_id
+        job.raw_data["profile_scores"] = profile_scores
+        # Phase 16.3: stash the structured breakdown alongside the
+        # legacy scalar fields so the "Why was this filtered?"
+        # popover can render rule_id / verdict / reason /
+        # evidence_excerpt without re-scoring round-trip.
+        job.raw_data["score_breakdown"] = best.to_dict()
 
-    jobs.sort(key=lambda item: item.raw_data.get("match_score", 0.0), reverse=True)
-    return True, []
+    jobs.sort(key=_job_sort_key)
+    return True, errors
+
+
+def _job_sort_key(job) -> tuple:
+    """Deterministic ranking: match score desc, then company / title asc.
+
+    ``raw_data.get("match_score", 0.0)`` alone had two problems: a stored
+    ``None`` crashed the comparison, and unscored ties kept raw scrape
+    order, which made results look randomly shuffled between runs.
+    """
+    raw_score = job.raw_data.get("match_score")
+    try:
+        score = float(raw_score) if raw_score is not None else 0.0
+    except (TypeError, ValueError):
+        score = 0.0
+    return (-score, (job.company or "").lower(), (job.title or "").lower())
 
 
 def _select_batch_jobs(filter_profile: str, top_n: int) -> tuple[list[tuple], list[str], int]:
@@ -2223,8 +2493,8 @@ def _generate_selected_material(
             # in both branches. The default ``"balanced"`` matches
             # the historical behaviour.
             rewrite_mode=patch_aggressiveness,
-            rewrite=strategy == "patch_existing",
-            use_llm=strategy == "patch_existing",
+            rewrite=True,
+            use_llm=True,
         )
         artifacts["resume_pdf"] = resume_files.get("pdf")
         artifacts["resume_docx"] = resume_files.get("docx")

@@ -445,36 +445,58 @@ def materials_generate(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
                 "status": "invalid_job_id",
             }
 
+        from src.core.models import Job as LegacyJob  # noqa: PLC0415
+
         factory = get_session_factory()
         with factory() as session:
             posting = session.get(JobPosting, job_uuid)
             if posting is None:
-                return {
-                    "task": "materials.generate",
-                    "job_id": args.job_id,
-                    "document_types": args.document_types,
-                    "status": "posting_not_found",
+                # Fallback: ATS batch scraper persists to the legacy Job table,
+                # not JobPosting. Try there before giving up.
+                legacy = session.get(LegacyJob, job_uuid)
+                if legacy is None:
+                    return {
+                        "task": "materials.generate",
+                        "job_id": args.job_id,
+                        "document_types": args.document_types,
+                        "status": "posting_not_found",
+                    }
+                job_payload = {
+                    "id": str(legacy.id),
+                    "source": legacy.source,
+                    "source_id": legacy.source_id,
+                    "company": legacy.company,
+                    "title": legacy.title or "",
+                    "location": legacy.location,
+                    "employment_type": legacy.employment_type,
+                    "seniority": legacy.seniority,
+                    "description": legacy.description,
+                    "requirements": legacy.requirements,
+                    "application_url": legacy.application_url,
+                    "ats_type": legacy.ats_type,
+                    "raw_data": legacy.raw_data,
                 }
-            snapshot = (
-                session.get(JobSnapshot, posting.latest_snapshot_id)
-                if posting.latest_snapshot_id
-                else None
-            )
-            job_payload = {
-                "id": str(posting.id),
-                "source": posting.source,
-                "source_id": posting.source_id,
-                "company": posting.company,
-                "title": snapshot.title if snapshot else "",
-                "location": snapshot.location if snapshot else None,
-                "employment_type": snapshot.employment_type if snapshot else None,
-                "seniority": snapshot.seniority if snapshot else None,
-                "description": snapshot.description if snapshot else None,
-                "requirements": snapshot.requirements if snapshot else None,
-                "application_url": snapshot.application_url if snapshot else None,
-                "ats_type": posting.source,
-                "raw_data": snapshot.raw_data if snapshot else None,
-            }
+            else:
+                snapshot = (
+                    session.get(JobSnapshot, posting.latest_snapshot_id)
+                    if posting.latest_snapshot_id
+                    else None
+                )
+                job_payload = {
+                    "id": str(posting.id),
+                    "source": posting.source,
+                    "source_id": posting.source_id,
+                    "company": posting.company,
+                    "title": snapshot.title if snapshot else "",
+                    "location": snapshot.location if snapshot else None,
+                    "employment_type": snapshot.employment_type if snapshot else None,
+                    "seniority": snapshot.seniority if snapshot else None,
+                    "description": snapshot.description if snapshot else None,
+                    "requirements": snapshot.requirements if snapshot else None,
+                    "application_url": snapshot.application_url if snapshot else None,
+                    "ats_type": posting.source,
+                    "raw_data": snapshot.raw_data if snapshot else None,
+                }
 
     if not job_payload.get("title"):
         return {
@@ -483,6 +505,94 @@ def materials_generate(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
             "document_types": args.document_types,
             "status": "no_snapshot",
             "detail": "Posting has no JobSnapshot; run jobs.enrich first.",
+        }
+
+    # JD recovery: postings whose board listing redirects to a company
+    # site / Workday / unlisted ATS often keep a stub-or-empty
+    # description. Try to recover the real text from the posting URL
+    # before generating so requirements/keywords aren't extracted from
+    # nothing. Best-effort and never fatal to the run.
+    from src.core.config import load_config  # noqa: PLC0415
+
+    try:
+        generation_config = load_config().get("generation", {})
+    except Exception:  # noqa: BLE001 -- config trouble must not block generation
+        generation_config = {}
+    if not isinstance(generation_config, dict):
+        generation_config = {}
+    try:
+        min_jd_chars = int(generation_config.get("min_jd_chars", 300))
+    except (TypeError, ValueError):
+        min_jd_chars = 300
+    if min_jd_chars <= 0:
+        min_jd_chars = 300
+
+    description = job_payload.get("description") or ""
+    application_url = job_payload.get("application_url")
+    if len(description) < min_jd_chars and application_url:
+        from src.intake.jd_recovery import recover_job_description  # noqa: PLC0415
+
+        recovered = recover_job_description(application_url)
+        if recovered:
+            job_payload["description"] = recovered
+            description = recovered
+
+            from src.intake.jd_parser import parse_requirements  # noqa: PLC0415
+
+            job_payload["requirements"] = parse_requirements(recovered)
+            logger.info(
+                "materials.generate: recovered JD job_id=%s (%d chars)",
+                args.job_id,
+                len(recovered),
+            )
+        else:
+            logger.info(
+                "materials.generate: JD recovery did not yield usable text "
+                "job_id=%s",
+                args.job_id,
+            )
+
+    # Thin-JD gate: even after recovery, don't burn an LLM generation
+    # pass on a near-empty description -- it produces generic materials
+    # silently. Report a structured, honest result instead and leave a
+    # breadcrumb on the review-queue card explaining why nothing showed
+    # up.
+    if len(description) < min_jd_chars:
+        detail = (
+            f"Job description is {len(description)} chars "
+            f"(< {min_jd_chars} required); recovery did not yield enough "
+            "content."
+        )
+        if job_uuid is not None:
+            try:
+                factory = get_session_factory()
+                with factory() as session, session.begin():
+                    stmt = (
+                        select(ReviewQueueEntry)
+                        .where(ReviewQueueEntry.tenant_id == tenant_id)
+                        .where(ReviewQueueEntry.job_id == job_uuid)
+                        .where(ReviewQueueEntry.status == "pending")
+                        .order_by(ReviewQueueEntry.created_at.desc())
+                        .limit(1)
+                    )
+                    row = session.execute(stmt).scalar_one_or_none()
+                    if row is not None:
+                        row.reason = (
+                            "Materials skipped: job description too thin "
+                            f"({len(description)}ch) — open the posting and "
+                            "retry"
+                        )
+            except Exception as exc:  # noqa: BLE001 -- gate result must still return
+                logger.warning(
+                    "materials.generate: setting thin_jd reason failed: %s", exc
+                )
+        return {
+            "task": "materials.generate",
+            "job_id": args.job_id,
+            "document_types": args.document_types,
+            "status": "thin_jd",
+            "detail": detail,
+            "description_chars": len(description),
         }
 
     document_types = args.document_types or ["resume", "cover_letter"]
@@ -522,7 +632,7 @@ def materials_generate(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
             result = await generate_material_for_job(
                 job_payload=job_payload,
                 material_type=material_type,
-                use_llm=False,
+                use_llm=True,
                 template_id=overrides["template_id"],
                 profile_id=args.profile_id,
                 strategy=overrides["strategy"],
@@ -628,6 +738,17 @@ def materials_generate(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
                     if cover_letter_path:
                         app_row.cover_letter_version = cover_letter_path
                         application_updates["cover_letter_version"] = cover_letter_path
+                    # Job Database batch-generate creates the application in
+                    # an early state; once materials exist, advance it to
+                    # REVIEW_REQUIRED so it surfaces in the Awaiting Review
+                    # "ready" section with the apply link + file downloads.
+                    if (resume_path or cover_letter_path) and app_row.status in (
+                        "DISCOVERED",
+                        "QUALIFIED",
+                        "MATERIALS_READY",
+                    ):
+                        app_row.status = "REVIEW_REQUIRED"
+                        application_updates["status"] = "REVIEW_REQUIRED"
         except (ValueError, Exception) as exc:  # noqa: BLE001
             logger.warning(
                 "materials.generate: application writeback failed: %s", exc
@@ -868,6 +989,40 @@ def status_sync(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
             "ingestion. Task body is intentionally a no-op so manual "
             "invocations audit honestly."
         ),
+    }
+
+
+@celery_app.task(name="maintenance.email_ingest", base=AutoApplyTask, bind=True)
+def email_ingest(self: AutoApplyTask) -> dict[str, Any]:
+    """2026-07-07: Gmail IMAP reply ingestion.
+
+    Classifies recent inbox mail (rejection / OA / interview / offer),
+    matches messages to submitted applications by company, escalates
+    outcomes, and returns follow-up candidates. No-ops with a structured
+    result when ``email.enabled`` is false or credentials are missing,
+    so the Beat entry is safe to ship enabled-by-default.
+    """
+    from src.intake.email_ingest import ingest_replies  # noqa: PLC0415
+
+    result = ingest_replies()
+    logger.info(
+        "email_ingest ok=%s processed=%s applied=%s ambiguous=%s followups=%s",
+        result.get("ok"),
+        result.get("processed"),
+        result.get("applied"),
+        len(result.get("ambiguous") or []),
+        len(result.get("followups") or []),
+    )
+    # Trim bulky lists for the durable TaskRecord result.
+    return {
+        "task": "maintenance.email_ingest",
+        **{
+            key: result.get(key)
+            for key in ("ok", "error", "error_code", "processed", "classified", "applied")
+        },
+        "updates": (result.get("updates") or [])[:20],
+        "ambiguous_count": len(result.get("ambiguous") or []),
+        "followup_count": len(result.get("followups") or []),
     }
 
 

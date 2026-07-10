@@ -148,13 +148,44 @@ def _bullet_count(document: ResumeDocument) -> int:
     return sum(len(item.bullets) for item in [*document.experiences, *document.projects])
 
 
+# Clause boundaries where a trimmed bullet may end: sentence punctuation,
+# semicolons, commas (followed by space), or a spaced em/en dash.
+_CLAUSE_BOUNDARY_RE = re.compile(r"[.;!?](?=\s|$)|,(?=\s)|\s[—–](?=\s)")
+
+
 def _trim_words(text: str, max_words: int | None) -> str:
+    """Trim an over-long bullet WITHOUT cutting mid-phrase.
+
+    The old behaviour sliced the word list at ``max_words`` and stripped
+    trailing punctuation, which shipped resumes whose bullets ended
+    mid-sentence ("... Piper TTS for spoken"). Now the bullet is only
+    trimmed when a clause boundary falls inside the budget and keeps at
+    least half of it; otherwise the text is returned untouched -- the
+    post-render page-fit loop (LLM shorten + weakest-bullet drop) deals
+    with genuine overflow using real page counts instead of a blind
+    word cap.
+    """
     if not max_words:
         return text
     words = re.findall(r"\S+", text)
     if len(words) <= max_words:
         return text
-    return " ".join(words[:max_words]).rstrip(".,;:")
+
+    prefix = " ".join(words[:max_words])
+    best_cut: str | None = None
+    for match in _CLAUSE_BOUNDARY_RE.finditer(prefix):
+        candidate = prefix[: match.end()].strip().rstrip(",;—– ")
+        if len(re.findall(r"\S+", candidate)) < max_words // 2:
+            continue
+        if candidate.count("**") % 2 or candidate.count("*") % 2:
+            # Never orphan inline bold/italic markup mid-span.
+            continue
+        best_cut = candidate
+    if best_cut is None:
+        return text
+    if not best_cut.endswith((".", "!", "?")):
+        best_cut += "."
+    return best_cut
 
 
 def _section_enabled(manifest: TemplateManifest, section: str) -> bool:

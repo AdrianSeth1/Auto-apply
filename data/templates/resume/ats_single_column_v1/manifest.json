@@ -82,8 +82,100 @@
     "sections": "{{resume.sections}}"
   },
   "latex": null,
-  "style_overrides": {},
+  "style_overrides": {
+    "name": {
+      "font": "Times New Roman",
+      "size": 20,
+      "bold": true,
+      "italic": null,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    },
+    "contact": {
+      "font": "Times New Roman",
+      "size": 10,
+      "bold": null,
+      "italic": null,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    },
+    "section_heading": {
+      "font": "Times New Roman",
+      "size": 11,
+      "bold": true,
+      "italic": null,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    },
+    "item_title": {
+      "font": "Times New Roman",
+      "size": 11,
+      "bold": true,
+      "italic": null,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    },
+    "item_subtitle": {
+      "font": "Times New Roman",
+      "size": 10,
+      "bold": null,
+      "italic": true,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    },
+    "item_meta": {
+      "font": "Times New Roman",
+      "size": 10,
+      "bold": null,
+      "italic": true,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    },
+    "normal": {
+      "font": "Times New Roman",
+      "size": 10,
+      "bold": null,
+      "italic": null,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    },
+    "bullet": {
+      "font": "Times New Roman",
+      "size": 10,
+      "bold": null,
+      "italic": null,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    },
+    "skill_category": {
+      "font": "Times New Roman",
+      "size": 10,
+      "bold": true,
+      "italic": null,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    },
+    "skill_line": {
+      "font": "Times New Roman",
+      "size": 10,
+      "bold": null,
+      "italic": null,
+      "line_spacing": null,
+      "space_before_pt": null,
+      "space_after_pt": null
+    }
+  },
   "target_pages": 1,
   "filename_pattern": "company_role_date",
-  "filename_custom_label": ""
+  "filename_custom_label": "",
+  "emphasis_font": ""
 }

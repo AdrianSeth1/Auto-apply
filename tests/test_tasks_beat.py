@@ -30,12 +30,21 @@ EXPECTED_ENTRIES: set[str] = {
     "plan_run",
     # Phase 17.6: morning digest banner producer
     "morning_digest",
+    # 2026-07-07: Gmail reply ingestion (rejection/OA/interview/offer
+    # classification -> outcome escalation). No-ops when email.enabled
+    # is false, so safe as a static entry.
+    "email_ingest",
 }
 
 
 def test_schedule_contains_all_expected_entries() -> None:
     schedule = beat.get_schedule()
-    assert set(schedule.keys()) == EXPECTED_ENTRIES
+    # User-defined automation plans (config/automation_plans.yaml) are
+    # merged into the schedule as ``automation:<plan-id>`` entries, so a
+    # machine with plans configured has extras. Assert the static
+    # contract, not the user's config.
+    static_keys = {key for key in schedule if not key.startswith("automation:")}
+    assert static_keys == EXPECTED_ENTRIES
 
 
 def test_every_entry_has_task_schedule_and_options() -> None:
@@ -75,7 +84,11 @@ def test_install_wires_redbeat_scheduler_into_app() -> None:
 
 
 def test_install_publishes_schedule_to_app_conf() -> None:
-    keys = set(app_mod.celery_app.conf.beat_schedule.keys())
+    keys = {
+        key
+        for key in app_mod.celery_app.conf.beat_schedule
+        if not key.startswith("automation:")
+    }
     assert keys == EXPECTED_ENTRIES
 
 

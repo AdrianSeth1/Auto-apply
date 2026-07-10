@@ -74,3 +74,16 @@ hello.py
 data/agent_traces/
 # Phase 17.6 morning digest source -- one JSON per plan_run
 data/plan_runs/
+
+# Local secrets / scratch (not the tracked .env.example)
+config/.env.txt
+config/*.bak.*
+alembic_out.txt
+
+# Claude Code local machine settings
+.claude/settings.local.json
+l.json
+
+# Local env + settings backups (can carry secrets)
+config/.env.txt
+config/*.bak*

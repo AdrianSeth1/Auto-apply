@@ -337,6 +337,21 @@ async function confirmPromote() {
   }
 }
 
+async function markPausedApplicationSubmitted(application) {
+  state.pausedSubmittingId = application.id
+  try {
+    const result = await api.markApplicationSubmitted(application.id)
+    state.message = result.message || "Marked as submitted."
+    state.messageVariant = "success"
+    await refresh()
+  } catch (err) {
+    state.message = err?.message || "Couldn't mark as submitted."
+    state.messageVariant = "error"
+  } finally {
+    state.pausedSubmittingId = ""
+  }
+}
+
 async function submitPausedApplication(application) {
   state.pausedSubmittingId = application.id
   state.message = ""
@@ -473,6 +488,23 @@ async function rejectOne(entry) {
 
 async function refreshOne(entry) {
   await runAction(() => api.reviewRefresh(entry.id, { reviewer: "operator" }))
+}
+
+async function markSubmittedOne(entry) {
+  state.pendingAction = true
+  state.message = ""
+  state.messageVariant = "info"
+  try {
+    await api.reviewMarkSubmitted(entry.id, { reviewer: "operator" })
+    state.message = "Marked as submitted — it's now in outcome tracking."
+    state.messageVariant = "success"
+    await refresh()
+  } catch (err) {
+    state.message = err?.message || "Couldn't mark as submitted."
+    state.messageVariant = "error"
+  } finally {
+    state.pendingAction = false
+  }
 }
 
 async function submitOne(entry) {
@@ -708,6 +740,16 @@ onMounted(refresh)
             >
               <Trash2 class="h-4 w-4" />
               Discard
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              :disabled="state.pausedSubmittingId === application.id || state.pausedDiscardingId === application.id"
+              title="You applied by hand on the company's site — mark it submitted so replies and follow-ups are tracked"
+              @click="markPausedApplicationSubmitted(application)"
+            >
+              <CircleCheck class="h-4 w-4" />
+              I applied manually
             </Button>
             <Button
               size="sm"
@@ -1077,6 +1119,32 @@ onMounted(refresh)
               {{ entry.reason }}
             </div>
 
+            <!-- 2026-07-08: everything a human needs to apply manually:
+                 the posting link + the generated materials. -->
+            <div
+              v-if="entry.application_url || entry.artifacts?.length"
+              class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs"
+            >
+              <a
+                v-if="entry.application_url"
+                class="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
+                :href="entry.application_url"
+                target="_blank"
+                rel="noopener"
+              >
+                <ExternalLink class="h-3 w-3" />
+                View posting
+              </a>
+              <a
+                v-for="artifact in entry.artifacts || []"
+                :key="artifact.path"
+                class="text-primary underline-offset-4 hover:underline"
+                :href="api.artifactDownloadUrl(artifact.path)"
+                target="_blank"
+                rel="noopener"
+              >{{ artifact.label }}</a>
+            </div>
+
             <div v-if="col.id === 'pending'" class="flex flex-wrap gap-1">
               <Button
                 v-if="entry.status !== 'stale'"
@@ -1097,6 +1165,17 @@ onMounted(refresh)
                 Refresh
               </Button>
               <Button
+                v-if="entry.status !== 'stale'"
+                size="sm"
+                variant="outline"
+                :disabled="state.pendingAction"
+                title="You applied by hand on the company's site — mark it submitted so replies and follow-ups are tracked"
+                @click="markSubmittedOne(entry)"
+              >
+                <CircleCheck class="h-4 w-4" />
+                I applied manually
+              </Button>
+              <Button
                 size="sm"
                 variant="outline"
                 :disabled="state.pendingAction"
@@ -1113,6 +1192,16 @@ onMounted(refresh)
               >
                 <Send class="h-4 w-4" />
                 Submit
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                :disabled="state.pendingAction"
+                title="You applied by hand on the company's site — mark it submitted so replies and follow-ups are tracked"
+                @click="markSubmittedOne(entry)"
+              >
+                <CircleCheck class="h-4 w-4" />
+                I applied manually
               </Button>
               <Button
                 size="sm"

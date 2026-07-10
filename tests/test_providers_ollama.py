@@ -88,7 +88,8 @@ class TestOllamaProvider:
         provider, _, _ = _make_provider(
             tmp_path, response=_FakeResponse(200, {"models": []})
         )
-        assert provider._native_api_root() == "http://localhost:11434/api"
+        # 2026-07-07: default pinned to 127.0.0.1 (repo invariant #9).
+        assert provider._native_api_root() == "http://127.0.0.1:11434/api"
 
     def test_native_api_root_honours_base_url_override(self, tmp_path: Path) -> None:
         creds = ProviderCredentials(

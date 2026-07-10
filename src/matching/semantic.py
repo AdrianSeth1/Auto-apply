@@ -20,10 +20,24 @@ import hashlib
 import logging
 import math
 import re
+import time
 from collections import Counter
 from typing import Any
 
 logger = logging.getLogger("autoapply.matching.semantic")
+
+# Local (Ollama) embedding defaults — see ``matching.embeddings`` in
+# config/settings.yaml. nomic-embed-text is a dedicated 768-dim embedding
+# model (~274MB); dimensions differ from the OpenAI path so the two must
+# never share cache keys or pgvector columns.
+DEFAULT_LOCAL_EMBEDDING_MODEL = "nomic-embed-text"
+DEFAULT_LOCAL_EMBEDDING_BASE_URL = "http://127.0.0.1:11434"  # never localhost (IPv6 hang)
+
+# Circuit breaker: when Ollama is down, every scored job would otherwise
+# pay a connect-timeout. After the first failure we stop trying for a
+# window and the scorer falls back to TF overlap.
+_LOCAL_EMBED_BACKOFF_SECONDS = 120.0
+_local_embed_disabled_until = 0.0
 
 # Default embedding model. text-embedding-3-small is 1536-dim, matching
 # the pgvector columns on ``BulletPool.text_embedding``,
@@ -207,6 +221,178 @@ def _call_openai_embeddings(
     ):
         return None
     return [float(v) for v in vector]
+
+
+def local_embedding_settings() -> dict[str, Any] | None:
+    """Return ``{model, base_url, enabled}`` from config, or ``None`` when
+    local embeddings are disabled.
+
+    Config shape (config/settings.yaml)::
+
+        matching:
+          embeddings:
+            enabled: true
+            model: nomic-embed-text
+            base_url: http://127.0.0.1:11434
+
+    Missing config defaults to ENABLED with the defaults above — the
+    runtime fallback (Ollama unreachable / model not pulled) already
+    degrades gracefully to TF overlap, so an opt-out flag is enough.
+    """
+    try:
+        from src.core.config import load_config  # noqa: PLC0415
+
+        raw = load_config().get("matching", {})
+    except Exception:  # noqa: BLE001 -- config trouble -> defaults
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    embeddings = raw.get("embeddings", {})
+    if not isinstance(embeddings, dict):
+        embeddings = {}
+    if not embeddings.get("enabled", True):
+        return None
+    return {
+        "model": str(embeddings.get("model") or DEFAULT_LOCAL_EMBEDDING_MODEL),
+        "base_url": str(
+            embeddings.get("base_url") or DEFAULT_LOCAL_EMBEDDING_BASE_URL
+        ).rstrip("/"),
+    }
+
+
+def embed_text_local(
+    text: str,
+    *,
+    model: str | None = None,
+    base_url: str | None = None,
+    cache: bool = True,
+    timeout: int = 20,
+) -> list[float] | None:
+    """Embed ``text`` via the local Ollama embeddings endpoint, or ``None``.
+
+    Mirrors :func:`embed_text`'s graceful-degradation contract: any
+    failure (disabled in config, Ollama down, model not pulled, bad
+    response shape) returns ``None`` so callers fall back to the TF
+    keyword path. Successful vectors are cached in the ``embedding``
+    namespace keyed by (ollama, model, base_url, text) — disjoint from
+    OpenAI keys by construction.
+
+    A process-wide circuit breaker skips the HTTP call for
+    ``_LOCAL_EMBED_BACKOFF_SECONDS`` after a failure so scoring a
+    300-job search doesn't pay 300 connect-timeouts when Ollama is off.
+    """
+    global _local_embed_disabled_until
+
+    if not text or not text.strip():
+        return None
+    settings = local_embedding_settings()
+    if settings is None:
+        return None
+    model = model or settings["model"]
+    base_url = (base_url or settings["base_url"]).rstrip("/")
+    text = text[:_MAX_EMBED_INPUT_CHARS]
+
+    cache_key: str | None = None
+    if cache:
+        cache_key = hashlib.sha256(
+            f"ollama\x00{model}\x00{base_url}\x00{text}".encode()
+        ).hexdigest()
+        try:
+            from src.cache import get_cache  # noqa: PLC0415
+
+            cached = get_cache().get("embedding", cache_key)
+        except Exception as exc:  # noqa: BLE001 -- cache must never break embed
+            logger.debug("Local embedding cache lookup skipped (%s).", exc)
+            cached = None
+        if cached is not None:
+            return cached
+
+    if time.monotonic() < _local_embed_disabled_until:
+        return None
+
+    try:
+        import httpx  # noqa: PLC0415
+
+        response = httpx.post(
+            f"{base_url}/api/embeddings",
+            json={"model": model, "prompt": text},
+            timeout=timeout,
+        )
+        if response.status_code != 200:
+            logger.warning(
+                "Ollama embeddings returned %s: %s (falling back to keyword overlap "
+                "for %.0fs — is `%s` pulled?)",
+                response.status_code,
+                response.text[:200],
+                _LOCAL_EMBED_BACKOFF_SECONDS,
+                model,
+            )
+            _local_embed_disabled_until = time.monotonic() + _LOCAL_EMBED_BACKOFF_SECONDS
+            return None
+        payload = response.json()
+    except Exception as exc:  # noqa: BLE001 -- transport failure -> fallback + backoff
+        logger.warning(
+            "Ollama embeddings unavailable (%s); using keyword overlap for %.0fs.",
+            exc,
+            _LOCAL_EMBED_BACKOFF_SECONDS,
+        )
+        _local_embed_disabled_until = time.monotonic() + _LOCAL_EMBED_BACKOFF_SECONDS
+        return None
+
+    vector = payload.get("embedding") if isinstance(payload, dict) else None
+    if not isinstance(vector, list) or not vector or not all(
+        isinstance(v, int | float) for v in vector
+    ):
+        return None
+    result = [float(v) for v in vector]
+
+    if cache and cache_key is not None:
+        try:
+            from src.cache import get_cache  # noqa: PLC0415
+
+            get_cache().set("embedding", cache_key, result)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Local embedding cache write skipped (%s).", exc)
+    return result
+
+
+def calibrate_embedding_cosine(cosine: float) -> float:
+    """Map raw embedding cosine to the [0, 1] band the scorer expects.
+
+    Raw nomic-embed-text cosines cluster high: unrelated prose pairs land
+    around 0.3–0.45 and strong JD/resume matches around 0.75+. Feeding raw
+    cosines into the weighted score would inflate every job's text
+    component relative to the old TF scale, so we linearly rescale
+    [0.35, 0.85] -> [0, 1] and clamp.
+    """
+    return max(0.0, min(1.0, (cosine - 0.35) / 0.5))
+
+
+def compute_text_similarity(
+    job_description: str,
+    applicant_text: str,
+    *,
+    applicant_vector: list[float] | None = None,
+) -> float:
+    """JD/applicant text similarity: local embeddings first, TF fallback.
+
+    ``applicant_vector`` lets batch callers (the scorer) embed the
+    applicant text once per profile instead of once per job; the JD
+    vector is cached by content hash so multi-profile scoring embeds
+    each JD only once regardless of profile count.
+    """
+    if not job_description or not applicant_text:
+        return 0.0
+
+    jd_vector = embed_text_local(job_description)
+    if jd_vector is not None:
+        app_vector = applicant_vector or embed_text_local(applicant_text)
+        if app_vector is not None:
+            return calibrate_embedding_cosine(
+                compute_cosine_similarity(jd_vector, app_vector)
+            )
+
+    return compute_keyword_similarity(job_description, applicant_text)
 
 
 def compute_skill_overlap(

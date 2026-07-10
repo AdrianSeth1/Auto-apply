@@ -29,5 +29,12 @@ import { RouterLink } from "vue-router"
     >
       Templates
     </RouterLink>
+    <RouterLink
+      to="/materials/questions"
+      class="border-b-2 border-transparent px-3 py-2 text-sm font-medium text-muted-foreground hover:text-foreground"
+      active-class="!border-primary !text-foreground"
+    >
+      Questions
+    </RouterLink>
   </nav>
 </template>

@@ -35,7 +35,12 @@ class OllamaProvider(OpenAICompatibleProvider):
     install_hint = "Install Ollama from https://ollama.com, then `ollama serve`"
     # Rarely needed (only if Ollama is fronted by an auth proxy).
     api_key_env_var = "OLLAMA_API_KEY"
-    default_base_url = "http://localhost:11434/v1"
+    # 127.0.0.1, NOT localhost (repo invariant #9): on this Windows
+    # setup localhost resolves IPv6-first and Ollama listens on IPv4
+    # only, so every probe/generation call paid an IPv6 connect
+    # attempt before falling back — repeated stalls on the web
+    # process's event loop during provider health checks.
+    default_base_url = "http://127.0.0.1:11434/v1"
     # `llama3.2` is the cheapest "you almost certainly have it" default;
     # users will overwhelmingly override this via the picker.
     default_model = "llama3.2"
