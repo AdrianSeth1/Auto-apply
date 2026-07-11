@@ -23,7 +23,8 @@ EXPECTED_ENTRIES: set[str] = {
     # because ``maintenance.status_sync`` is explicit
     # ``not_implemented`` until ATS/application-portal polling lands.
     # Manual CLI invocation still works against the kind.
-    "linkedin_cookie_refresh",
+    # 2026-07-10: ``linkedin_cookie_refresh`` removed from Beat after
+    # LinkedIn flagged the account for automated access.
     "cache_eviction",
     "gate_expire_sweep",
     # Phase 17.1: end-to-end plan-run orchestrator

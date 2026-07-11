@@ -95,16 +95,13 @@ def get_schedule() -> dict[str, dict[str, object]]:
             "schedule": crontab(minute=15, hour="*/6"),
             "options": _MAINTENANCE_OPTS,
         },
-        # 2026-07-07: moved 03:00 -> 07:15 UTC (2:15am Central) so it runs
-        # right after the overnight Task Scheduler start (07:00 UTC) and
-        # just BEFORE the 07:30-08:15 UTC automation plans that need the
-        # LinkedIn session. At 03:00 UTC (10pm Central) the stack was
-        # usually down.
-        "linkedin_cookie_refresh": {
-            "task": "maintenance.linkedin_cookie_refresh",
-            "schedule": crontab(hour=7, minute=15),
-            "options": _MAINTENANCE_OPTS,
-        },
+        # 2026-07-10: ``linkedin_cookie_refresh`` REMOVED from Beat after
+        # LinkedIn flagged the user's account for automated profile-data
+        # access (rehabRestrictionChallenge warning). No scheduled task
+        # may touch LinkedIn; search profiles are ATS-only. The task
+        # remains registered for manual CLI use only, and should stay
+        # unscheduled unless the user explicitly accepts the account
+        # risk of resuming automated access.
         "cache_eviction": {
             "task": "maintenance.cache_eviction",
             "schedule": crontab(minute=30),  # every hour, on :30
