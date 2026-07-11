@@ -170,6 +170,74 @@ def _entry_application_url(session, entry) -> str | None:
     return None
 
 
+def _entry_job_text(session, entry) -> tuple[str, str]:
+    """(title, description) for QA-bank matching -- legacy Job first, then
+    the Job Index snapshot bound to this entry."""
+    from src.core.models import Job, JobSnapshot  # noqa: PLC0415
+
+    if entry.job_id is not None:
+        job = session.get(Job, entry.job_id)
+        if job is not None and (job.description or job.title):
+            return job.title or entry.title or "", job.description or ""
+    if entry.job_snapshot_id is not None:
+        snapshot = session.get(JobSnapshot, entry.job_snapshot_id)
+        if snapshot is not None:
+            return snapshot.title or entry.title or "", snapshot.description or ""
+    return entry.title or "", ""
+
+
+def _qa_bank_matches_for_job(title: str, description: str, limit: int = 5) -> list[dict]:
+    """Top saved QA-bank entries whose saved question overlaps this job's
+    title/description.
+
+    Same token-overlap technique as
+    ``src.application.question_answers._similar_saved_answers``, matched
+    against the JOB's text instead of a live user-typed question -- the
+    copy pack has no question in hand, just the posting.
+    """
+    import re as _re  # noqa: PLC0415
+
+    from src.application.question_answers import list_saved_answers  # noqa: PLC0415
+
+    saved = list_saved_answers().get("entries", [])
+    if not saved:
+        return []
+    job_tokens = set(_re.findall(r"[a-z0-9]+", f"{title} {description}".lower()))
+    if not job_tokens:
+        return []
+    scored = []
+    for entry in saved:
+        text = (entry.get("question") or "").lower()
+        overlap = len(job_tokens & set(_re.findall(r"[a-z0-9]+", text)))
+        if overlap >= 3:
+            scored.append((overlap, entry))
+    scored.sort(key=lambda pair: -pair[0])
+    return [entry for _, entry in scored[:limit]]
+
+
+def _active_profile_identity() -> dict[str, str]:
+    """Identity fields for the copy pack: name, email, phone, location, LinkedIn."""
+    from src.application.profile import get_active_profile_path  # noqa: PLC0415
+    from src.memory.profile import load_profile_yaml  # noqa: PLC0415
+
+    path = get_active_profile_path()
+    if path is None:
+        return {}
+    try:
+        profile = load_profile_yaml(path)
+    except Exception:  # noqa: BLE001 -- best-effort, never break the copy pack
+        logger.warning("copy-pack: failed to load active profile %s", path, exc_info=True)
+        return {}
+    identity = profile.get("identity") or {}
+    return {
+        "full_name": identity.get("full_name") or "",
+        "email": identity.get("email") or "",
+        "phone": identity.get("phone") or "",
+        "location": identity.get("location") or "",
+        "linkedin_url": identity.get("linkedin_url") or "",
+    }
+
+
 def _serialize_enriched(session, entry) -> dict[str, Any]:
     """serialize_entry + the fields a human needs to apply manually.
 
@@ -215,6 +283,35 @@ async def get_review_entry(entry_id: str) -> dict[str, Any]:
             # whether an id exists in another tenant's scope.
             raise HTTPException(404, "review entry not found")
         return {"ok": True, "entry": _serialize_enriched(session, entry)}
+
+
+@router.get("/{entry_id}/copy-pack")
+async def copy_pack_route(entry_id: str) -> dict[str, Any]:
+    """Everything needed to fill out a manual ATS application by hand.
+
+    2026-07-11 (user report): the user applies manually and re-typing
+    identity fields, hunting for the right saved QA answer, and
+    re-locating artifact file paths on every posting was slow. This
+    bundles it all into one fetch so the "Copy pack" button can render a
+    copy-everything modal on the review card.
+    """
+    factory = get_session_factory()
+    with factory() as session:
+        entry = get_entry_db(session, entry_id)
+        if entry is None or entry.tenant_id != _tenant():
+            raise HTTPException(404, "review entry not found")
+
+        title, description = _entry_job_text(session, entry)
+        return {
+            "ok": True,
+            "entry_id": str(entry.id),
+            "company": entry.company,
+            "title": entry.title,
+            "identity": _active_profile_identity(),
+            "artifacts": _entry_artifacts(entry.materials_path),
+            "application_url": _entry_application_url(session, entry),
+            "qa_matches": _qa_bank_matches_for_job(title, description),
+        }
 
 
 # --------------------------------------------------------------------------- #

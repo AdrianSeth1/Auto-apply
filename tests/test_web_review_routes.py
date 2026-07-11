@@ -8,6 +8,8 @@ isolation, and the single-item + bulk surfaces.
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -283,3 +285,230 @@ class TestBulkRoutes:
             "/api/review/bulk/reject-by-filter", json={}
         )
         assert response.status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# Copy pack (2026-07-11) -- mocked session, no live Postgres needed           #
+# (test_web.py style: patch every DB-touching call at its import path in     #
+# src.web.routes.review, rather than exercising the real ORM).               #
+# --------------------------------------------------------------------------- #
+
+
+class _FakeSessionContext:
+    """Stands in for ``factory()`` -- the route only ever passes the
+    yielded session through to functions we mock out separately, so it
+    never needs to behave like a real SQLAlchemy Session."""
+
+    def __init__(self, session):
+        self._session = session
+
+    def __enter__(self):
+        return self._session
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def _fake_entry(**overrides):
+    defaults = {
+        "id": uuid.uuid4(),
+        "tenant_id": ROUTE_TENANT,
+        "job_id": uuid.uuid4(),
+        "job_snapshot_id": uuid.uuid4(),
+        "company": "Acme",
+        "title": "SWE Intern",
+        "materials_path": "/data/output/resume_Acme_SWE-Intern_2026-07-11.pdf",
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+class TestCopyPackRoute:
+    def _patch_session_factory(self):
+        return patch(
+            "src.web.routes.review.get_session_factory",
+            return_value=lambda: _FakeSessionContext(MagicMock()),
+        )
+
+    def test_copy_pack_happy_path(self, client: TestClient):
+        entry = _fake_entry()
+        with (
+            self._patch_session_factory(),
+            patch("src.web.routes.review.get_entry_db", return_value=entry),
+            patch(
+                "src.web.routes.review._entry_job_text",
+                return_value=("SWE Intern", "Build things with Python."),
+            ),
+            patch(
+                "src.web.routes.review._active_profile_identity",
+                return_value={
+                    "full_name": "Arya Seth",
+                    "email": "arya@example.com",
+                    "phone": "555-1234",
+                    "location": "Portland, OR",
+                    "linkedin_url": "https://linkedin.com/in/aryaseth",
+                },
+            ),
+            patch(
+                "src.web.routes.review._entry_artifacts",
+                return_value=[{"label": "Resume PDF", "path": "/data/output/resume.pdf"}],
+            ),
+            patch(
+                "src.web.routes.review._entry_application_url",
+                return_value="https://acme.example/careers/123",
+            ),
+            patch(
+                "src.web.routes.review._qa_bank_matches_for_job",
+                return_value=[
+                    {
+                        "id": "qa-1",
+                        "question": "Why do you want to work here?",
+                        "answer": "Because Python.",
+                        "question_type": "motivation",
+                        "confidence": 0.9,
+                        "needs_review": False,
+                    }
+                ],
+            ),
+        ):
+            response = client.get(f"/api/review/{entry.id}/copy-pack")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert body["entry_id"] == str(entry.id)
+        assert body["company"] == "Acme"
+        assert body["title"] == "SWE Intern"
+        assert body["identity"]["full_name"] == "Arya Seth"
+        assert body["identity"]["email"] == "arya@example.com"
+        assert body["artifacts"] == [{"label": "Resume PDF", "path": "/data/output/resume.pdf"}]
+        assert body["application_url"] == "https://acme.example/careers/123"
+        assert len(body["qa_matches"]) == 1
+        assert body["qa_matches"][0]["question"] == "Why do you want to work here?"
+
+    def test_copy_pack_404_for_missing_entry(self, client: TestClient):
+        with (
+            self._patch_session_factory(),
+            patch("src.web.routes.review.get_entry_db", return_value=None),
+        ):
+            response = client.get(f"/api/review/{uuid.uuid4()}/copy-pack")
+        assert response.status_code == 404
+
+    def test_copy_pack_404_for_other_tenant(self, client: TestClient):
+        entry = _fake_entry(tenant_id="someone-elses-tenant")
+        with (
+            self._patch_session_factory(),
+            patch("src.web.routes.review.get_entry_db", return_value=entry),
+        ):
+            response = client.get(f"/api/review/{entry.id}/copy-pack")
+        # Cross-tenant access returns 404, not 403, matching every other
+        # single-item route in this file.
+        assert response.status_code == 404
+
+    def test_copy_pack_missing_profile_returns_empty_identity(self, client: TestClient):
+        """No active profile configured -- the pack still returns the
+        other fields instead of erroring out."""
+        entry = _fake_entry()
+        with (
+            self._patch_session_factory(),
+            patch("src.web.routes.review.get_entry_db", return_value=entry),
+            patch("src.web.routes.review._entry_job_text", return_value=("SWE Intern", "")),
+            patch("src.web.routes.review._active_profile_identity", return_value={}),
+            patch("src.web.routes.review._entry_artifacts", return_value=[]),
+            patch("src.web.routes.review._entry_application_url", return_value=None),
+            patch("src.web.routes.review._qa_bank_matches_for_job", return_value=[]),
+        ):
+            response = client.get(f"/api/review/{entry.id}/copy-pack")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["identity"] == {}
+        assert body["artifacts"] == []
+        assert body["qa_matches"] == []
+
+
+class TestQaBankMatchesForJob:
+    """Unit tests for the token-overlap matcher itself (no HTTP layer)."""
+
+    def _saved(self, entries):
+        return patch(
+            "src.application.question_answers.list_saved_answers",
+            return_value={"entries": entries},
+        )
+
+    def test_matches_on_token_overlap_with_job_text(self):
+        from src.web.routes.review import _qa_bank_matches_for_job
+
+        saved = [
+            {
+                "id": "1",
+                "question": "Describe your experience with payments infrastructure engineering.",
+            },
+            {"id": "2", "question": "Describe your favorite vacation."},
+        ]
+        with self._saved(saved):
+            matches = _qa_bank_matches_for_job(
+                "Payments Infrastructure Engineer",
+                "We build payments infrastructure and engineering tools.",
+            )
+        assert [m["id"] for m in matches] == ["1"]
+
+    def test_requires_minimum_overlap(self):
+        from src.web.routes.review import _qa_bank_matches_for_job
+
+        saved = [{"id": "1", "question": "One word overlap only: payments."}]
+        with self._saved(saved):
+            matches = _qa_bank_matches_for_job("Engineer", "We build software.")
+        assert matches == []
+
+    def test_returns_at_most_five_sorted_by_overlap(self):
+        from src.web.routes.review import _qa_bank_matches_for_job
+
+        saved = [
+            {"id": str(i), "question": "python backend engineer distributed systems api"}
+            for i in range(8)
+        ]
+        with self._saved(saved):
+            matches = _qa_bank_matches_for_job(
+                "Backend Engineer", "python backend engineer distributed systems api"
+            )
+        assert len(matches) == 5
+
+    def test_no_saved_answers_returns_empty(self):
+        from src.web.routes.review import _qa_bank_matches_for_job
+
+        with self._saved([]):
+            assert _qa_bank_matches_for_job("Engineer", "Some description.") == []
+
+
+class TestActiveProfileIdentity:
+    def test_no_active_profile_returns_empty_dict(self):
+        from src.web.routes.review import _active_profile_identity
+
+        with patch("src.application.profile.get_active_profile_path", return_value=None):
+            assert _active_profile_identity() == {}
+
+    def test_extracts_expected_identity_fields(self, tmp_path):
+        from src.web.routes.review import _active_profile_identity
+
+        profile_path = tmp_path / "profile.yaml"
+        profile_path.write_text(
+            "identity:\n"
+            "  full_name: Arya Seth\n"
+            "  email: arya@example.com\n"
+            "  phone: '555-1234'\n"
+            "  location: Portland, OR\n"
+            "  linkedin_url: https://linkedin.com/in/aryaseth\n"
+            "  github_url: https://github.com/arya\n",
+            encoding="utf-8",
+        )
+        with patch(
+            "src.application.profile.get_active_profile_path", return_value=profile_path
+        ):
+            identity = _active_profile_identity()
+        assert identity == {
+            "full_name": "Arya Seth",
+            "email": "arya@example.com",
+            "phone": "555-1234",
+            "location": "Portland, OR",
+            "linkedin_url": "https://linkedin.com/in/aryaseth",
+        }

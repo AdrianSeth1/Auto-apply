@@ -5,6 +5,7 @@ import {
   Check,
   CircleCheck,
   CircleX,
+  Copy,
   ExternalLink,
   Inbox,
   Loader2,
@@ -426,6 +427,83 @@ function openFillDetailsDialog(application) {
 function closeFillDetailsDialog() {
   fillDetailsDialog.open = false
   fillDetailsDialog.application = null
+}
+
+// 2026-07-11: "Copy pack" -- identity + artifact paths + posting link +
+// top matching saved QA answers for one review card, bundled so a manual
+// application doesn't require re-typing everything per posting.
+const copyPackDialog = reactive({
+  open: false,
+  loading: false,
+  error: "",
+  entry: null,
+  data: null,
+  copiedKey: "",
+})
+
+async function openCopyPackDialog(entry) {
+  copyPackDialog.entry = entry
+  copyPackDialog.data = null
+  copyPackDialog.error = ""
+  copyPackDialog.loading = true
+  copyPackDialog.open = true
+  try {
+    copyPackDialog.data = await api.reviewCopyPack(entry.id)
+  } catch (err) {
+    copyPackDialog.error = err?.message || "Couldn't load the copy pack."
+  } finally {
+    copyPackDialog.loading = false
+  }
+}
+
+function closeCopyPackDialog() {
+  copyPackDialog.open = false
+  copyPackDialog.entry = null
+  copyPackDialog.data = null
+  copyPackDialog.error = ""
+}
+
+const IDENTITY_LABELS = {
+  full_name: "Name",
+  email: "Email",
+  phone: "Phone",
+  location: "Location",
+  linkedin_url: "LinkedIn",
+}
+
+function copyPackIdentityFields(data) {
+  const identity = data?.identity || {}
+  return Object.entries(IDENTITY_LABELS)
+    .map(([key, label]) => ({ key, label, value: identity[key] || "" }))
+    .filter((field) => field.value)
+}
+
+function copyPackAllText(data) {
+  if (!data) return ""
+  const lines = []
+  for (const field of copyPackIdentityFields(data)) {
+    lines.push(`${field.label}: ${field.value}`)
+  }
+  if (data.application_url) {
+    lines.push("", `Application: ${data.application_url}`)
+  }
+  for (const match of data.qa_matches || []) {
+    lines.push("", `Q: ${match.question}`, `A: ${match.answer}`)
+  }
+  return lines.join("\n")
+}
+
+async function copyPackItem(key, text) {
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    copyPackDialog.copiedKey = key
+    setTimeout(() => {
+      if (copyPackDialog.copiedKey === key) copyPackDialog.copiedKey = ""
+    }, 1500)
+  } catch {
+    copyPackDialog.error = "Clipboard unavailable — select and copy manually."
+  }
 }
 
 function applicationFillDetails(application) {
@@ -1147,6 +1225,15 @@ onMounted(refresh)
 
             <div v-if="col.id === 'pending'" class="flex flex-wrap gap-1">
               <Button
+                size="sm"
+                variant="outline"
+                title="Copy identity fields, materials paths, the posting link, and matching QA answers"
+                @click="openCopyPackDialog(entry)"
+              >
+                <Copy class="h-4 w-4" />
+                Copy pack
+              </Button>
+              <Button
                 v-if="entry.status !== 'stale'"
                 size="sm"
                 :disabled="state.pendingAction"
@@ -1185,6 +1272,15 @@ onMounted(refresh)
               </Button>
             </div>
             <div v-else-if="col.id === 'approved'" class="flex flex-wrap gap-1">
+              <Button
+                size="sm"
+                variant="outline"
+                title="Copy identity fields, materials paths, the posting link, and matching QA answers"
+                @click="openCopyPackDialog(entry)"
+              >
+                <Copy class="h-4 w-4" />
+                Copy pack
+              </Button>
               <Button
                 size="sm"
                 :disabled="state.pendingAction"
@@ -1285,6 +1381,152 @@ onMounted(refresh)
         </div>
         <DialogFooter>
           <Button variant="outline" @click="closeFillDetailsDialog">Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog :open="copyPackDialog.open" @update:open="(v) => !v && closeCopyPackDialog()">
+      <DialogContent class="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Copy pack</DialogTitle>
+          <DialogDescription>
+            <template v-if="copyPackDialog.entry">
+              {{ copyPackDialog.entry.title }} at {{ copyPackDialog.entry.company }}
+            </template>
+          </DialogDescription>
+        </DialogHeader>
+
+        <div
+          v-if="copyPackDialog.loading"
+          class="flex items-center justify-center py-8 text-sm text-muted-foreground"
+        >
+          <Loader2 class="h-4 w-4 animate-spin mr-2" />
+          Loading copy pack…
+        </div>
+
+        <Alert v-else-if="copyPackDialog.error" variant="destructive">
+          <AlertDescription>{{ copyPackDialog.error }}</AlertDescription>
+        </Alert>
+
+        <div v-else-if="copyPackDialog.data" class="max-h-[60vh] overflow-y-auto space-y-4">
+          <div v-if="copyPackIdentityFields(copyPackDialog.data).length" class="space-y-1">
+            <div class="text-xs font-medium uppercase text-muted-foreground">Identity</div>
+            <div
+              v-for="field in copyPackIdentityFields(copyPackDialog.data)"
+              :key="field.key"
+              class="flex items-center justify-between gap-2 rounded-md border p-2 text-sm"
+            >
+              <div class="min-w-0">
+                <div class="text-xs text-muted-foreground">{{ field.label }}</div>
+                <div class="truncate">{{ field.value }}</div>
+              </div>
+              <Button
+                size="sm"
+                variant="ghost"
+                aria-label="Copy"
+                @click="copyPackItem(field.key, field.value)"
+              >
+                <Check v-if="copyPackDialog.copiedKey === field.key" class="h-3.5 w-3.5" />
+                <Copy v-else class="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+
+          <div v-if="copyPackDialog.data.application_url" class="space-y-1">
+            <div class="text-xs font-medium uppercase text-muted-foreground">Posting</div>
+            <div class="flex items-center justify-between gap-2 rounded-md border p-2 text-sm">
+              <a
+                class="min-w-0 truncate text-primary underline-offset-4 hover:underline"
+                :href="copyPackDialog.data.application_url"
+                target="_blank"
+                rel="noopener"
+              >{{ copyPackDialog.data.application_url }}</a>
+              <Button
+                size="sm"
+                variant="ghost"
+                aria-label="Copy"
+                @click="copyPackItem('application_url', copyPackDialog.data.application_url)"
+              >
+                <Check v-if="copyPackDialog.copiedKey === 'application_url'" class="h-3.5 w-3.5" />
+                <Copy v-else class="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+
+          <div v-if="copyPackDialog.data.artifacts?.length" class="space-y-1">
+            <div class="text-xs font-medium uppercase text-muted-foreground">Materials</div>
+            <div
+              v-for="artifact in copyPackDialog.data.artifacts"
+              :key="artifact.path"
+              class="flex items-center justify-between gap-2 rounded-md border p-2 text-sm"
+            >
+              <div class="min-w-0">
+                <div class="text-xs text-muted-foreground">{{ artifact.label }}</div>
+                <div class="truncate font-mono text-xs">{{ artifact.path }}</div>
+              </div>
+              <Button
+                size="sm"
+                variant="ghost"
+                aria-label="Copy"
+                @click="copyPackItem(artifact.path, artifact.path)"
+              >
+                <Check v-if="copyPackDialog.copiedKey === artifact.path" class="h-3.5 w-3.5" />
+                <Copy v-else class="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+
+          <div v-if="copyPackDialog.data.qa_matches?.length" class="space-y-1">
+            <div class="text-xs font-medium uppercase text-muted-foreground">
+              Likely form questions
+            </div>
+            <div
+              v-for="match in copyPackDialog.data.qa_matches"
+              :key="match.id"
+              class="space-y-1 rounded-md border p-2 text-sm"
+            >
+              <div class="flex items-start justify-between gap-2">
+                <div class="font-medium">{{ match.question }}</div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  class="shrink-0"
+                  aria-label="Copy"
+                  @click="copyPackItem(match.id, match.answer)"
+                >
+                  <Check v-if="copyPackDialog.copiedKey === match.id" class="h-3.5 w-3.5" />
+                  <Copy v-else class="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              <div class="text-muted-foreground">{{ match.answer }}</div>
+            </div>
+          </div>
+
+          <div
+            v-if="
+              !copyPackIdentityFields(copyPackDialog.data).length &&
+              !copyPackDialog.data.application_url &&
+              !copyPackDialog.data.artifacts?.length &&
+              !copyPackDialog.data.qa_matches?.length
+            "
+            class="rounded-md border border-dashed p-4 text-sm text-muted-foreground"
+          >
+            Nothing to copy yet. Fill in your profile's identity fields and save some
+            QA bank answers to get more out of this.
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button
+            v-if="copyPackDialog.data"
+            variant="outline"
+            @click="copyPackItem('__all__', copyPackAllText(copyPackDialog.data))"
+          >
+            <Check v-if="copyPackDialog.copiedKey === '__all__'" class="h-4 w-4" />
+            <Copy v-else class="h-4 w-4" />
+            Copy all
+          </Button>
+          <Button variant="outline" @click="closeCopyPackDialog">Close</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -755,6 +755,12 @@ export const api = {
   reviewDetail(entryId) {
     return request(`/api/review/${encodeURIComponent(entryId)}`)
   },
+  reviewCopyPack(entryId) {
+    // 2026-07-11: identity fields + artifact paths + posting URL + top
+    // matching saved QA answers, bundled for the "Copy pack" modal so a
+    // manual application doesn't require re-typing everything per posting.
+    return request(`/api/review/${encodeURIComponent(entryId)}/copy-pack`)
+  },
   reviewApprove(entryId, payload = {}) {
     return request(`/api/review/${encodeURIComponent(entryId)}/approve`, {
       method: "POST",
