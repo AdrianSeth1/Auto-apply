@@ -32,6 +32,7 @@ from src.intake.greenhouse import GreenhouseScraper
 from src.intake.lever import LeverScraper
 from src.intake.schema import RawJob
 from src.intake.storage import persist_and_sync_ids
+from src.intake.workday import WorkdayScraper
 
 # Phase 13.8: the file-backed `src.intake.search_cache` module has been
 # retired. Per-search caching is now the Job Index (Phase 13.4
@@ -82,11 +83,12 @@ def _board_cache_ttl_s() -> float:
     except Exception:  # noqa: BLE001 -- config trouble -> legacy default
         return float(BOARD_CACHE_TTL_S)
 
-_board_cache: dict[tuple[str, str, bool], tuple[float, list[RawJob]]] = {}
+_BoardSlug = str | tuple[str, str, str]  # tuple form: workday (tenant, host, site)
+_board_cache: dict[tuple[str, _BoardSlug, bool], tuple[float, list[RawJob]]] = {}
 _board_cache_lock = threading.Lock()
 
 
-def _board_cache_get(key: tuple[str, str, bool]) -> list[RawJob] | None:
+def _board_cache_get(key: tuple[str, _BoardSlug, bool]) -> list[RawJob] | None:
     with _board_cache_lock:
         entry = _board_cache.get(key)
         if entry is None:
@@ -98,7 +100,7 @@ def _board_cache_get(key: tuple[str, str, bool]) -> list[RawJob] | None:
     return [job.model_copy(deep=True) for job in jobs]
 
 
-def _board_cache_put(key: tuple[str, str, bool], jobs: list[RawJob]) -> None:
+def _board_cache_put(key: tuple[str, _BoardSlug, bool], jobs: list[RawJob]) -> None:
     snapshot = [job.model_copy(deep=True) for job in jobs]
     with _board_cache_lock:
         _board_cache[key] = (time.monotonic(), snapshot)
@@ -108,6 +110,12 @@ def clear_board_cache() -> None:
     """Drop all cached ATS board results (tests / manual refresh)."""
     with _board_cache_lock:
         _board_cache.clear()
+
+
+def _slug_label(slug: _BoardSlug) -> str:
+    """Human-readable board label for log lines -- the tenant name alone
+    for Workday's (tenant, host, site) tuple, the slug string otherwise."""
+    return slug[0] if isinstance(slug, tuple) else slug
 
 
 def search_jobs(
@@ -151,6 +159,7 @@ def search_jobs(
         "greenhouse": GreenhouseScraper,
         "lever": LeverScraper,
         "ashby": AshbyScraper,
+        "workday": WorkdayScraper,
     }
 
     all_jobs: list[RawJob] = []
@@ -160,28 +169,47 @@ def search_jobs(
     # instead of serially -- with many configured boards this cuts the ATS
     # scrape from sum(latencies) to roughly max(latencies). Results are
     # re-assembled in config order so output stays deterministic.
-    board_tasks: list[tuple[str, str]] = []
+    #
+    # Workday entries are {tenant, host, site} dicts (a bare slug string
+    # can't determine host/site), which aren't hashable -- everything below
+    # (cache key, board_results key) needs a hashable "slug", so Workday
+    # dicts are converted to a (tenant, host, site) tuple up front and
+    # reconstructed into a dict only at the scraper.fetch_jobs() call.
+    board_tasks: list[tuple[str, str | tuple[str, str, str]]] = []
     for ats, slugs in companies.items():
         if ats not in scraper_map:
             logger.warning("No scraper for ATS '%s'", ats)
             continue
+        if ats == "workday":
+            for entry in slugs:
+                try:
+                    board_tasks.append((ats, (entry["tenant"], entry["host"], entry["site"])))
+                except (TypeError, KeyError):
+                    logger.warning("Skipping malformed workday companies.yaml entry: %r", entry)
+            continue
         board_tasks.extend((ats, slug) for slug in slugs)
 
-    def _fetch_board(ats: str, slug: str) -> list[RawJob]:
+    def _fetch_board(ats: str, slug: str | tuple[str, str, str]) -> list[RawJob]:
         cache_key = (ats, slug, parse_jds)
         if not force_refresh:
             cached = _board_cache_get(cache_key)
             if cached is not None:
-                logger.info("[%s/%s] board cache hit (%d jobs)", ats, slug, len(cached))
+                logger.info(
+                    "[%s/%s] board cache hit (%d jobs)", ats, _slug_label(slug), len(cached)
+                )
                 return cached
         with scraper_map[ats]() as scraper:
-            jobs = scraper.fetch_jobs(slug)
+            if ats == "workday":
+                tenant, host, site = slug
+                jobs = scraper.fetch_jobs({"tenant": tenant, "host": host, "site": site})
+            else:
+                jobs = scraper.fetch_jobs(slug)
         if parse_jds:
             jobs = enrich_requirements(jobs, use_llm=use_llm)
         _board_cache_put(cache_key, jobs)
         return jobs
 
-    board_results: dict[tuple[str, str], list[RawJob]] = {}
+    board_results: dict[tuple[str, str | tuple[str, str, str]], list[RawJob]] = {}
     if board_tasks:
         max_workers = min(8, len(board_tasks))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -193,12 +221,12 @@ def search_jobs(
                 try:
                     jobs = future.result()
                     board_results[(ats, slug)] = jobs
-                    logger.info("[%s/%s] fetched %d jobs", ats, slug, len(jobs))
+                    logger.info("[%s/%s] fetched %d jobs", ats, _slug_label(slug), len(jobs))
                 except ScraperError as e:
-                    logger.error("[%s/%s] %s", ats, slug, e)
+                    logger.error("[%s/%s] %s", ats, _slug_label(slug), e)
                     errors += 1
                 except Exception as e:
-                    logger.error("[%s/%s] %s", ats, slug, e, exc_info=True)
+                    logger.error("[%s/%s] %s", ats, _slug_label(slug), e, exc_info=True)
                     errors += 1
 
     for task_key in board_tasks:

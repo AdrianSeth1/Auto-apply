@@ -136,6 +136,11 @@ async def search_jobs(
                 ats_jobs = [
                     job for job in ats_jobs if _job_matches_keywords(job, linkedin_keywords)
                 ]
+            # Workday list items carry NO description at all (see
+            # src/intake/workday.py) -- fetch full JDs for jobs that
+            # survived keyword filtering, like LinkedIn detail fetches did,
+            # capped per tenant so one board can't dominate the run.
+            _enrich_workday_job_details(ats_jobs)
             counts["ats"] = len(ats_jobs)
             jobs.extend(ats_jobs)
         except Exception as exc:
@@ -440,6 +445,58 @@ async def _search_linkedin_with_job_index(
             "error": str(exc),
             "location": search_kwargs.get("location") or "",
         }
+
+
+def _enrich_workday_job_details(ats_jobs: list) -> None:
+    """Fetch full JDs for Workday jobs that survived keyword filtering.
+
+    Workday's list endpoint carries no description at all (see
+    src/intake/workday.py's module docstring), so this is load-bearing
+    for Workday jobs, not an optional enrichment. Capped per tenant
+    (``DETAIL_FETCH_CAP``) so one large board can't dominate a run.
+    Mutates ``ats_jobs`` in place; best-effort -- a fetch failure leaves
+    the job's description unchanged (already ``None``).
+    """
+    from collections import defaultdict
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from src.intake.workday import DETAIL_FETCH_CAP, WorkdayScraper
+
+    by_tenant: dict[str, list[int]] = defaultdict(list)
+    for idx, job in enumerate(ats_jobs):
+        if job.source == "workday":
+            tenant = (job.raw_data or {}).get("workday_tenant") or ""
+            by_tenant[tenant].append(idx)
+    if not by_tenant:
+        return
+
+    targets: list[int] = []
+    for tenant, indices in by_tenant.items():
+        capped = indices[:DETAIL_FETCH_CAP]
+        if len(indices) > DETAIL_FETCH_CAP:
+            logger.warning(
+                "Workday detail-fetch cap (%d) reached for tenant '%s'; "
+                "%d/%d keyword-surviving jobs left without a full JD",
+                DETAIL_FETCH_CAP,
+                tenant,
+                len(indices) - DETAIL_FETCH_CAP,
+                len(indices),
+            )
+        targets.extend(capped)
+    if not targets:
+        return
+
+    with WorkdayScraper() as scraper:
+        with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
+            futures = {
+                pool.submit(scraper.fetch_job_detail, ats_jobs[idx]): idx for idx in targets
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    ats_jobs[idx] = future.result()
+                except Exception:  # noqa: BLE001 -- best-effort, never fail the search
+                    logger.debug("Workday detail fetch skipped for job %d", idx, exc_info=True)
 
 
 def _adzuna_settings() -> dict:
@@ -1634,6 +1691,11 @@ def _build_companies_filter(
     company: str | None,
 ) -> dict[str, list[str]] | None:
     if ats and company:
+        # ats="workday" + company="<tenant>" degrades gracefully rather than
+        # working: a bare tenant string can't determine host/site, so
+        # src.intake.search's board loop logs a warning and skips it (same
+        # self-pruning path as a malformed companies.yaml entry). Workday
+        # can only be searched via the curated companies.yaml list.
         return {ats: [company]}
     if company:
         return {"greenhouse": [company], "lever": [company], "ashby": [company]}
