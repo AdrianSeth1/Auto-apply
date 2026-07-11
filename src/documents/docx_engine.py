@@ -522,6 +522,15 @@ def _render_ir_education(doc: Document, education: list[dict], styles: dict[str,
         details = _join_nonempty([degree, edu.get("location"), gpa])
         if details:
             _add_styled_paragraph(doc, details, styles.get("item_meta"))
+        # 2026-07-10: honors were silently dropped from every render —
+        # the user's Presidential Merit Scholarship and SAT/ACT scores
+        # never appeared. Scores matter for score-screening employers
+        # (Epic literally asks for them).
+        honors = [str(h) for h in (edu.get("honors") or []) if str(h).strip()]
+        if honors:
+            _add_styled_paragraph(
+                doc, f"Honors: {'; '.join(honors)}", styles.get("normal")
+            )
         courses = edu.get("relevant_courses", [])
         if courses:
             course_names = ", ".join(c.get("name", "") for c in courses if isinstance(c, dict))

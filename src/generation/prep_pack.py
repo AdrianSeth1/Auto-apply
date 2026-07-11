@@ -61,6 +61,10 @@ _THEME_QUESTIONS: dict[str, list[str]] = {
         "Tell me about applying structured judgment to an ambiguous task.",
         "How do you decide when an AI output is good enough to ship?",
     ],
+    "science_communication": [
+        "Explain something technical you know deeply as if I were a customer.",
+        "How do you adjust a demo or presentation for a non-technical audience?",
+    ],
 }
 
 _GENERIC_QUESTIONS = [
