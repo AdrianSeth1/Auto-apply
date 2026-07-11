@@ -241,7 +241,10 @@ const materialReviewEntries = computed(() => buildMaterialReviewEntries(modalMat
 const resumeTemplateOptions = computed(() => templateOptions("resume"))
 const coverLetterTemplateOptions = computed(() => templateOptions("cover_letter"))
 
-const sourceUsesLinkedIn = computed(() => form.source === "linkedin" || form.source === "all")
+// "all" no longer runs LinkedIn on the backend (permanently disabled
+// after the account warning -- see CLAUDE.md); only an explicit
+// source="linkedin" selection does.
+const sourceUsesLinkedIn = computed(() => form.source === "linkedin")
 const sourceUsesAts = computed(() => form.source === "ats" || form.source === "all")
 const filterProfileOptions = computed(() => [
   { value: "", label: "Select saved profile" },
@@ -358,7 +361,7 @@ watch(
       form.company = ""
     }
 
-    if (source === "linkedin" || source === "all") {
+    if (source === "linkedin") {
       void ensureLinkedInSessionLoaded()
     }
   },

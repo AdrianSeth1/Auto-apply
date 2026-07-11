@@ -309,6 +309,7 @@ def _posting_age_days(job: RawJob) -> float | None:
         raw.get("publishedAt"),  # Ashby API (ISO string)
         raw.get("created"),  # Adzuna API (ISO string)
         raw.get("workday_posted_date"),  # Workday (ISO date, see intake/workday.py)
+        raw.get("created_at"),  # HN Algolia API (ISO string, comment posted-at)
     )
     for value in candidates:
         posted = _parse_posting_datetime(value)

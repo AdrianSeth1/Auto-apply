@@ -195,19 +195,24 @@ class TestJobsApi:
         assert payload["jobs"][0]["company"] == "TestCo"
         assert payload["jobs"][0]["title"] == "SWE Intern"
 
+    @patch("src.intake.hn_hiring.fetch_latest_hn_hiring_jobs")
     @patch("src.application.jobs._search_adzuna", return_value=[])
     @patch("src.intake.search.search_jobs")
     @patch("src.intake.search.search_linkedin")
-    def test_jobs_search_all_keeps_ats_results_when_linkedin_fails(
+    def test_jobs_search_all_keeps_ats_results_when_hn_fails(
         self,
         mock_linkedin,
         mock_search,
         mock_adzuna,
+        mock_hn,
         client,
     ):
+        """"all" fans out to ATS + Adzuna + HN (never LinkedIn -- see
+        src.application.jobs's source == "linkedin" gate); one leg
+        failing must not wipe out another leg's results."""
         from src.intake.schema import RawJob
 
-        mock_linkedin.side_effect = RuntimeError("linkedin unavailable")
+        mock_hn.side_effect = RuntimeError("hn unavailable")
         mock_search.return_value = [
             RawJob(
                 source="greenhouse",
@@ -234,7 +239,9 @@ class TestJobsApi:
         assert response.status_code == 200
         payload = response.json()
         assert payload["jobs"][0]["title"] == "Backend Engineer"
-        assert "LinkedIn:" in payload["error"]
+        assert "HN:" in payload["error"]
+        # LinkedIn must never be invoked for source="all".
+        mock_linkedin.assert_not_called()
 
     @patch("src.intake.search.search_linkedin")
     def test_jobs_search_linkedin_auth_required_returns_error_code(self, mock_linkedin, client):

@@ -32,6 +32,7 @@ ATS_TYPES = {
     "linkedin",
     "adzuna",
     "workday",
+    "hn",
     "company_site",
     "unknown",
 }
@@ -97,9 +98,17 @@ async def search_jobs(
     ats_jobs: list = []
     linkedin_jobs: list = []
     adzuna_jobs: list = []
+    hn_jobs: list = []
     errors: list[str] = []
     error_code: str | None = None
-    counts = {"ats": 0, "linkedin": 0, "linkedin_external_ats": 0, "adzuna": 0, "total": 0}
+    counts = {
+        "ats": 0,
+        "linkedin": 0,
+        "linkedin_external_ats": 0,
+        "adzuna": 0,
+        "hn": 0,
+        "total": 0,
+    }
     experience_levels = _normalize_experience_levels(_normalize_list(experience_levels))
     employment_types = _normalize_list(employment_types)
     location_types = _normalize_location_types(_normalize_list(location_types))
@@ -162,7 +171,30 @@ async def search_jobs(
         except Exception as exc:
             errors.append(f"Adzuna: {exc}")
 
-    if source in ("linkedin", "all"):
+    if source in ("all",):
+        try:
+            from src.intake.hn_hiring import fetch_latest_hn_hiring_jobs
+
+            hn_jobs = fetch_latest_hn_hiring_jobs(force_refresh=force_refresh)
+            # Same treatment as ATS/Adzuna: HN's own "search" is really just
+            # the whole thread, so keyword narrowing happens here. Location
+            # narrowing is generic (applied to every non-LinkedIn source
+            # later in _apply_search_filters) and needs no special-casing.
+            if linkedin_keywords:
+                hn_jobs = [job for job in hn_jobs if _job_matches_keywords(job, linkedin_keywords)]
+            counts["hn"] = len(hn_jobs)
+            jobs.extend(hn_jobs)
+        except Exception as exc:
+            errors.append(f"HN: {exc}")
+
+    # LinkedIn is deliberately NOT part of "all" -- automated LinkedIn
+    # access is permanently off after an account restriction (see
+    # docs/CHANGELOG.md "safety: stop all automated LinkedIn access").
+    # It only runs on an explicit, standalone source="linkedin" request
+    # (e.g. a user manually testing a saved session), never swept in by
+    # "all" for either the overnight automation (src/orchestration/
+    # plan_run.py) or a general "search everything" web/CLI call.
+    if source == "linkedin":
         if not linkedin_keywords:
             if require_keyword_for_linkedin:
                 errors.append("LinkedIn search requires --keyword.")
@@ -1764,6 +1796,23 @@ def _apply_search_filters(
             continue
         if not _passes_category(metadata.get("education_level"), education_levels):
             continue
+        # Startup quality gate (HN "Who is hiring?" only): every other
+        # source follows "unknown passes" for pay (see the docstring
+        # above) because most JDs simply omit compensation and excluding
+        # them nukes results. HN postings are the opposite case -- silence
+        # on pay usually means a tiny non-paying/equity-only shop, which
+        # the user explicitly does NOT want surfaced when they've set a
+        # pay floor. The adapter sets raw_data["strict_pay"] = True (only
+        # ever true for source="hn") to opt into this inversion without
+        # touching the shared unknown-passes behavior below/elsewhere.
+        if (
+            pay_operator
+            and pay_amount is not None
+            and (job.raw_data or {}).get("strict_pay")
+            and metadata.get("pay_min") is None
+            and metadata.get("pay_max") is None
+        ):
+            continue
         if (
             pay_operator
             and pay_amount is not None
@@ -2206,7 +2255,9 @@ def _resolve_linkedin_search_locations(
     search_location: str | None,
     candidate_locations: list[str],
 ) -> list[str]:
-    if source not in {"linkedin", "all"}:
+    # "all" no longer runs LinkedIn (see the source == "linkedin" gate
+    # above) -- only resolve locations for an explicit LinkedIn request.
+    if source != "linkedin":
         return []
     if candidate_locations:
         return candidate_locations
