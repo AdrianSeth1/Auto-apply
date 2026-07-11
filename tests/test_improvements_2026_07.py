@@ -514,6 +514,102 @@ class TestRewriteRegressionGuard:
 
 
 # ===========================================================================
+# Em/en dash normalization (resume bullets + Materials-tab answers reading
+# as AI-generated -- 2026-07-11 user report)
+# ===========================================================================
+
+
+class TestProseDashNormalization:
+    def test_resume_bullet_em_dash_becomes_comma(self):
+        from src.generation.resume_builder import _normalize_prose_dashes
+
+        assert (
+            _normalize_prose_dashes("Led migration — reduced latency by 40%")
+            == "Led migration, reduced latency by 40%"
+        )
+
+    def test_resume_bullet_en_dash_becomes_comma(self):
+        from src.generation.resume_builder import _normalize_prose_dashes
+
+        assert (
+            _normalize_prose_dashes("Owned rollout – cut onboarding time in half")
+            == "Owned rollout, cut onboarding time in half"
+        )
+
+    def test_resume_bullet_compound_word_hyphens_untouched(self):
+        # Only the em/en dash Unicode characters are targeted -- ordinary
+        # ASCII hyphens inside compound words like "time-to-value" or
+        # "full-time" must survive unchanged.
+        from src.generation.resume_builder import _normalize_prose_dashes
+
+        text = "Cut time-to-value for full-time customers by 30%"
+        assert _normalize_prose_dashes(text) == text
+
+    def test_clean_llm_bullet_rewrite_output_strips_em_dash(self):
+        from src.generation.resume_builder import _clean_llm_bullet_rewrite_output
+
+        cleaned = _clean_llm_bullet_rewrite_output(
+            "Led the migration — reduced latency by 40%",
+            "Led the migration, reduced latency by 40%",
+        )
+        assert "—" not in cleaned
+        assert cleaned == "Led the migration, reduced latency by 40%"
+
+    def test_batch_rewrite_strips_em_dash_from_output(self):
+        from src.generation import resume_builder as rb
+        from src.generation.evidence import EvidenceBullet
+
+        grouped = {
+            "SDS": [
+                EvidenceBullet(
+                    source_id="e1",
+                    source_type="experience",
+                    source_entity="SDS",
+                    text="Built dashboards tracking onboarding health.",
+                )
+            ]
+        }
+        fake_response = {
+            "rewritten_bullets": [
+                "Built dashboards — tracking onboarding health and time-to-value."
+            ]
+        }
+        with patch("src.utils.llm.generate_json", return_value=fake_response):
+            result = rb._rewrite_grouped_evidence(grouped, ["time to value"], mode="balanced")
+        text = result["SDS"][0].render_text
+        assert "—" not in text
+        assert "time-to-value" in text  # compound hyphen survives
+
+    def test_question_answer_em_dash_becomes_comma(self):
+        from src.application.question_answers import _normalize_answer_dashes
+
+        assert (
+            _normalize_answer_dashes("I led the migration — it cut latency significantly.")
+            == "I led the migration, it cut latency significantly."
+        )
+
+    def test_question_answer_compound_word_hyphens_untouched(self):
+        from src.application.question_answers import _normalize_answer_dashes
+
+        text = "Worked on a state-of-the-art system for full-time staff."
+        assert _normalize_answer_dashes(text) == text
+
+    def test_parse_response_strips_em_dash_from_json_answer(self):
+        from src.application.question_answers import _parse_response
+
+        answer, _ = _parse_response(
+            '{"answer": "I led the project — it shipped early.", "clarifying_questions": []}'
+        )
+        assert answer == "I led the project, it shipped early."
+
+    def test_parse_response_strips_em_dash_from_fallback_text(self):
+        from src.application.question_answers import _parse_response
+
+        answer, _ = _parse_response("Just a plain paragraph — no JSON here.")
+        assert answer == "Just a plain paragraph, no JSON here."
+
+
+# ===========================================================================
 # Self-growing board registry
 # ===========================================================================
 

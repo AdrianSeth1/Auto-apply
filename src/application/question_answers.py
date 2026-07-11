@@ -34,6 +34,10 @@ Hard rules:
   experiences, metrics, employers, or dates.
 - Write in first person, confident but concrete. Prefer specific
   outcomes over adjectives.
+- Write the way the applicant would actually type it: plain sentences,
+  not corporate or essay-like phrasing.
+- Do NOT use em dashes or en dashes (—, –). Use a comma or period
+  instead; ordinary hyphens in compound words are fine.
 - Length: match the question; default 80-160 words for open-ended
   questions, shorter for direct ones.
 - If the profile lacks information that would make the answer stronger,
@@ -321,10 +325,23 @@ def _parse_response(raw: str) -> tuple[str, list[str]]:
                 if str(q).strip()
             ]
             if answer:
-                return answer, questions
+                return _normalize_answer_dashes(answer), questions
         except (json.JSONDecodeError, AttributeError, TypeError):
             pass
 
     # Fallback: strip any fence markers and use the raw text.
     text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.MULTILINE).strip()
-    return text, []
+    return _normalize_answer_dashes(text), []
+
+
+def _normalize_answer_dashes(text: str) -> str:
+    """Replace em/en dash punctuation with a comma so drafted answers
+    don't read AI-generated (mirrors
+    ``cover_letter._normalize_cover_letter_dashes``).
+
+    Only targets the Unicode em dash (—) and en dash (–), never the
+    plain ASCII hyphen, so compound words are untouched.
+    """
+    cleaned = re.sub(r"\s*[—–]\s*", ", ", text)
+    cleaned = re.sub(r",\s*,+", ",", cleaned)
+    return re.sub(r" {2,}", " ", cleaned).strip()

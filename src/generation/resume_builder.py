@@ -478,15 +478,17 @@ Return ONLY a JSON object:
 
 Rules:
 - Return exactly as many bullets as given, in the same order
-- If a bullet ALREADY contains a target keyword, return it unchanged — never
+- If a bullet ALREADY contains a target keyword, return it unchanged, never
   paraphrase an existing keyword match away
 - Preserve every number, metric, and named tool exactly as written; NEVER add
   a number that is not in the original bullet
 - Do NOT invent claims not present in the original bullet
 - Never swap plain words for fancier synonyms; only change wording to insert
   a target keyword truthfully
-- Spread keywords across bullets — avoid repeating the same keyword in multiple bullets
+- Spread keywords across bullets; avoid repeating the same keyword in multiple bullets
 - Keep professional tone throughout
+- Do NOT use em dashes or en dashes (—, –). Use a comma, period, or
+  semicolon instead
 - Inline markup (optional, use sparingly): **bold** for one key skill or metric per bullet, *italics* for proper nouns"""
 
 # The leading "/no_think" is Qwen3's soft switch disabling thinking mode for
@@ -573,6 +575,7 @@ def _rewrite_grouped_evidence(
                 rw_text = str(rw).strip() if rw else ""
                 if not rw_text or len(rw_text) > len(orig) * 2.5 or len(rw_text) < len(orig) * 0.25:
                     continue  # keep original
+                rw_text = _normalize_prose_dashes(rw_text)
                 validated[chunk_start + offset] = _rewrite_regression_guard(
                     orig, rw_text, keywords_str
                 )
@@ -979,7 +982,7 @@ a resume bullet to better match target job keywords while preserving facts.
 
 CRITICAL constraints (apply in every mode):
 - If the original bullet ALREADY contains a target keyword, that exact
-  wording is sacred — never paraphrase it away. ("cutting time-to-value"
+  wording is sacred, never paraphrase it away. ("cutting time-to-value"
   must stay "time-to-value" when time-to-value is a target keyword;
   "demo conversion" must keep the word "demo" when demos are targeted.)
 - NEVER swap plain words for fancier synonyms. "Redesigned onboarding"
@@ -989,6 +992,10 @@ CRITICAL constraints (apply in every mode):
   KEYWORDS where truthful. If no keyword fits naturally, return the
   original bullet verbatim.
 - Never make the bullet longer than the original by more than a few words.
+- Do NOT use em dashes or en dashes (—, –) as punctuation inside the
+  bullet. Use a comma, period, or semicolon instead. (This does not
+  apply to ordinary hyphens in compound words like "time-to-value" or
+  "full-time", which stay exactly as they are.)
 
 Return ONLY a JSON object with exactly this shape:
 {
@@ -1072,6 +1079,19 @@ _INVALID_BULLET_REWRITE_PATTERNS = (
 )
 
 
+def _normalize_prose_dashes(text: str) -> str:
+    """Replace em/en dash punctuation with a comma so rewrites don't read
+    AI-generated (mirrors ``cover_letter._normalize_cover_letter_dashes``).
+
+    Only targets the Unicode em dash (—) and en dash (–), never the plain
+    ASCII hyphen, so compound words like "time-to-value" or "full-time"
+    are untouched -- this is a punctuation cleanup, not a word filter.
+    """
+    cleaned = re.sub(r"\s*[—–]\s*", ", ", text)
+    cleaned = re.sub(r",\s*,+", ",", cleaned)
+    return re.sub(r" {2,}", " ", cleaned).strip()
+
+
 def _clean_llm_bullet_rewrite_output(
     rewritten: str,
     original: str,
@@ -1091,6 +1111,7 @@ def _clean_llm_bullet_rewrite_output(
         lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
         text = "\n".join(lines).strip()
     text = text.strip("•-– ").strip()
+    text = _normalize_prose_dashes(text)
 
     if not text:
         raise LLMError("LLM returned an empty bullet rewrite.")
@@ -1240,6 +1261,8 @@ Rules:
 - Do NOT invent skills, technologies, accomplishments, or projects.
 - Stay professional and concise; one bullet, one sentence (or two short ones).
 - changed_claims must list any phrasing whose grounding is even slightly uncertain.
+- Do NOT use em dashes or en dashes (—, –). Use a comma, period, or
+  semicolon instead; ordinary hyphens in compound words are fine.
 
 Inline markup you MAY use sparingly inside ``rewritten_bullet``:
 - ``**text**`` -- bold for ONE or TWO key skills, named technologies,
