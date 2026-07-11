@@ -21,6 +21,7 @@ ATSType = Literal[
     "adzuna",
     "workday",
     "hn",
+    "remotive",
     "company_site",
     "unknown",
 ]

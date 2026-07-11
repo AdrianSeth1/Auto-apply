@@ -33,6 +33,7 @@ ATS_TYPES = {
     "adzuna",
     "workday",
     "hn",
+    "remotive",
     "company_site",
     "unknown",
 }
@@ -99,6 +100,7 @@ async def search_jobs(
     linkedin_jobs: list = []
     adzuna_jobs: list = []
     hn_jobs: list = []
+    remotive_jobs: list = []
     errors: list[str] = []
     error_code: str | None = None
     counts = {
@@ -107,6 +109,7 @@ async def search_jobs(
         "linkedin_external_ats": 0,
         "adzuna": 0,
         "hn": 0,
+        "remotive": 0,
         "total": 0,
     }
     experience_levels = _normalize_experience_levels(_normalize_list(experience_levels))
@@ -186,6 +189,21 @@ async def search_jobs(
             jobs.extend(hn_jobs)
         except Exception as exc:
             errors.append(f"HN: {exc}")
+
+    # Remotive is a remote-only jobs board -- only worth a call when the
+    # caller actually wants remote roles, so it's gated on location_types
+    # rather than always firing under "all" like Adzuna/HN.
+    if source in ("all",) and "remote" in location_types:
+        try:
+            remotive_jobs = _search_remotive(linkedin_keywords[0] if linkedin_keywords else "")
+            if linkedin_keywords:
+                remotive_jobs = [
+                    job for job in remotive_jobs if _job_matches_keywords(job, linkedin_keywords)
+                ]
+            counts["remotive"] = len(remotive_jobs)
+            jobs.extend(remotive_jobs)
+        except Exception as exc:
+            errors.append(f"Remotive: {exc}")
 
     # LinkedIn is deliberately NOT part of "all" -- automated LinkedIn
     # access is permanently off after an account restriction (see
@@ -546,6 +564,21 @@ def _adzuna_settings() -> dict:
         "country": str(raw.get("country") or "us").strip(),
         "results_per_query": results_per_query,
     }
+
+
+def _search_remotive(keyword: str) -> list:
+    """Query the Remotive remote-jobs API once.
+
+    Only the first search keyword is used (Remotive's own ``search``
+    param handles one free-text query, unlike Adzuna's per-keyword
+    ``what``) -- the caller re-applies keyword filtering client-side
+    across every keyword afterward regardless, same as every other
+    source here.
+    """
+    from src.intake.remotive import RemotiveScraper
+
+    with RemotiveScraper() as scraper:
+        return scraper.fetch_jobs(keyword)
 
 
 def _search_adzuna(keywords: list[str], location: str | None) -> list:
