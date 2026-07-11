@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import uuid
 from datetime import UTC, datetime
@@ -29,12 +30,18 @@ ATS_TYPES = {
     "lever",
     "ashby",
     "linkedin",
+    "adzuna",
     "workday",
     "company_site",
     "unknown",
 }
 EMPLOYMENT_TYPES = {"internship", "fulltime", "parttime", "contract", "coop", "unknown"}
 SENIORITY_LEVELS = {"internship", "entry", "mid", "senior", "staff", "unknown"}
+
+# Free tier is 250 calls/day and five overnight automation plans run daily
+# -- capping each search to ~10 Adzuna calls keeps one search from burning
+# a large chunk of the daily quota.
+ADZUNA_MAX_CALLS_PER_SEARCH = 10
 
 PAY_RANGE_RE = re.compile(
     r"(?:\$|usd\s*)(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(k|m)?\s*"
@@ -89,9 +96,10 @@ async def search_jobs(
     jobs = []
     ats_jobs: list = []
     linkedin_jobs: list = []
+    adzuna_jobs: list = []
     errors: list[str] = []
     error_code: str | None = None
-    counts = {"ats": 0, "linkedin": 0, "linkedin_external_ats": 0, "total": 0}
+    counts = {"ats": 0, "linkedin": 0, "linkedin_external_ats": 0, "adzuna": 0, "total": 0}
     experience_levels = _normalize_experience_levels(_normalize_list(experience_levels))
     employment_types = _normalize_list(employment_types)
     location_types = _normalize_location_types(_normalize_list(location_types))
@@ -132,6 +140,22 @@ async def search_jobs(
             jobs.extend(ats_jobs)
         except Exception as exc:
             errors.append(f"ATS: {exc}")
+
+    if source in ("all",):
+        try:
+            adzuna_jobs = _search_adzuna(linkedin_keywords, search_location)
+            # Adzuna results MUST pass the normal ATS-style location/keyword
+            # filters (invariant #2) -- treat like ATS, not like LinkedIn.
+            # The boards-style keyword narrowing below is extra precision on
+            # top of Adzuna's own server-side `what` search.
+            if linkedin_keywords:
+                adzuna_jobs = [
+                    job for job in adzuna_jobs if _job_matches_keywords(job, linkedin_keywords)
+                ]
+            counts["adzuna"] = len(adzuna_jobs)
+            jobs.extend(adzuna_jobs)
+        except Exception as exc:
+            errors.append(f"Adzuna: {exc}")
 
     if source in ("linkedin", "all"):
         if not linkedin_keywords:
@@ -212,11 +236,16 @@ async def search_jobs(
     # redirect to Greenhouse/Lever reveal boards not yet in
     # companies.yaml; harvest the slugs so tomorrow's ATS pass covers
     # them. Best-effort — never blocks or fails the search.
-    if linkedin_jobs:
+    # 2026-07-10: Adzuna's redirect_url is included too, though in
+    # practice Adzuna's landing page (adzuna.com/land/ad/...) blocks
+    # unauthenticated fetches -- see docs/CHANGELOG.md -- so discovery
+    # from Adzuna jobs is currently a no-op most of the time. Harmless
+    # to leave wired in for whenever that changes.
+    if linkedin_jobs or adzuna_jobs:
         try:
             from src.intake.board_discovery import register_discovered_boards
 
-            register_discovered_boards(linkedin_jobs, config_dir)
+            register_discovered_boards(linkedin_jobs + adzuna_jobs, config_dir)
         except Exception:  # noqa: BLE001
             logger.debug("Board discovery skipped", exc_info=True)
 
@@ -411,6 +440,69 @@ async def _search_linkedin_with_job_index(
             "error": str(exc),
             "location": search_kwargs.get("location") or "",
         }
+
+
+def _adzuna_settings() -> dict:
+    raw = load_config().get("adzuna", {})
+    if not isinstance(raw, dict):
+        raw = {}
+    try:
+        results_per_query = max(int(raw.get("results_per_query", 50)), 1)
+    except (TypeError, ValueError):
+        results_per_query = 50
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "app_id": str(raw.get("app_id") or "").strip(),
+        "app_key_env": str(raw.get("app_key_env") or "AUTOAPPLY_ADZUNA_KEY").strip(),
+        "country": str(raw.get("country") or "us").strip(),
+        "results_per_query": results_per_query,
+    }
+
+
+def _search_adzuna(keywords: list[str], location: str | None) -> list:
+    """Query the Adzuna search API, once per keyword, capped at
+    ``ADZUNA_MAX_CALLS_PER_SEARCH`` calls.
+    """
+    settings = _adzuna_settings()
+    if not settings["enabled"]:
+        return []
+    app_key = os.environ.get(settings["app_key_env"]) or ""
+    if not settings["app_id"] or not app_key:
+        logger.warning(
+            "Adzuna enabled but app_id/%s is not set; skipping Adzuna search",
+            settings["app_key_env"],
+        )
+        return []
+
+    from src.intake.adzuna import AdzunaScraper
+
+    search_keywords = keywords or [""]
+    if len(search_keywords) > ADZUNA_MAX_CALLS_PER_SEARCH:
+        logger.warning(
+            "Adzuna call cap (%d) reached; searching only the first %d of %d keywords",
+            ADZUNA_MAX_CALLS_PER_SEARCH,
+            ADZUNA_MAX_CALLS_PER_SEARCH,
+            len(search_keywords),
+        )
+        search_keywords = search_keywords[:ADZUNA_MAX_CALLS_PER_SEARCH]
+
+    all_jobs: list = []
+    with AdzunaScraper(
+        app_id=settings["app_id"], app_key=app_key, country=settings["country"]
+    ) as scraper:
+        for kw in search_keywords:
+            try:
+                all_jobs.extend(
+                    scraper.search(
+                        keyword=kw,
+                        location=location or "",
+                        results_per_page=settings["results_per_query"],
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 -- one bad keyword must not fail the search
+                logger.warning("Adzuna search failed for keyword=%r: %s", kw, exc)
+
+    return _dedupe_jobs_by_signature(all_jobs)
 
 
 def _search_cache_policy() -> dict:

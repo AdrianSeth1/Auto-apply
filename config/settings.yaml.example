@@ -56,6 +56,15 @@ search_cache:
 linkedin:
   max_keyword_detail_fetches: 5000
   max_redirect_detail_fetches: 5000
+adzuna:
+  # Free aggregator API replacing LinkedIn scraping. Register app_id +
+  # app_key at developer.adzuna.com, then set the key via env var:
+  #   $env:AUTOAPPLY_ADZUNA_KEY = "your-app-key"
+  enabled: false
+  app_id: ''
+  app_key_env: AUTOAPPLY_ADZUNA_KEY
+  country: us
+  results_per_query: 50
 cache:
   l1_max_entries: 1024
 # Phase 18.4: artifact cleanup + quarantine pipeline.

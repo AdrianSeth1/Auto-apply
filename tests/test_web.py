@@ -195,12 +195,14 @@ class TestJobsApi:
         assert payload["jobs"][0]["company"] == "TestCo"
         assert payload["jobs"][0]["title"] == "SWE Intern"
 
+    @patch("src.application.jobs._search_adzuna", return_value=[])
     @patch("src.intake.search.search_jobs")
     @patch("src.intake.search.search_linkedin")
     def test_jobs_search_all_keeps_ats_results_when_linkedin_fails(
         self,
         mock_linkedin,
         mock_search,
+        mock_adzuna,
         client,
     ):
         from src.intake.schema import RawJob

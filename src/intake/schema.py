@@ -18,6 +18,7 @@ ATSType = Literal[
     "lever",
     "ashby",
     "linkedin",
+    "adzuna",
     "workday",
     "company_site",
     "unknown",
