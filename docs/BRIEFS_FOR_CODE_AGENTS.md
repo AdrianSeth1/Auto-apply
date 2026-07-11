@@ -176,3 +176,44 @@ LinkedIn scraping is permanently off (account restriction).
    config flag (expose it via an existing settings/config endpoint).
 5. Do NOT delete src/intake/linkedin.py (history + possible official-API
    future); just gate it.
+
+---
+
+## Brief 10 — URGENT: new-source jobs never persisted; review entries orphaned
+
+Diagnosis (verified against the DB, 2026-07-11): last night's plan runs
+created 26 review entries; 24 have materials_path NULL. Those 24 entries'
+job_id values exist in NEITHER the legacy `jobs` table NOR `job_postings`
+— they are transient RawJob UUIDs. materials.generate ran 28 times and
+SUCCEEDED (artifacts are in data/output) but its write-back matches entries
+by job id, found nothing, and the artifacts orphaned. application.prepare
+'succeeded' as silent not_found no-ops. Cause: the new source adapters
+(adzuna/hn/remotive/workday) produce jobs that the plan_run persistence
+step never writes to a table — inspect src/orchestration/plan_run.py
+(_resolve_and_patch_posting_ids and wherever persist_and_sync_ids is or
+isn't called) and make EVERY selected job persist to the legacy `jobs`
+table (persist_and_sync_ids rewrites RawJob ids to DB ids) BEFORE
+_create_review_entries runs. Remember CLAUDE.md invariant #7 (case-
+insensitive company comparisons) — that function has burned us before.
+
+Acceptance: run one plan via 'Run Plans Now.bat' with an adzuna-heavy
+search; every created review entry's job_id must join to `jobs`, and
+materials_path must fill for every generated entry. Then bulk-reject the
+24 broken entries (SQL update status='rejected', reason='orphaned ids,
+pre-fix') — most are staffing spam anyway — and rerun the plans.
+
+## Brief 11 — logging silently dead + Adzuna spam filter (small, do with #10)
+
+1. config says logging.file: logs/autoapply.log but the logs/ dir did not
+   exist (created manually 2026-07-11); logging.FileHandler does NOT create
+   parent dirs and setup likely swallowed the error. Find the logging setup
+   (grep basicConfig/FileHandler in src/) and add
+   Path(logfile).parent.mkdir(parents=True, exist_ok=True) before handler
+   creation, so this never silently no-ops again.
+2. Adzuna surfaces staffing-agency spam ('Info Way Solutions', 'Accentuate
+   Staffing', 'Futuremindz llc', 'Digital Minds Global Technologies').
+   Add a company blocklist filter in the adzuna adapter: drop jobs whose
+   company matches (case-insensitive) any of: staffing, recruiting,
+   consultanc, 'solutions llc', 'global services', 'technologies inc',
+   talent, 'next step systems' — plus a config list
+   adzuna.company_blocklist users can extend. Log dropped count per search.

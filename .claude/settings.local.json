@@ -5,7 +5,14 @@
       "Bash(curl -s -m 20 \"https://api.ashbyhq.com/posting-api/job-board/notion\" -H \"User-Agent: Mozilla/5.0\")",
       "Bash(curl -s -m 20 \"https://api.ashbyhq.com/posting-api/job-board/notion\" -H \"User-Agent: Mozilla/5.0\" -o /tmp/ashby_notion.json)",
       "Bash(python3 -c ' *)",
-      "Bash(git stash *)"
+      "Bash(git stash *)",
+      "WebFetch(domain:developer.adzuna.com)",
+      "WebSearch",
+      "Bash(curl *)",
+      "Bash(npx vite *)",
+      "Bash(powershell -Command \"Test-NetConnection -ComputerName 127.0.0.1 -Port 5432 -InformationLevel Quiet\")",
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
   }
 }
