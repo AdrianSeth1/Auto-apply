@@ -196,6 +196,21 @@ class TestMergedExperienceYears:
     def test_garbage_dates_skipped(self):
         assert self._years([{"start_date": "soon", "end_date": "later"}, "not-a-dict"]) == 0
 
+    def test_declared_professional_years_overrides_calendar(self):
+        from src.matching.rules import load_applicant_context
+
+        profile = {
+            "identity": {"professional_experience_years": 2},
+            "education": [],
+            "work_experiences": [
+                {"start_date": "2020-01", "end_date": "2026-01"},  # 6 calendar yrs
+            ],
+        }
+        assert load_applicant_context(profile).years_of_experience == 2
+        # Absent/invalid -> calendar math stands.
+        profile["identity"] = {"professional_experience_years": "lots"}
+        assert load_applicant_context(profile).years_of_experience == 6
+
 
 # ===========================================================================
 # Embedding similarity

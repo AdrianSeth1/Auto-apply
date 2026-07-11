@@ -493,7 +493,18 @@ def load_applicant_context(profile_data: dict[str, Any]) -> ApplicantContext:
     # rule for junior applicants. Month-granular now, too — the old
     # year-subtraction called an 11-month role 0 years and a
     # Dec 2024 - Jan 2025 role 1 year.
+    #
+    # 2026-07-10: ``identity.professional_experience_years`` overrides
+    # the calendar math when set. Calendar-merged years are TRUE but can
+    # be market-FALSE: varied student-era work (part-time clinical +
+    # freelance + research) merges to more years than any screener
+    # would credit toward "N years of experience" requirements. The
+    # user declares the number a recruiter would accept; absent or
+    # invalid, the merged calculation stands.
     total_years = _merged_experience_years(experiences)
+    declared = identity.get("professional_experience_years")
+    if isinstance(declared, int | float) and declared >= 0:
+        total_years = int(declared)
 
     # Highest education
     edu_level = ""
