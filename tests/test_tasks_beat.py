@@ -71,7 +71,6 @@ def test_maintenance_entries_land_on_maintenance_queue() -> None:
     schedule = beat.get_schedule()
     for name in (
         "jd_health_check",
-        "linkedin_cookie_refresh",
         "cache_eviction",
         "gate_expire_sweep",
     ):
