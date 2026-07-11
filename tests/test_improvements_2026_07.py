@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.intake.schema import JobRequirements, RawJob
@@ -258,6 +259,76 @@ class TestEmbeddingSimilarity:
             return_value={"matching": {"embeddings": {"enabled": False}}},
         ):
             assert local_embedding_settings() is None
+
+
+class TestLocalEmbedCircuitBreaker:
+    """2026-07-11 user report: a job description too long for
+    nomic-embed-text's context window tripped the SAME 120s circuit
+    breaker used for "Ollama is down", silently degrading every other
+    job in the search to keyword-overlap too. A context-length error is
+    a property of one job's text, not of the service, so it must not
+    trip the breaker."""
+
+    def setup_method(self):
+        import src.matching.semantic as semantic
+
+        semantic._local_embed_disabled_until = 0.0
+
+    teardown_method = setup_method
+
+    def _response(self, status_code, text):
+        return SimpleNamespace(status_code=status_code, text=text, json=lambda: {})
+
+    def test_context_length_error_does_not_trip_breaker(self):
+        import src.matching.semantic as semantic
+
+        resp = self._response(500, '{"error":"the input length exceeds the context length"}')
+        with patch("httpx.post", return_value=resp) as mock_post:
+            first = semantic.embed_text_local("a very long job description", cache=False)
+            second = semantic.embed_text_local("a different, shorter job", cache=False)
+
+        assert first is None
+        assert second is None
+        # Breaker must NOT be tripped -- both calls hit the network.
+        assert mock_post.call_count == 2
+
+    def test_other_500_trips_breaker(self):
+        import src.matching.semantic as semantic
+
+        resp = self._response(500, "internal server error")
+        with patch("httpx.post", return_value=resp) as mock_post:
+            first = semantic.embed_text_local("some job description", cache=False)
+            second = semantic.embed_text_local("another job description", cache=False)
+
+        assert first is None
+        assert second is None
+        # Breaker WAS tripped -- the second call short-circuits before
+        # ever reaching the network.
+        assert mock_post.call_count == 1
+
+    def test_connection_failure_trips_breaker(self):
+        import httpx
+
+        import src.matching.semantic as semantic
+
+        with patch("httpx.post", side_effect=httpx.ConnectError("refused")) as mock_post:
+            first = semantic.embed_text_local("some job description", cache=False)
+            second = semantic.embed_text_local("another job description", cache=False)
+
+        assert first is None
+        assert second is None
+        assert mock_post.call_count == 1
+
+    def test_truncates_to_local_cap_before_sending(self):
+        import src.matching.semantic as semantic
+
+        resp = self._response(200, "")
+        resp.json = lambda: {"embedding": [0.1, 0.2]}
+        with patch("httpx.post", return_value=resp) as mock_post:
+            semantic.embed_text_local("x" * 50_000, cache=False)
+
+        sent_prompt = mock_post.call_args.kwargs["json"]["prompt"]
+        assert len(sent_prompt) == semantic._MAX_LOCAL_EMBED_INPUT_CHARS
 
 
 # ===========================================================================

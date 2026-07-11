@@ -53,6 +53,16 @@ DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 # key size and the API bill.
 _MAX_EMBED_INPUT_CHARS = 32_000
 
+# Separate, tighter cap for the LOCAL (Ollama nomic-embed-text) path.
+# 2026-07-11 (user report): a 32k-char job description still triggered
+# Ollama's "input length exceeds the context length" 500 -- nomic's
+# tokenizer runs denser than the ~4 chars/token OpenAI assumption above
+# for bullet-heavy, punctuation-heavy JD/resume text, so 32k chars can
+# exceed its 8192-token window even after truncation. This cap is a
+# conservative ~3.5 chars/token estimate; it's still just a backstop --
+# see the context-length-specific handling below for the real fix.
+_MAX_LOCAL_EMBED_INPUT_CHARS = 20_000
+
 
 def _resolve_openai_provider() -> tuple[str, str] | None:
     """Return ``(api_key, base_url)`` for the registered OpenAI provider.
@@ -290,7 +300,7 @@ def embed_text_local(
         return None
     model = model or settings["model"]
     base_url = (base_url or settings["base_url"]).rstrip("/")
-    text = text[:_MAX_EMBED_INPUT_CHARS]
+    text = text[:_MAX_LOCAL_EMBED_INPUT_CHARS]
 
     cache_key: str | None = None
     if cache:
@@ -319,15 +329,34 @@ def embed_text_local(
             timeout=timeout,
         )
         if response.status_code != 200:
-            logger.warning(
-                "Ollama embeddings returned %s: %s (falling back to keyword overlap "
-                "for %.0fs — is `%s` pulled?)",
-                response.status_code,
-                response.text[:200],
-                _LOCAL_EMBED_BACKOFF_SECONDS,
-                model,
-            )
-            _local_embed_disabled_until = time.monotonic() + _LOCAL_EMBED_BACKOFF_SECONDS
+            body = response.text[:200]
+            # 2026-07-11 (user report): a "context length exceeded" 500 is
+            # a property of THIS text, not of Ollama's availability -- the
+            # circuit breaker exists so a down/unpulled model doesn't cost
+            # every remaining job a connect-timeout, but tripping it here
+            # means one long JD silently degrades every OTHER (likely
+            # shorter, perfectly embeddable) job in the same search to
+            # keyword-overlap for the next 120s too. Only trip the breaker
+            # for failures that indicate the SERVICE is the problem.
+            context_length_error = "context length" in body.lower()
+            if context_length_error:
+                logger.warning(
+                    "Ollama embeddings returned %s: %s (this job's text was too long "
+                    "even after truncation; skipping just this one, embeddings stay "
+                    "on for the rest of the search)",
+                    response.status_code,
+                    body,
+                )
+            else:
+                logger.warning(
+                    "Ollama embeddings returned %s: %s (falling back to keyword overlap "
+                    "for %.0fs — is `%s` pulled?)",
+                    response.status_code,
+                    body,
+                    _LOCAL_EMBED_BACKOFF_SECONDS,
+                    model,
+                )
+                _local_embed_disabled_until = time.monotonic() + _LOCAL_EMBED_BACKOFF_SECONDS
             return None
         payload = response.json()
     except Exception as exc:  # noqa: BLE001 -- transport failure -> fallback + backoff
