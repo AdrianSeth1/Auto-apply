@@ -43,10 +43,9 @@ from src.application.automation_plans import automation_plan_schedule_entries
 # Per-task options to route Beat-enqueued task to the right queue.
 _SEARCH_OPTS: dict[str, object] = {"queue": "search"}
 _MAINTENANCE_OPTS: dict[str, object] = {"queue": "maintenance"}
-# Phase 17.1: the plan_run orchestrator is heavy (it fans out into
-# materials/application tasks) and belongs on the search queue so
-# materials workers don't block on it.
-_ORCHESTRATION_OPTS: dict[str, object] = {"queue": "search"}
+# Phase 17.1 note (historical): the plan_run orchestrator is heavy and
+# belongs on the search queue. The static Beat entry was removed
+# 2026-07-16; automation-plan entries carry their own queue options.
 
 
 def get_schedule() -> dict[str, dict[str, object]]:
@@ -58,15 +57,14 @@ def get_schedule() -> dict[str, dict[str, object]]:
             "schedule": crontab(hour=2, minute=0),  # 02:00 UTC every day
             "options": _SEARCH_OPTS,
         },
-        # Phase 17.1: default end-to-end batch run. User-created task
-        # schedules are merged below from config/automation_plans.yaml.
-        # All kwargs default-friendly so a fresh install with no
-        # search_profile_id still produces a report.
-        "plan_run": {
-            "task": "orchestration.plan_run",
-            "schedule": crontab(hour=23, minute=0),
-            "options": _ORCHESTRATION_OPTS,
-        },
+        # 2026-07-16: the static Phase 17.1 "plan_run" entry (23:00 UTC,
+        # no payload) is REMOVED. It predates Job Pool V2: with no
+        # payload it invoked the legacy default filter profile, which
+        # does not exist in this user's config, so it failed every night
+        # and did nothing else (documented as P1 in the 2026-07-15
+        # handoff). The real daily delivery is `nightly-portfolio-v2`
+        # from config/automation_plans.yaml, merged below. Do NOT
+        # restore this by fabricating a generic `default` profile.
         # Phase 17.6: morning digest. 2026-07-07: moved 08:00 -> 12:00 UTC
         # so it lands at 7am Central (the user's morning) instead of 3am,
         # right after the overnight automation plans (08:00-09:00 UTC)
@@ -112,6 +110,14 @@ def get_schedule() -> dict[str, dict[str, object]]:
             "schedule": crontab(minute="*/15"),
             "options": _MAINTENANCE_OPTS,
         },
+        # 2026-07-16: prune per-candidate dry-run ledger rows older than
+        # the retention window (default 14 days). Aggregates on the run
+        # rows are kept; live-run evidence is never touched.
+        "ledger_retention": {
+            "task": "maintenance.ledger_retention",
+            "schedule": crontab(hour=3, minute=30),  # daily, off-peak
+            "options": _MAINTENANCE_OPTS,
+        },
     }
     schedule.update(automation_plan_schedule_entries())
     return schedule
@@ -128,13 +134,9 @@ SCHEDULE_DISPLAY: dict[str, dict[str, object]] = {
         "description": "Refreshes saved searches at 02:00 UTC and updates the Job Index.",
         "user_facing": True,
     },
-    "plan_run": {
-        "display_name": "Application batch run",
-        "description": (
-            "Runs search, scoring, materials generation, and application prep."
-        ),
-        "user_facing": True,
-    },
+    # "plan_run" static entry removed 2026-07-16 (see get_schedule()).
+    # Automation-plan schedules from config/automation_plans.yaml carry
+    # their own names; orchestration.plan_run stays in TASK_KIND_DISPLAY.
     "morning_digest": {
         "display_name": "Morning digest",
         "description": (
@@ -167,6 +169,14 @@ SCHEDULE_DISPLAY: dict[str, dict[str, object]] = {
     "gate_expire_sweep": {
         "display_name": "Approval timeout sweep",
         "description": "Expires unresolved approval requests every 15 minutes.",
+        "user_facing": False,
+    },
+    "ledger_retention": {
+        "display_name": "Ledger retention",
+        "description": (
+            "Prunes old dry-run portfolio/discovery detail rows daily; "
+            "keeps run aggregates and all live-run evidence."
+        ),
         "user_facing": False,
     },
 }
@@ -231,9 +241,17 @@ TASK_KIND_DISPLAY: dict[str, dict[str, str]] = {
         "display_name": "Approval timeout sweep",
         "description": "Expires unresolved approval requests.",
     },
+    "maintenance.ledger_retention": {
+        "display_name": "Ledger retention",
+        "description": "Prunes old dry-run decision/link ledger rows.",
+    },
     "orchestration.plan_run": {
         "display_name": "Application batch run",
         "description": "Runs search, scoring, materials, and application prep.",
+    },
+    "orchestration.portfolio_run": {
+        "display_name": "Job Pool V2 portfolio run",
+        "description": "Fetches once, evaluates all targets, and builds one quality-limited portfolio.",
     },
     "notifications.morning_digest": {
         "display_name": "Morning digest",

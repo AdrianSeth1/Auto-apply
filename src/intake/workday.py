@@ -109,6 +109,7 @@ class WorkdayScraper(BaseScraper):
         logger.info("Fetching Workday jobs for '%s/%s'", tenant, site)
 
         jobs: list[RawJob] = []
+        provider_records = 0
         offset = 0
         while offset < MAX_JOBS_PER_BOARD:
             limit = min(PAGE_SIZE, MAX_JOBS_PER_BOARD - offset)
@@ -125,6 +126,7 @@ class WorkdayScraper(BaseScraper):
                 raise ScraperError(f"Unexpected Workday response shape for {tenant}/{site}")
             if not postings:
                 break
+            provider_records += len(postings)
 
             for item in postings:
                 try:
@@ -138,6 +140,11 @@ class WorkdayScraper(BaseScraper):
             if len(postings) < limit:
                 break  # short page -- last page, regardless of "total"
 
+        self.last_fetch_stats = {
+            "provider_records": provider_records,
+            "normalized_records": len(jobs),
+            "malformed_records": provider_records - len(jobs),
+        }
         logger.info("Fetched %d jobs from Workday/%s/%s", len(jobs), tenant, site)
         return jobs
 

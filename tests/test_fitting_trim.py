@@ -10,6 +10,43 @@ from __future__ import annotations
 from src.generation.fitting import _trim_words
 
 
+def test_total_bullet_cap_preserves_professional_evidence_floor():
+    from src.generation.fitting import _fit_total_bullets
+    from src.generation.ir import ResumeBullet, ResumeDocument, ResumeItem
+
+    def item(source_id: str, source_type: str, scores: list[float]) -> ResumeItem:
+        return ResumeItem(
+            source_id=source_id,
+            source_type=source_type,
+            name=source_id,
+            bullets=[
+                ResumeBullet(
+                    text=f"Evidence {source_id} {index}",
+                    score=score,
+                    source_id=f"{source_id}:{index}",
+                    source_entity=source_id,
+                )
+                for index, score in enumerate(scores)
+            ],
+        )
+
+    document = ResumeDocument(
+        target_role="Analyst",
+        company="Acme",
+        experiences=[
+            item("exp-strong", "experience", [10, 9, 8]),
+            item("exp-second", "experience", [7, 6, 5]),
+            item("exp-third", "experience", [4, 3]),
+        ],
+        projects=[item("project", "project", [20, 19, 18])],
+    )
+
+    _fit_total_bullets(document, 6)
+
+    assert [len(entry.bullets) for entry in document.experiences] == [2, 2, 1]
+    assert len(document.projects[0].bullets) == 1
+
+
 def test_under_limit_is_untouched():
     text = "Built a small tool for the lab."
     assert _trim_words(text, 24) == text

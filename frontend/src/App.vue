@@ -9,6 +9,7 @@ import {
   FileText,
   LayoutDashboard,
   ListChecks,
+  SearchCheck,
   Monitor,
   Moon,
   Send,
@@ -38,6 +39,7 @@ let cleanupThemeListeners = () => {}
 const items = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   { to: "/jobs", label: "Jobs", icon: Briefcase },
+  { to: "/jobs/quality", label: "Search Quality", icon: SearchCheck },
   { to: "/jobs-db", label: "Job Database", icon: Database },
   { to: "/materials", label: "Materials", icon: FileText },
   { to: "/review", label: "Awaiting Review", icon: ClipboardCheck },

@@ -1,0 +1,186 @@
+schema_version: employer-supply-expansion.v1
+version: 2026-07-14
+status: approved_for_verified_activation
+notes: >-
+  Net-new direct-employer candidates selected for Arya's AI implementation,
+  SaaS implementation/customer success, solutions, and revenue-operations
+  targets. The user explicitly approved adding ATS endpoints on 2026-07-14.
+  A candidate is still activation-eligible only after the public ATS probe
+  passes every evidence check; failed or empty boards remain visible in the
+  audit and are never added to config/companies.yaml.
+employers:
+  # Previously probed cohort: verified reserves for the first activation wave.
+  - {name: Writer, careers_url: "https://jobs.ashbyhq.com/writer", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: Glean, careers_url: "https://job-boards.greenhouse.io/gleanwork", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: Cresta, careers_url: "https://job-boards.greenhouse.io/cresta", targets: [ai-implementation, technical-customer-success]}
+  - {name: Ada, careers_url: "https://job-boards.greenhouse.io/ada18", targets: [ai-implementation, technical-customer-success]}
+  - {name: Decagon, careers_url: "https://jobs.ashbyhq.com/decagon", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: Hebbia, careers_url: "https://jobs.ashbyhq.com/hebbia-ai", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: Braze, careers_url: "https://boards-api.greenhouse.io/v1/boards/braze/jobs", targets: [saas-implementation, technical-customer-success, revenue-operations-analyst]}
+  - {name: Highspot, careers_url: "https://jobs.lever.co/highspot", targets: [saas-implementation, technical-customer-success, revenue-operations-analyst]}
+  - {name: Ironclad, careers_url: "https://jobs.ashbyhq.com/ironcladhq", targets: [saas-implementation, technical-customer-success]}
+  - {name: Drata, careers_url: "https://jobs.ashbyhq.com/drata", targets: [saas-implementation, technical-customer-success, revenue-operations-analyst]}
+  - {name: Verkada, careers_url: "https://job-boards.greenhouse.io/verkada", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Persona, careers_url: "https://jobs.ashbyhq.com/persona", targets: [saas-implementation, associate-solutions-engineering]}
+  - {name: Benchling, careers_url: "https://jobs.ashbyhq.com/benchling", targets: [saas-implementation, technical-customer-success]}
+  - {name: Modern Health, careers_url: "https://job-boards.greenhouse.io/modernhealth", targets: [revenue-operations-analyst, technical-customer-success]}
+
+  # Greenhouse candidates found from official employer-hosted job pages.
+  - {name: Agilysys, careers_url: "https://job-boards.greenhouse.io/agilysys", targets: [saas-implementation]}
+  - {name: Yes Energy, careers_url: "https://job-boards.greenhouse.io/yesenergy", targets: [saas-implementation, technical-customer-success]}
+  - {name: CoreView, careers_url: "https://job-boards.greenhouse.io/coreview", targets: [revenue-operations-analyst, technical-customer-success]}
+  - {name: OpenEye, careers_url: "https://job-boards.greenhouse.io/openeye", targets: [revenue-operations-analyst, saas-implementation]}
+  - {name: Archera, careers_url: "https://job-boards.greenhouse.io/archera", targets: [associate-solutions-engineering, ai-implementation]}
+  - {name: PitchBook, careers_url: "https://job-boards.greenhouse.io/pitchbookdata", targets: [revenue-operations-analyst]}
+  - {name: KnowBe4, careers_url: "https://job-boards.greenhouse.io/knowbe4", targets: [revenue-operations-analyst, technical-customer-success]}
+  - {name: Karbon, careers_url: "https://job-boards.greenhouse.io/karbon", targets: [saas-implementation, technical-customer-success]}
+  - {name: AccuWeather, careers_url: "https://job-boards.greenhouse.io/accuweather", targets: [revenue-operations-analyst]}
+  - {name: Tebra, careers_url: "https://job-boards.greenhouse.io/tebra", targets: [saas-implementation, technical-customer-success]}
+  - {name: Everway, careers_url: "https://job-boards.greenhouse.io/everway", targets: [saas-implementation, technical-customer-success]}
+  - {name: Otter, careers_url: "https://job-boards.greenhouse.io/otter", targets: [saas-implementation, technical-customer-success]}
+  - {name: Paradigm, careers_url: "https://job-boards.greenhouse.io/joinparadigm", targets: [saas-implementation, technical-customer-success]}
+  - {name: Mitratech, careers_url: "https://job-boards.greenhouse.io/mitratech", targets: [saas-implementation, technical-customer-success]}
+  - {name: Redwood Software, careers_url: "https://job-boards.greenhouse.io/redwoodsoftware", targets: [saas-implementation, associate-solutions-engineering]}
+  - {name: NICE, careers_url: "https://job-boards.greenhouse.io/nice", targets: [ai-implementation, technical-customer-success]}
+  - {name: MarqVision, careers_url: "https://job-boards.greenhouse.io/marqvision", targets: [ai-implementation, technical-customer-success]}
+  - {name: Yoodli, careers_url: "https://job-boards.greenhouse.io/yoodliinc", targets: [ai-implementation, saas-implementation]}
+  - {name: Subsplash, careers_url: "https://job-boards.greenhouse.io/subsplash", targets: [saas-implementation, technical-customer-success]}
+  - {name: TextUs, careers_url: "https://job-boards.greenhouse.io/textus", targets: [revenue-operations-analyst]}
+  - {name: DoiT, careers_url: "https://job-boards.greenhouse.io/doitintl", targets: [ai-implementation, technical-customer-success, revenue-operations-analyst]}
+  - {name: Scotch, careers_url: "https://job-boards.greenhouse.io/scotch", targets: [technical-customer-success, saas-implementation]}
+  - {name: Instawork, careers_url: "https://job-boards.greenhouse.io/instawork", targets: [revenue-operations-analyst]}
+  - {name: NetDocuments, careers_url: "https://job-boards.greenhouse.io/netdocuments", targets: [revenue-operations-analyst, saas-implementation]}
+  - {name: ApartmentIQ, careers_url: "https://job-boards.greenhouse.io/apartmentiq", targets: [technical-customer-success, ai-implementation]}
+  - {name: Andgo Systems, careers_url: "https://job-boards.greenhouse.io/andgosystems", targets: [technical-customer-success, saas-implementation]}
+  - {name: AlertMedia, careers_url: "https://job-boards.greenhouse.io/alertmedia", targets: [technical-customer-success]}
+  - {name: Telnyx, careers_url: "https://job-boards.greenhouse.io/telnyx54", targets: [technical-customer-success, associate-solutions-engineering]}
+  - {name: MaintainX, careers_url: "https://job-boards.greenhouse.io/maintainx", targets: [technical-customer-success, ai-implementation]}
+  - {name: Bloomreach, careers_url: "https://job-boards.greenhouse.io/bloomreach", targets: [technical-customer-success, associate-solutions-engineering]}
+  - {name: Dashlane, careers_url: "https://job-boards.greenhouse.io/dashlane", targets: [technical-customer-success, saas-implementation]}
+  - {name: Wrike, careers_url: "https://job-boards.greenhouse.io/wrike", targets: [technical-customer-success, saas-implementation]}
+  - {name: Varicent, careers_url: "https://job-boards.greenhouse.io/varicent", targets: [revenue-operations-analyst, technical-customer-success]}
+  - {name: Similarweb, careers_url: "https://job-boards.greenhouse.io/similarweb", targets: [technical-customer-success, revenue-operations-analyst]}
+  - {name: ContactMonkey, careers_url: "https://job-boards.greenhouse.io/contactmonkey", targets: [technical-customer-success, saas-implementation]}
+
+  # Additional target-affine Greenhouse reserves; the probe decides whether
+  # the exact current board is live and evidence-complete.
+  - {name: Plaid, careers_url: "https://job-boards.greenhouse.io/plaid", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Brex, careers_url: "https://job-boards.greenhouse.io/brex", targets: [revenue-operations-analyst, associate-solutions-engineering]}
+  - {name: Robinhood, careers_url: "https://job-boards.greenhouse.io/robinhood", targets: [revenue-operations-analyst, technical-customer-success]}
+  - {name: Reddit, careers_url: "https://job-boards.greenhouse.io/reddit", targets: [revenue-operations-analyst, technical-customer-success]}
+  - {name: Lyft, careers_url: "https://job-boards.greenhouse.io/lyft", targets: [revenue-operations-analyst]}
+  - {name: Toast, careers_url: "https://job-boards.greenhouse.io/toast", targets: [saas-implementation, technical-customer-success]}
+  - {name: Procore, careers_url: "https://job-boards.greenhouse.io/procore", targets: [saas-implementation, technical-customer-success]}
+  - {name: Navan, careers_url: "https://job-boards.greenhouse.io/navan", targets: [revenue-operations-analyst, saas-implementation]}
+  - {name: Rippling, careers_url: "https://job-boards.greenhouse.io/rippling", targets: [revenue-operations-analyst, saas-implementation]}
+  - {name: Abnormal Security, careers_url: "https://job-boards.greenhouse.io/abnormalsecurity", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Wiz, careers_url: "https://job-boards.greenhouse.io/wizinc", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Rubrik, careers_url: "https://job-boards.greenhouse.io/rubrik", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: dbt Labs, careers_url: "https://job-boards.greenhouse.io/dbtlabs", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Contentful, careers_url: "https://job-boards.greenhouse.io/contentful", targets: [saas-implementation, technical-customer-success]}
+  - {name: ThoughtSpot, careers_url: "https://job-boards.greenhouse.io/thoughtspot", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Chronosphere, careers_url: "https://job-boards.greenhouse.io/chronosphere", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Honeycomb, careers_url: "https://job-boards.greenhouse.io/honeycomb", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Cockroach Labs, careers_url: "https://job-boards.greenhouse.io/cockroachlabs", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Snyk, careers_url: "https://job-boards.greenhouse.io/snyk", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Netskope, careers_url: "https://job-boards.greenhouse.io/netskope", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Fivetran, careers_url: "https://job-boards.greenhouse.io/fivetran", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Motive, careers_url: "https://job-boards.greenhouse.io/motive", targets: [saas-implementation, technical-customer-success]}
+  - {name: Clari, careers_url: "https://job-boards.greenhouse.io/clari", targets: [revenue-operations-analyst, technical-customer-success]}
+  - {name: Sprout Social, careers_url: "https://job-boards.greenhouse.io/sproutsocial", targets: [technical-customer-success, revenue-operations-analyst]}
+  - {name: Culture Amp, careers_url: "https://job-boards.greenhouse.io/cultureamp", targets: [technical-customer-success, saas-implementation]}
+  - {name: Calendly, careers_url: "https://job-boards.greenhouse.io/calendly", targets: [technical-customer-success, revenue-operations-analyst]}
+  - {name: Customerio, careers_url: "https://job-boards.greenhouse.io/customerio", targets: [technical-customer-success, saas-implementation]}
+  - {name: Maven Clinic, careers_url: "https://job-boards.greenhouse.io/mavenclinic", targets: [technical-customer-success, revenue-operations-analyst]}
+  - {name: Spring Health, careers_url: "https://job-boards.greenhouse.io/springhealth", targets: [technical-customer-success, revenue-operations-analyst]}
+  - {name: Zocdoc, careers_url: "https://job-boards.greenhouse.io/zocdoc", targets: [technical-customer-success, revenue-operations-analyst]}
+
+  # Lever candidates.
+  - {name: CoderPad, careers_url: "https://jobs.lever.co/coderpad", targets: [associate-solutions-engineering, ai-implementation]}
+  - {name: Onboarded, careers_url: "https://jobs.lever.co/onboarded", targets: [ai-implementation, saas-implementation]}
+  - {name: Aledade, careers_url: "https://jobs.lever.co/aledade", targets: [saas-implementation, technical-customer-success]}
+  - {name: Quiq, careers_url: "https://jobs.lever.co/quiq", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: Jamloop, careers_url: "https://jobs.lever.co/jam-loop", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Doxel, careers_url: "https://jobs.lever.co/doxel", targets: [ai-implementation, saas-implementation]}
+  - {name: Quantum Metric, careers_url: "https://jobs.lever.co/quantummetric", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: envelio, careers_url: "https://jobs.lever.co/envelio", targets: [associate-solutions-engineering, saas-implementation]}
+  - {name: Canvas Medical, careers_url: "https://jobs.lever.co/canvasmedical", targets: [associate-solutions-engineering, ai-implementation]}
+  - {name: Lwolf, careers_url: "https://jobs.lever.co/lwolf", targets: [saas-implementation, technical-customer-success]}
+  - {name: GoCardless, careers_url: "https://jobs.lever.co/gocardless", targets: [saas-implementation, technical-customer-success]}
+  - {name: dscout, careers_url: "https://jobs.lever.co/dscout", targets: [technical-customer-success, revenue-operations-analyst]}
+  - {name: commercetools, careers_url: "https://jobs.lever.co/commercetools", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Mapbox, careers_url: "https://jobs.lever.co/mapbox", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: SEON, careers_url: "https://jobs.lever.co/seon", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: UserTesting, careers_url: "https://jobs.lever.co/usertesting", targets: [technical-customer-success, revenue-operations-analyst]}
+  - {name: Kustomer, careers_url: "https://jobs.lever.co/kustomer", targets: [ai-implementation, technical-customer-success]}
+  - {name: Binti, careers_url: "https://jobs.lever.co/binti", targets: [saas-implementation, technical-customer-success]}
+  - {name: brightwheel, careers_url: "https://jobs.lever.co/brightwheel", targets: [saas-implementation, technical-customer-success]}
+  - {name: ezCater, careers_url: "https://jobs.lever.co/ezcater", targets: [technical-customer-success, revenue-operations-analyst]}
+  - {name: Cloudbeds, careers_url: "https://jobs.lever.co/cloudbeds", targets: [saas-implementation, technical-customer-success]}
+  - {name: Sift, careers_url: "https://jobs.lever.co/sift", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Harness, careers_url: "https://jobs.lever.co/harness", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Sourcegraph, careers_url: "https://jobs.lever.co/sourcegraph", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: Mattermost, careers_url: "https://jobs.lever.co/mattermost", targets: [saas-implementation, technical-customer-success]}
+  - {name: Podium, careers_url: "https://jobs.lever.co/podium81", targets: [technical-customer-success, revenue-operations-analyst]}
+  - {name: ApplyBoard, careers_url: "https://jobs.lever.co/applyboard", targets: [saas-implementation, technical-customer-success]}
+  - {name: Dialpad, careers_url: "https://jobs.lever.co/dialpad", targets: [ai-implementation, technical-customer-success]}
+  - {name: Bluecore, careers_url: "https://jobs.lever.co/bluecore", targets: [saas-implementation, technical-customer-success]}
+  - {name: Jobber, careers_url: "https://jobs.lever.co/jobber", targets: [saas-implementation, technical-customer-success]}
+
+  # Ashby candidates from official board pages plus target-affine reserves.
+  - {name: Element451, careers_url: "https://jobs.ashbyhq.com/element451", targets: [ai-implementation, technical-customer-success]}
+  - {name: Hyperbound, careers_url: "https://jobs.ashbyhq.com/Hyperbound", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: Paragon, careers_url: "https://jobs.ashbyhq.com/Paragon", targets: [saas-implementation, associate-solutions-engineering]}
+  - {name: Cytora, careers_url: "https://jobs.ashbyhq.com/cytora.com", targets: [ai-implementation, saas-implementation]}
+  - {name: Airwallex, careers_url: "https://jobs.ashbyhq.com/airwallex", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Radar, careers_url: "https://jobs.ashbyhq.com/radar", targets: [saas-implementation, associate-solutions-engineering]}
+  - {name: Thinkific, careers_url: "https://jobs.ashbyhq.com/thinkific", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Unit, careers_url: "https://jobs.ashbyhq.com/unit", targets: [associate-solutions-engineering, saas-implementation]}
+  - {name: Curri, careers_url: "https://jobs.ashbyhq.com/curri", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Vantage, careers_url: "https://jobs.ashbyhq.com/vantage", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Mach9, careers_url: "https://jobs.ashbyhq.com/mach9", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Enode, careers_url: "https://jobs.ashbyhq.com/enode", targets: [associate-solutions-engineering, saas-implementation]}
+  - {name: CollegeVine, careers_url: "https://jobs.ashbyhq.com/collegevine.com", targets: [ai-implementation, technical-customer-success]}
+  - {name: Singular, careers_url: "https://jobs.ashbyhq.com/singular", targets: [associate-solutions-engineering, technical-customer-success]}
+  - {name: Airspeed, careers_url: "https://jobs.ashbyhq.com/airspeed", targets: [ai-implementation, technical-customer-success, revenue-operations-analyst]}
+  - {name: Lumos, careers_url: "https://jobs.ashbyhq.com/lumos", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: 1Password, careers_url: "https://jobs.ashbyhq.com/1password", targets: [ai-implementation, technical-customer-success]}
+  - {name: Sitemate, careers_url: "https://jobs.ashbyhq.com/Sitemate", targets: [saas-implementation, technical-customer-success]}
+  - {name: Common Room, careers_url: "https://jobs.ashbyhq.com/commonroom", targets: [revenue-operations-analyst, technical-customer-success]}
+  - {name: Clay, careers_url: "https://jobs.ashbyhq.com/clay", targets: [ai-implementation, revenue-operations-analyst]}
+  - {name: Retool, careers_url: "https://jobs.ashbyhq.com/retool", targets: [saas-implementation, associate-solutions-engineering]}
+  - {name: Parabola, careers_url: "https://jobs.ashbyhq.com/parabola", targets: [ai-implementation, saas-implementation]}
+  - {name: Vivun, careers_url: "https://jobs.ashbyhq.com/vivun", targets: [associate-solutions-engineering, revenue-operations-analyst]}
+  - {name: OpenPhone, careers_url: "https://jobs.ashbyhq.com/openphone", targets: [technical-customer-success, revenue-operations-analyst]}
+  - {name: Pulley, careers_url: "https://jobs.ashbyhq.com/pulley", targets: [saas-implementation, technical-customer-success]}
+  - {name: Watershed, careers_url: "https://jobs.ashbyhq.com/watershed", targets: [associate-solutions-engineering, saas-implementation]}
+  - {name: Crusoe, careers_url: "https://jobs.ashbyhq.com/crusoe", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: Ashby, careers_url: "https://jobs.ashbyhq.com/ashby", targets: [saas-implementation, technical-customer-success]}
+  - {name: Orb, careers_url: "https://jobs.ashbyhq.com/orb", targets: [associate-solutions-engineering, revenue-operations-analyst]}
+  - {name: incident.io, careers_url: "https://jobs.ashbyhq.com/incidentio", targets: [saas-implementation, technical-customer-success]}
+  - {name: Lovable, careers_url: "https://jobs.ashbyhq.com/lovable", targets: [ai-implementation, technical-customer-success]}
+  - {name: Replicate, careers_url: "https://jobs.ashbyhq.com/replicate", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: Weights & Biases, careers_url: "https://jobs.ashbyhq.com/wandb", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: OpenRouter, careers_url: "https://jobs.ashbyhq.com/openrouter", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: Unstructured, careers_url: "https://jobs.ashbyhq.com/unstructured", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: Runway, careers_url: "https://jobs.ashbyhq.com/runway", targets: [ai-implementation, technical-customer-success]}
+  - {name: CoinTracker, careers_url: "https://jobs.ashbyhq.com/cointracker", targets: [technical-customer-success, revenue-operations-analyst]}
+  - {name: CaptivateIQ, careers_url: "https://jobs.ashbyhq.com/captivateiq", targets: [revenue-operations-analyst, saas-implementation]}
+  - {name: ModernLoop, careers_url: "https://jobs.ashbyhq.com/modernloop", targets: [saas-implementation, revenue-operations-analyst]}
+  - {name: Luma, careers_url: "https://jobs.ashbyhq.com/luma", targets: [ai-implementation, technical-customer-success]}
+  - {name: Spellbook, careers_url: "https://jobs.ashbyhq.com/spellbook", targets: [ai-implementation, technical-customer-success]}
+  - {name: Cognition, careers_url: "https://jobs.ashbyhq.com/cognition", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: Copy.ai, careers_url: "https://jobs.ashbyhq.com/copyai", targets: [ai-implementation, technical-customer-success]}
+  - {name: Observe, careers_url: "https://jobs.ashbyhq.com/observe", targets: [associate-solutions-engineering, technical-customer-success]}
+
+  # Shortfall replacements discovered from current official ATS pages after
+  # the first probe; these are favored over relaxing any evidence check.
+  - {name: Onbe, careers_url: "https://job-boards.greenhouse.io/onbe", targets: [revenue-operations-analyst, technical-customer-success]}
+  - {name: Documo, careers_url: "https://job-boards.greenhouse.io/documocareers", targets: [saas-implementation, technical-customer-success]}
+  - {name: First Due, careers_url: "https://job-boards.greenhouse.io/localitymediallcdbafirstdue", targets: [saas-implementation, technical-customer-success]}
+  - {name: Branch, careers_url: "https://job-boards.greenhouse.io/branch", targets: [saas-implementation, technical-customer-success]}
+  - {name: StackBlitz, careers_url: "https://job-boards.greenhouse.io/stackblitz", targets: [ai-implementation, technical-customer-success]}
+  - {name: Infomedia, careers_url: "https://job-boards.greenhouse.io/infomedia", targets: [technical-customer-success, saas-implementation]}
+  - {name: Datacor, careers_url: "https://job-boards.greenhouse.io/datacor", targets: [saas-implementation, technical-customer-success]}
+  - {name: Uniphore, careers_url: "https://uniphore.wd503.myworkdayjobs.com/wday/cxs/uniphore/Uniphore/jobs", targets: [ai-implementation, associate-solutions-engineering]}
+  - {name: ServiceTitan, careers_url: "https://servicetitan.wd1.myworkdayjobs.com/wday/cxs/servicetitan/ServiceTitan/jobs", targets: [revenue-operations-analyst, saas-implementation]}

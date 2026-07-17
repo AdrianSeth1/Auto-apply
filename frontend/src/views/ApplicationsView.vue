@@ -97,6 +97,7 @@ const state = reactive({
       rates: { response_rate: 0, positive_rate: 0 },
     },
   },
+  funnel: { stages: [], weeks: [], by_source: [], by_profile: [], by_material_variant: [] },
 })
 
 const visibleApplications = computed(() =>
@@ -127,8 +128,12 @@ async function load() {
   state.error = ""
 
   try {
-    const response = await api.applications({ ...filters })
+    const [response, funnel] = await Promise.all([
+      api.applications({ ...filters }),
+      api.funnelAnalytics(12),
+    ])
     state.data = response
+    state.funnel = funnel
     state.error = response.error || ""
   } catch (error) {
     state.error = error.message
@@ -419,6 +424,66 @@ onMounted(() => {
       <CheckCircle2 class="h-4 w-4" />
       <AlertDescription>{{ state.message }}</AlertDescription>
     </Alert>
+
+    <Card>
+      <CardHeader>
+        <CardTitle class="text-sm">Weekly conversion funnel</CardTitle>
+      </CardHeader>
+      <CardContent class="p-0">
+        <div v-if="state.funnel.weeks?.length" class="overflow-x-auto">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Week</th>
+                <th v-for="stage in state.funnel.stages" :key="stage">{{ stage }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="week in state.funnel.weeks" :key="week.week_start">
+                <td>{{ week.week_start }}</td>
+                <td v-for="stage in state.funnel.stages" :key="stage" class="tabular-nums">
+                  {{ week[stage] || 0 }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="p-6 text-sm text-muted-foreground">
+          Funnel milestones will appear as new searches, reviews, applications, and outcomes occur.
+        </div>
+      </CardContent>
+    </Card>
+
+    <section class="grid gap-4 lg:grid-cols-2">
+      <Card>
+        <CardHeader><CardTitle class="text-sm">Conversion by source</CardTitle></CardHeader>
+        <CardContent class="p-0">
+          <table v-if="state.funnel.by_source?.length" class="table">
+            <thead><tr><th>Source</th><th>Qualified</th><th>Applied</th><th>Interview</th><th>Offer</th></tr></thead>
+            <tbody>
+              <tr v-for="item in state.funnel.by_source" :key="item.source">
+                <td>{{ item.source }}</td><td>{{ item.qualified }}</td><td>{{ item.applied }}</td><td>{{ item.interview }}</td><td>{{ item.offer }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="p-6 text-sm text-muted-foreground">No source conversion data yet.</p>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle class="text-sm">Conversion by profile variant</CardTitle></CardHeader>
+        <CardContent class="p-0">
+          <table v-if="state.funnel.by_profile?.length" class="table">
+            <thead><tr><th>Profile</th><th>Qualified</th><th>Applied</th><th>Interview</th><th>Offer</th></tr></thead>
+            <tbody>
+              <tr v-for="item in state.funnel.by_profile" :key="item.profile">
+                <td>{{ item.profile }}</td><td>{{ item.qualified }}</td><td>{{ item.applied }}</td><td>{{ item.interview }}</td><td>{{ item.offer }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="p-6 text-sm text-muted-foreground">No profile conversion data yet.</p>
+        </CardContent>
+      </Card>
+    </section>
 
     <Alert v-if="state.followups.length" class="border-amber-500/40 bg-amber-500/5">
       <Activity class="h-4 w-4" />

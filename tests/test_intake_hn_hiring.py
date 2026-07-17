@@ -310,7 +310,9 @@ def test_fetch_latest_hn_hiring_jobs_raises_when_no_thread_found(
 # ---- search_jobs source leg wiring ----------------------------------------------
 
 
-def test_search_jobs_hn_leg_narrows_by_keyword(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_search_jobs_hn_keeps_nonkeyword_roles_in_startup_bonus_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import asyncio
 
     from src.intake.schema import RawJob
@@ -321,15 +323,18 @@ def test_search_jobs_hn_leg_narrows_by_keyword(monkeypatch: pytest.MonkeyPatch) 
     with patch(
         "src.intake.hn_hiring.fetch_latest_hn_hiring_jobs",
         return_value=[backend_job, frontend_job],
-    ):
+    ), patch("src.intake.hn_jobstories.fetch_hn_jobstories", return_value=[]):
         from src.application.jobs import search_jobs
 
         result = asyncio.run(
             search_jobs(profile=None, source="all", keyword="backend", score=False, no_parse=True)
         )
 
-    hn_titles = [j["title"] for j in result["jobs"] if j["source"] == "hn"]
-    assert hn_titles == ["Backend Engineer"]
+    hn_jobs = [j for j in result["jobs"] if j["source"] == "hn"]
+    assert [j["title"] for j in hn_jobs] == ["Backend Engineer", "Frontend Designer"]
+    assert hn_jobs[0]["raw_data"]["startup_keyword_match"] is True
+    assert hn_jobs[1]["raw_data"]["startup_bonus_candidate"] is True
+    assert "startup_keyword_match" not in hn_jobs[1]["raw_data"]
     assert result["counts"]["hn"] == 1
 
 
@@ -401,9 +406,9 @@ def _apply_pay_filter(jobs: list) -> list:
     )
 
 
-def test_strict_pay_drops_hn_job_with_no_stated_pay() -> None:
+def test_hn_job_with_unknown_pay_passes_by_default() -> None:
     job = _hn_job("great benefits, unlimited PTO")
-    assert _apply_pay_filter([job]) == []
+    assert _apply_pay_filter([job]) == [job]
 
 
 def test_strict_pay_passes_hn_job_stating_pay_in_range() -> None:

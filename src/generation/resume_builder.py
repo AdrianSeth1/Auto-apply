@@ -145,13 +145,16 @@ def generate_resume(
         target_pages=target_pages,
     )
 
+    effective_target_pages = int(
+        resume_document.metadata.get("effective_target_pages") or target_pages
+    )
     validation = validate_resume_artifacts(
         validation,
         docx_path=docx_path,
         pdf_path=pdf_path,
         pdf_attempted=True,
         max_pages=template_manifest.capacity.max_pages,
-        target_pages=target_pages,
+        target_pages=effective_target_pages,
     )
 
     result = {
@@ -471,7 +474,8 @@ def _max_bullets_per_entity(manifest: TemplateManifest) -> int:
 
 
 _BATCH_REWRITE_SYSTEM = """/no_think
-You are a resume bullet editor. Rewrite each numbered bullet to naturally incorporate relevant job keywords while preserving every fact.
+You are a resume bullet editor. Rewrite each numbered bullet to naturally
+incorporate relevant job keywords while preserving every fact.
 
 Return ONLY a JSON object:
 {"rewritten_bullets": ["...", "...", ...]}
@@ -489,7 +493,8 @@ Rules:
 - Keep professional tone throughout
 - Do NOT use em dashes or en dashes (—, –). Use a comma, period, or
   semicolon instead
-- Inline markup (optional, use sparingly): **bold** for one key skill or metric per bullet, *italics* for proper nouns"""
+- Inline markup (optional, use sparingly): **bold** for one key skill or metric
+  per bullet, *italics* for proper nouns"""
 
 # The leading "/no_think" is Qwen3's soft switch disabling thinking mode for
 # the turn — a 16-bullet structured-JSON task on a thinking model was
@@ -649,13 +654,20 @@ def _build_project_items(
                 source_type="project",
                 name=name,
                 title=str(project.get("role") or ""),
-                meta=str(project.get("description") or ""),
+                # The old renderer printed a long italic project description
+                # and then bullets saying the same thing. Keep the searchable
+                # tech stack plus evidence bullets; eliminate duplication.
+                meta="",
                 start_date=str(project.get("start_date") or ""),
                 end_date=str(project.get("end_date") or ""),
                 tech_stack=[str(value) for value in project.get("tech_stack", [])],
                 bullets=[item.to_resume_bullet() for item in evidence_items],
             )
         )
+    items.sort(
+        key=lambda item: max((bullet.score for bullet in item.bullets), default=0.0),
+        reverse=True,
+    )
     return items
 
 
@@ -663,6 +675,10 @@ def _prioritize_skills(skills: dict[str, Any], jd_tags: list[str]) -> dict[str, 
     tag_set = {_normalize_tag(tag) for tag in jd_tags}
     prioritized: dict[str, list[str]] = {}
     for category, values in skills.items():
+        if category == "soft_skills":
+            # ATS keywords need evidence in context. Listing communication or
+            # collaboration without proof adds bulk but little credibility.
+            continue
         if not isinstance(values, list):
             continue
         # 2026-07-10: dict-shaped entries (certifications: {name, issuer,
@@ -1421,6 +1437,13 @@ def _render_resume_to_target_pages(
     jd_tags = jd_tags or list(current.metadata.get("jd_tags", []) or [])
     plan_history: list[str] = []
 
+    if target_pages == 1 and pages == 2 and _resume_has_evidence_floor(current):
+        current.metadata["effective_target_pages"] = 2
+        current.metadata["adaptive_page_reason"] = (
+            "Preserved substantive professional experience instead of forcing one page."
+        )
+        return current, docx_path, pdf_path
+
     for round_idx in range(_MAX_FIT_PLAN_ROUNDS if use_llm else 0):
         if pages == target_pages:
             return current, docx_path, pdf_path
@@ -1452,6 +1475,12 @@ def _render_resume_to_target_pages(
         )
         current = _apply_fit_plan(current, plan)
         docx_path, pdf_path, pages = _render(current)
+        if target_pages == 1 and pages == 2 and _resume_has_evidence_floor(current):
+            current.metadata["effective_target_pages"] = 2
+            current.metadata["adaptive_page_reason"] = (
+                "Preserved substantive professional experience after structural fitting."
+            )
+            return current, docx_path, pdf_path
 
     # Deterministic structural fallback: only used when the LLM plan
     # didn't converge. Overflow -> drop weakest bullet; underflow is
@@ -1498,27 +1527,43 @@ def _drop_weakest_bullet(document: ResumeDocument) -> ResumeDocument | None:
     """
     trimmed = document.model_copy(deep=True)
 
-    # 1. Drop any item that has been fully emptied by prior trims.
-    for section_name in ("projects", "experiences"):
-        section = getattr(trimmed, section_name)
-        empty_idx = next((idx for idx, item in enumerate(section) if not item.bullets), None)
-        if empty_idx is not None:
-            section.pop(empty_idx)
-            return trimmed
-
-    # 2. Otherwise drop the single weakest bullet across both sections.
-    weakest: tuple[list, int, float] | None = None
+    protected = _protected_resume_experience_ids(trimmed)
+    weakest: tuple[list, int, tuple[int, float]] | None = None
     for section in (trimmed.projects, trimmed.experiences):
         for item in section:
+            minimum = 2 if item.source_id in protected else 1
+            if len(item.bullets) <= minimum:
+                continue
             for idx, bullet in enumerate(item.bullets):
                 score = float(getattr(bullet, "score", 0.0) or 0.0)
-                if weakest is None or score < weakest[2]:
-                    weakest = (item.bullets, idx, score)
+                key = (0 if item.source_type == "project" else 1, score)
+                if weakest is None or key < weakest[2]:
+                    weakest = (item.bullets, idx, key)
     if weakest is None:
         return None
     bullets, idx, _ = weakest
     bullets.pop(idx)
     return trimmed
+
+
+def _protected_resume_experience_ids(document: ResumeDocument) -> set[str]:
+    ranked = sorted(
+        document.experiences,
+        key=lambda item: max((bullet.score for bullet in item.bullets), default=0.0),
+        reverse=True,
+    )
+    return {item.source_id for item in ranked[:2]}
+
+
+def _resume_has_evidence_floor(document: ResumeDocument) -> bool:
+    """A second page is justified only when it protects real evidence."""
+    if len(document.experiences) < 2:
+        return False
+    protected = _protected_resume_experience_ids(document)
+    return all(
+        len(item.bullets) >= (2 if item.source_id in protected else 1)
+        for item in document.experiences
+    ) and sum(len(item.bullets) for item in document.experiences) >= 5
 
 
 # ---------------------------------------------------------------------------

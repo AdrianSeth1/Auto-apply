@@ -1,8 +1,935 @@
 # Changelog
 
-All notable implementation changes to AutoApply are documented here, organized by phase. This is the detailed engineering log; keep product overview and quick-start content in the README, and keep current operating state in PROJECT_MANAGEMENT.
+All notable implementation changes to AutoApply are documented here, organized by phase. This is the detailed engineering log; keep product overview and quick-start content in the README, and keep current operating state in docs/HANDOFF.md.
 
 ## [Unreleased]
+
+### Material quality hardening + operational cleanup (2026-07-16)
+
+Audit of the first real 20-job delivery (2026-07-15) found: ~8 letters
+addressed to ATS board slugs ("Localitymediallcdbafirstdue" instead of
+"First Due"), 2 deterministic template letters shipped unlabeled, quality
+warnings firing on 20/20 letters (no signal), one resume PDF recorded in the
+ledger but absent on disk, one role consuming two portfolio slots via an
+onsite+remote repost, headless LinkedIn probes on UI mounts despite the
+automation ban, and the known dead 23:00 legacy Beat entry.
+
+- **Company names**: Greenhouse adapter now reads the flat `company_name`
+  payload field (sanitized of zero-width chars) before falling back to slug
+  title-casing; `scripts/fix_company_display_names.py` repaired 6,030 legacy
+  jobs, 342 postings, and 4 pending review cards (55 distinct renames).
+  Audit confirmed no slug-named application had been submitted; 8 approved
+  ones had materials regenerated before submission.
+- **Pay extraction**: Greenhouse `metadata` currency/currency_range fields
+  ("Budgeted Salary") now populate `raw_data.salary_min/salary_max` for the
+  existing compensation fact extractor.
+- **Labeled baseline letters** (invariant #10 amended by user decision):
+  `_generate_high_quality_cover_letter_text` returns `(text, origin, issues)`;
+  origin flows into document metadata, the version ledger, a
+  `score_breakdown.materials_quality` digest on the review entry, and a
+  "Template letter" / "N draft warnings" badge on the review card.
+- **Threshold recalibration**: cover-letter window now min 180 / target 240 /
+  max 340 (was 220/280/340 with a separate 260 validator minimum);
+  `raw_evidence_dump` now fires only on near-verbatim bullet copies compared
+  against `metadata.evidence_bullets`, not on the "At X, I…" style the prompt
+  instructs; deterministic template no longer splices raw JD clauses
+  ungrammatically and letter-header locations are title-cased.
+- **PDF integrity**: `convert_to_pdf` verifies the output file exists and is
+  non-empty before returning (docx2pdf/Word COM can fail silently).
+- **Title-variant dedupe**: portfolio selection keeps one owner per
+  (company, end-qualifier-stripped title); suppressed variants persist with
+  reason `title_variant_duplicate`. Comma-suffixed specializations never merge.
+- **LinkedIn**: session status is passive (disk-only) by default; a real
+  headless probe requires explicit refresh.
+- **Schedules**: removed the always-failing static 23:00 UTC `plan_run` Beat
+  entry; added daily `maintenance.ledger_retention` (03:30 UTC) pruning
+  dry-run portfolio decisions/discovery links older than
+  `retention.dry_run_ledger_days` (14) — live-run rows kept forever.
+- **Single-instance guard**: `autoapply start` probes `/api/instance` when
+  the web port is busy and reuses a running AutoApply instead of starting a
+  duplicate stack on a random port.
+- **Incident during this session**: running the full pytest suite against
+  the live database deleted all default-tenant `review_queue` rows (32
+  delivered cards, 8 approvals). Recovered by rebuilding entries from
+  `portfolio_decisions` + evaluations + the artifact version ledger
+  (`tmp/rebuild_review_20260716.py`); approvals reset to pending because
+  their letters were being regenerated anyway. Warning added to
+  CLAUDE.md/AGENTS.md and HANDOFF.md: never run the full suite against the
+  live DB until tests target a disposable database.
+- **Docs consolidated**: new master `docs/HANDOFF.md` supersedes and replaces
+  FABLE_CURRENT_SYSTEM_HANDOFF, SONNET_START_HERE,
+  JOB_POOL_V2_IMPLEMENTATION_STATUS, JOB_SUPPLY_EXPANSION_PLAN,
+  SOL_ULTRA_JOB_POOL_REDESIGN_BRIEF, AUDIT_2026-07-11, BRIEFS_FOR_CODE_AGENTS,
+  PROJECT_MANAGEMENT, plan_en/plan_zh, and DEPLOYMENT_zh (all deleted;
+  recoverable from git). CLAUDE.md/AGENTS.md re-synced and invariants 12–16
+  added.
+
+### Overnight review materials restored (2026-07-15)
+
+- Moved the live V2 portfolio run to 08:00 UTC (3:00am Central during
+  daylight-saving time) and capped it at 20 jobs. The live run creates pending
+  review cards and immediately enqueues resume and cover-letter generation
+  before any approval.
+- Made material write-back accept both pending and approved review cards. This
+  closes a race where approving a card while its overnight worker was finishing
+  left generated files on disk but no quick links on the review card. A
+  cover-letter-only partial success is now linked too.
+- Updated the overnight launcher documentation and added a scheduler regression
+  test. Submission still requires the explicit review transition; only material
+  preparation is automatic.
+
+### Location policy: nationwide US eligibility with preferred metros (2026-07-14)
+
+- Expanded V2 onsite/hybrid eligibility from a four-city allowlist to any
+  posting with explicit US geography. US-remote roles remain eligible only
+  when the posting explicitly permits US candidates; bare or foreign remote
+  labels keep their existing unknown/fail behavior.
+- Added `onsite_hybrid_us_allowed` as an explicit candidate preference so the
+  expanded hard eligibility policy is auditable and independently reversible.
+- Kept location ranking separate from eligibility. San Francisco, Dallas,
+  Portland, New York City, and Los Angeles receive the full geography
+  preference score; other US cities remain eligible at a lower preference.
+- A live non-consuming refill measurement increased unseen A/B inventory
+  from 21 to 28 while still selecting 20 with zero delivery shortfall. It
+  created no review cards or materials; eight additional A/B jobs remained
+  in the reservoir after the 20-job simulated delivery.
+
+### Supply yield: 20-job A/B reservoir and verified 100-board rotation (2026-07-14)
+
+- Practice/shadow portfolio decisions no longer consume job history. A job is
+  treated as previously surfaced only when it reached a real V2 run/review
+  card; immutable dry-run decisions remain available for later practice and
+  live delivery.
+- Activated all 100 direct-employer endpoints that already passed the public
+  ATS evidence contract. Ordinary runs refresh one deterministic 25-employer
+  group and reconstruct the other groups from their latest immutable Job
+  Index snapshots; `force_refresh` retains its explicit fetch-all behavior.
+- Replaced the five-job canary with a 20-job core delivery target and a
+  40-job unseen A/B reservoir target. Target diversity is now a first-pass
+  soft cap, so an underrepresented target gets protected slots but excess
+  A/B jobs can fill otherwise empty capacity. The company cap increased from
+  one to two strong roles; Tier C is never used as filler.
+- Added a separate six-hour dry-run refill plan. It rotates verified board
+  refreshes, persists immutable postings/evaluations, and never consumes
+  history or creates review/material records; the daily live plan remains
+  the only process that delivers jobs to the review queue.
+- Added explicit reservoir and supply telemetry: delivery shortfall,
+  available/remaining A/B inventory, refill need, live endpoint group,
+  live/reused endpoint counts, and reused job counts. This replaces the
+  misleading interpretation that a cached ATS run with `ats: 0` had no ATS
+  supply.
+- Improved responsibility recall with the existing normalized JobFacts
+  taxonomy (for example, discovery calls and needs analysis) while retaining
+  the same A/B score thresholds, title lanes, experience caps, selectivity
+  cap, full-description rule, and direct-employer gates.
+- Tightened V2 remote geography: ATS roles must explicitly permit US remote
+  work; a bare `Remote` is unknown, and a foreign remote label fails even if
+  generic description prose mentions the United States.
+- Tightened the broad operations-analyst route after the first full-pool
+  practice surfaced a supply-chain procurement role as RevOps. Supply chain,
+  procurement, logistics, legal operations, billing operations, and IT
+  operations now require a different target instead of inheriting generic
+  business-operations evidence.
+- Live non-consuming validation progressed from 2 selected A/B jobs before
+  the fix to 15 after groups 1–2, 17 after group 3, and 20 after group 4.
+  The final precision-checked run retained 21 unseen A/B jobs, selected 20,
+  reported zero delivery shortfall, created no review/material records, and
+  showed 1,674 reused direct-ATS jobs even though the legacy `ats` live-fetch
+  count was zero.
+- Full test suite: 2,187 passed and 2 skipped. The sole failure is the known
+  pre-existing `test_filters.py::test_loads_real_config` expectation for a
+  `default` filter profile that is not present in the user's configuration.
+  A final 73-test focused regression set passed after the RevOps precision
+  exclusion.
+
+### Maintenance: safe V2 practice-run dispatch and truthful task status (2026-07-14)
+
+- Fixed `scripts/run_plans_now.py`, which previously built V2 portfolio kwargs
+  and then hard-coded the legacy `orchestration.plan_run` task name. Manual
+  runs now dispatch the task selected by the normalized plan through the same
+  validated schedule path as the web app and Beat.
+- Manual launcher and Plans-screen actions are now explicitly dry-run practice
+  runs. Scheduled executions retain the plan's persisted `dry_run` setting.
+- V2 pipeline/task normalization, publish-time contract checks, and strict
+  worker payload validation prevent a V2 payload from silently defaulting to
+  the legacy `default` profile and scanning the full stored job pool.
+- Structured orchestration results with terminal error statuses now mark the
+  durable task ledger row `failed` while preserving the diagnostic result.
+  V2 portfolio runs are also included in plan-run history.
+- Rebuilt the SPA, restarted web/worker/Beat, verified both orchestration tasks
+  in the live worker, and passed 98 focused regression tests.
+
+### Supply priorities: reviewed activation waves and selective Adzuna recovery (2026-07-14)
+
+- Expanded direct-employer research to 162 net-new candidates after excluding
+  every endpoint already present in `companies.yaml`. A production-adapter
+  probe verified 101 current boards against non-empty samples, employer
+  identity, unique IDs, direct ATS apply URLs, locations, and full
+  descriptions. Selected the strongest 100 and retained every failure in the
+  immutable audit instead of enabling guessed or empty endpoints.
+- Added `config/employer_supply_activation.v1.yaml` as the reviewed four-wave
+  activation registry (25 employers per wave). Wave 1 is now live in
+  `config/companies.yaml`; waves 2–4 are verified and approved but remain out
+  of the live registry until the preceding wave completes two canary runs.
+  Promotion is judged by net-new complete direct-apply A/B jobs, never raw
+  posting count. A configuration test prevents inactive waves from leaking
+  into the live board list.
+- Reviewed the real 35-employer probe artifact. Sixteen employers passed all
+  six evidence checks with eight-job samples; none was silently promoted to
+  approved/enabled. Added a review-only two-wave proposal in
+  `data/audits/employer_cohort_activation_waves.review.yaml`, prioritizing AI
+  implementation/solutions, SaaS implementation/TCS, and RevOps overlap.
+- Adzuna recovery now selects only promising snippets backed by the latest
+  immutable evaluation: target routing and location must pass, no known
+  eligibility gate may fail, and the existing Tier-B review/role floors must
+  be met. This prevents broad provider/ATS follow-ups for records that cannot
+  become A/B jobs. The live ledger currently has 197 pending snippets and
+  zero that clear this conservative recovery bar.
+- Successful recovery now retains attempt audit metadata, uses the legacy
+  job's tenant, finds Job Index postings case-insensitively, and enriches an
+  existing posting even when it has no prior snapshot. Job Index upserts now
+  normalize and compare source names case-insensitively, preventing a
+  mixed-case recovery from creating a duplicate posting.
+- Fixed endpoint exploration-state handling so a successful first canary can
+  promote `candidate` to `active`; the three-run budget suppresses only real
+  demotions and never fabricates activation for an endpoint that has not
+  succeeded.
+- Verification: focused lint passed; 101 cohort, resolver, live-Postgres
+  snapshot, endpoint-health, and source-funnel tests passed. A live resolver
+  query with `--limit 0` completed without writes.
+
+### Maintenance: accurate source-funnel attrition label (2026-07-14)
+
+- The Search Quality source table no longer calls the difference between raw
+  provider records and V2-evaluated postings “Dupes.” That number also
+  includes intentional keyword/location narrowing, normalization rejects,
+  and conservative identity reconciliation, so it was a misleading measure
+  of duplication. It is now labelled “Before V2” with an in-product
+  explanation. The actual duplicate cluster is intentionally not inferred
+  from this aggregate count.
+
+### Phase S7: user input that materially improves yield (2026-07-13)
+
+- Collected real structured input from Arya (via `AskUserQuestion` for
+  discrete choices, chat for open lists) instead of one-off prompt text, per
+  the plan's explicit S7 deliverable. Researched existing schema first --
+  location prefs and a soft salary floor already existed; a hard floor field
+  existed but was unset; nothing existed yet for company preferences,
+  apply/no-apply examples, or quota/travel/coding willingness.
+- `src/matching/target_schema.py::CandidatePreferencesV2`: added
+  `preferred_companies: list[str]`, `excluded_role_signals: list[str]`
+  (candidate-level, applies across every target), `quota_bearing_ok: bool`,
+  `light_coding_implementation_ok: bool` -- all with safe defaults for
+  backward compatibility with the `extra="forbid"` strict model.
+- `data/profile/candidate.yaml` populated: `hard_base_min: 70000`,
+  `travel_ceiling_percent: 25`, 50 `preferred_companies`, `excluded_role_signals:
+  [door to door, door-to-door, canvassing, residential sales route]` (scoped
+  to Arya's actual stated dealbreaker -- door-to-door specifically, not a
+  blanket outside-sales exclusion, since she said B2B outside sales is
+  tolerable), `quota_bearing_ok`/`light_coding_implementation_ok: true`.
+- `src/matching/scorer_v2.py`: `preferred_companies` bumps the existing
+  `employer_interest` component in `_preference` (100 vs. 60 baseline, same
+  0.15 weight -- no new weighted term, no rebalancing of the score's other
+  five components, consistent with CLAUDE.md's "preserve existing
+  calibration" invariant). `excluded_role_signals` merged with each target's
+  own `negative_responsibility_signals` in `_responsibility_coverage`.
+- `src/intake/query_scheduler.py`: added `QueryArmV2.priority` (not part of
+  the arm identity/version hash -- a priority change must never invalidate
+  stored yield history). `select_query_arms`'s round-robin phase now uses a
+  smooth weighted round robin (`_weighted_round_robin_order`) for slots
+  beyond each target's guaranteed canary, so higher-priority targets claim
+  more of the extra budget without ever starving anyone; the yield phase
+  gets a gentle multiplicative priority blend (`posterior_yield * (0.7 + 0.3
+  * priority)`) that's a no-op at priority 1.0 and discounts up to 30% at
+  priority 0. `config/targets/*.yaml` priorities updated to reflect Arya's
+  chosen top 3 (AI Implementation, SaaS Implementation, Technical Customer
+  Success): technical-customer-success 0.7 -> 0.85, revenue-operations-analyst
+  0.9 -> 0.6, associate-solutions-engineering 0.7 -> 0.6.
+  `src/orchestration/portfolio_run.py`'s two `QueryArmV2` construction sites
+  updated to thread priority through.
+- Tests: `tests/test_scorer_v2_preferences.py` (7 cases, 1 skipped by
+  design) and 7 new cases in `tests/test_query_scheduler_v2.py` (3
+  pre-existing tests unmodified, still passing) -- all run for real under
+  pytest against production code (real `candidate.yaml`, real target YAML
+  files, no mocks beyond the established fake-session pattern where needed).
+- Not verified: full `run_portfolio_v2` integration and live-Postgres
+  `SourceQueryArm` round-trips (Python 3.12/DB requirements this sandbox
+  can't meet). Hit a persistent phantom syntax error from this sandbox's
+  bash tool specifically on `src/orchestration/portfolio_run.py` that does
+  not reproduce via the Read tool even after a full-file rewrite -- flagged
+  for a manual `py_compile` check on the real machine.
+- Deferred: apply/no-apply examples (Arya had none ready yet);
+  `travel_ceiling_percent` is stored but still not read by any scoring code
+  (pre-existing gap, not something to rush a fix for here);
+  `quota_bearing_ok`/`light_coding_implementation_ok` have nothing to
+  consume them yet since no current target models either dimension.
+
+### SUP-09: adaptive source-endpoint scheduling, Phase S6 (2026-07-13)
+
+- Closed a gap flagged (and left unactioned) in both the SUP-01B and SUP-02
+  writeups: `src/jobs/source_endpoints.py::_update_endpoint_health` now
+  actually drives `SourceEndpoint.state` through the real, pre-existing
+  state machine in `src/intake/source_health.py::transition_health`
+  (candidate/active/degraded/quarantined/dormant/blocked/retired) instead
+  of only accumulating counters nothing consumed. Added
+  `_classify_fetch_status`, which maps `_fetch_board`'s four coarse
+  statuses down to the finer vocabulary `transition_health` needs by
+  parsing the HTTP status code every scraper's own `ScraperError` message
+  already contains (`f"HTTP {status} from {url}"`, confirmed against
+  `src/intake/base.py`, not guessed).
+- Added a 3-run exploration budget (Phase S6): a new endpoint's first three
+  runs update every counter truthfully but can't trigger a state demotion,
+  computed from a real `SourceEndpointRun` count rather than a new column
+  -- no migration needed. `blocked` transitions (403/compliance) are exempt
+  from the budget on purpose.
+- **Caught and fixed before shipping**: the exploration budget silently
+  broke an existing test's assumption
+  (`test_endpoint_health_tracks_failures_and_recovery_across_runs` expected
+  `recovery_successes == 1` after fail/fail/success on a brand-new
+  endpoint). Traced by hand: under the new budget-aware code the 2nd
+  failure never actually reaches `"degraded"` (suppressed), so there's
+  nothing to recover from and `recovery_successes` correctly stays 0 --
+  intentional, more correct behavior, not a bug, but it changes what a
+  brand-new endpoint's test needs to set up. Fixed by adding three warm-up
+  successful runs before the sequence under test so it runs past the
+  budget window, and added a new dedicated test for the budget-suppressed
+  case itself.
+- Added `src/application/source_funnel.py::compute_yield_demotion_candidates`,
+  a read-only diagnostic for Phase S6's "demote after seven non-empty runs
+  with zero routed candidates" -- deliberately **not** wired to an automatic
+  state change, since "routes nothing" depends on downstream target-
+  matching/scoring logic that could itself be buggy; auto-demoting on that
+  signal risks silently starving a target while masking the real defect.
+  Reuses the same `target_routing` reason signal `source_funnel_report`'s
+  existing `low_yield` flag already computes, aggregated across a rolling
+  window of runs via `JobSnapshot.source_endpoint_run_id` instead of within
+  one run.
+- Scoped out, not attempted: freshness override for previously-excluded
+  snapshots (touches `src/orchestration/portfolio.py`'s durable exclusion
+  logic, explicitly flagged in CLAUDE.md as not to reopen casually) -- a
+  real, separate, larger change documented as a follow-up rather than
+  rushed. (Refresh-cadence throttling, scoped out alongside it initially,
+  was picked back up and closed the same day -- see below.)
+- Tests: `tests/test_source_endpoints_health.py` (18 cases, pure Python +
+  a minimal fake session for the one `COUNT(*)` call `_update_endpoint_health`
+  makes -- run for real under pytest via the `datetime.UTC` shim, same
+  technique as SUP-07). `tests/test_source_endpoints_persistence.py` gained
+  a new exploration-budget test and warm-up runs in the existing
+  recovery-tracking test (DB-backed, not run this session -- no reachable
+  Postgres, consistent with every DB-backed ticket this session).
+
+### Phase S6 refresh cadence: direct ATS boards, closing the gap left open above (2026-07-13)
+
+- Per Arya's explicit direction, picked back up the refresh-cadence item
+  scoped out of SUP-09 above and built the "full correct version": direct
+  ATS boards fetched successfully within the last 6h are skipped on the
+  live HTTP call on the next `Run Plans Now`/scheduled run, rather than
+  refetched every time. Flagged and got explicit sign-off on the actual
+  design risk first: a naive version of this would silently shrink the
+  candidate pool, since `run_portfolio_v2` only links postings present in
+  *that run's* live fetch result -- skipping a board's fetch would drop its
+  postings from the run entirely, not just save an HTTP call. Arya chose
+  the harder-but-correct option (reconstruct from the Job Index) over two
+  smaller/safer alternatives offered.
+- New module `src/jobs/source_freshness.py`:
+  `split_companies_by_freshness` partitions `config/companies.yaml` into
+  "needs a live fetch" vs "fetched within 6h, reuse" using
+  `SourceEndpoint.last_success_at`, reproducing
+  `src.intake.search._endpoint_identity`'s exact key derivation (confirmed
+  against the real function, not re-derived from memory).
+  `reconstruct_fresh_endpoint_jobs` rebuilds `RawJob`s for skipped endpoints
+  from the Job Index's most recent postings, matching only snapshots
+  carrying the exact `source_endpoint_adapter`/`source_endpoint_key` tags
+  `_tag_endpoint` (`src/intake/search.py`) already writes -- confirmed real
+  and already persisted, not invented for this. Reused postings are tagged
+  `raw_data["reused_from_job_index"] = True`, auditable and distinguishable
+  from a live fetch.
+- `src/application/jobs.py::search_jobs` gained a `companies` passthrough
+  (default `None`, used instead of `_build_companies_filter(...)` only when
+  explicitly provided -- every other caller unaffected).
+  `src/orchestration/portfolio_run.py::run_portfolio_v2` computes the
+  freshness split (skipped entirely when `force_refresh=True`, preserving
+  its existing "bypass everything" meaning), passes the stale subset into
+  the acquisition request, and merges reconstructed jobs for the fresh
+  subset back into the candidate pool after the live fetch returns, deduped
+  by `(source, source_id)`, before any enrichment/evaluation/selection runs.
+  Deliberately does not fabricate `SourceEndpointRun` telemetry for skipped
+  endpoints -- their last real fetch's row stands as history.
+- **Caught and fixed before shipping**: a stored snapshot whose field no
+  longer validates against the current `RawJob` schema (e.g. a narrowed
+  enum literal) would have propagated an uncaught `pydantic.ValidationError`
+  out of `reconstruct_fresh_endpoint_jobs` and failed the whole discovery
+  run. Wrapped the `RawJob(...)` construction in its own
+  `try/except (TypeError, ValueError)` that skips just that one posting;
+  caught by a test built specifically to probe this case, then fixed.
+- **Sandbox-tooling note for future sessions**: hit a stronger variant of
+  the bash-mount staleness issue noted under SUP-07/SUP-09 while verifying
+  this -- `pytest` ran bytecode for `src/jobs/source_freshness.py` that was
+  missing an edit the Read tool and direct `cat`/`grep` both showed as
+  present, confirmed via `dis.dis`, and it survived one `__pycache__` clear.
+  Resolved by writing the file's known-correct content through a bash
+  heredoc directly (bypassing the Windows-mount round-trip) plus another
+  `__pycache__` clear. See the implementation status doc for the full
+  account.
+- Tests: `tests/test_source_freshness.py` (15 cases, pure Python, the same
+  `datetime.UTC` shim + duck-typed fake-session pattern as
+  `test_source_endpoints_health.py`, run for real under pytest against
+  production code). Not verified: the real SQL queries against live
+  Postgres, and the full `run_portfolio_v2` integration path (needs Python
+  3.12 for `enum.StrEnum`, unavailable in this sandbox).
+
+### SUP-08: YC Work at a Startup terms review -- blocked, Phase S5 (2026-07-13)
+
+- Phase S5 priority 1 requires a terms review before touching YC's Work at
+  a Startup board. Fetched Y Combinator's actual Terms of Use
+  (`ycombinator.com/legal`) directly rather than relying on third-party
+  summaries or scraper-vendor marketing claims. Found an explicit
+  prohibition: "you will not engage in or use any data mining, robots,
+  scraping or similar data gathering or extraction methods," under a
+  section that defines "the Site" as covering "all subdomains" and whose
+  Privacy Policy names Work at a Startup as one of the Site's core
+  Services. `workatastartup.com/robots.txt` is fully permissive, but that
+  governs crawler indexing, not the separate contractual scraping ban, and
+  doesn't override it. No official YC jobs API was found; third-party
+  scraper products (Apify, Browse.ai) market "public API" access, but that
+  describes their own reverse-engineered use of internal endpoints, not
+  anything Y Combinator has authorized.
+- Decision: same treatment as Indeed/Wellfound -- blocked, no adapter, no
+  scraping. Updated `docs/JOB_SUPPLY_EXPANSION_PLAN.md`'s "Decision"
+  section to cover YC alongside Indeed/Wellfound, with the exact clause and
+  evidence. No code was written; this is a research/compliance ticket by
+  design. Manual paste/import remains available for individual YC
+  postings, same as Wellfound today.
+
+### SUP-07: Adzuna full-JD resolver, Phase S4 (2026-07-13)
+
+- Added `src/intake/full_jd_resolver.py::resolve_full_jd`: recovers a full
+  description for a snippet-only Adzuna posting by following *only* the
+  provider-supplied `application_url`, matching the resolved URL against
+  the same direct-ATS host shapes each scraper's own URL construction
+  already uses, and reusing that adapter's real scraper class --
+  `GreenhouseScraper.fetch_job` / `LeverScraper.fetch_job` (both pre-
+  existing) or `AshbyScraper.fetch_jobs` + find-by-id -- but only when the
+  adapter is `enabled: true` in `config/source_policy.yaml` (previously
+  read by nothing in `src/` at all; this is the first runtime enforcement
+  of it). Workday is deliberately excluded (its own docstring documents
+  its careers pages as client-rendered SPAs a static GET can't recover);
+  SmartRecruiters/Workable/Recruitee are recognized by URL shape but
+  rejected at the policy-gate step since they're still `enabled: false`
+  pending their own Phase S3 conformance tickets (SUP-04/05/06). Never
+  raises -- every non-recovery path returns a `reason` string instead.
+- Added `src/application/resolve_snippets.py::resolve_pending_snippets`:
+  batch driver over the legacy `jobs` table (updates description/raw_data
+  in place there) that also writes a new immutable JobSnapshot via the
+  existing `src.jobs.enrich.enrich_posting` facade -- the same call
+  `src.orchestration.portfolio_run.run_portfolio_v2` already makes for
+  every source -- when a Job Index posting already exists for that job.
+  Rescoring is intentionally not triggered here: `JobTargetEvaluation` is
+  keyed by `snapshot_id`, so a new snapshot is automatically unscored and
+  picked up fresh by the next normal portfolio run. Added
+  `scripts/resolve_adzuna_snippets.py`, a manual-run CLI matching SUP-02's
+  shipped pattern.
+- **Caught and fixed before shipping**: the first version checked for an
+  existing Job Index posting via `store.upsert_posting(...)`, which
+  *creates* a bare posting row if none exists -- silently indexing a job
+  into the Job Index a run early via a side effect, even though the
+  surrounding code correctly skipped calling `enrich_posting` afterward.
+  Fixed by replacing it with a plain read-only `SELECT` on `JobPosting`.
+- Tests: `tests/test_full_jd_resolver.py` (16 cases: guard clauses,
+  redirect-follow failure, unrecognized/Workday-shaped URLs, the
+  "recognized-but-not-refetchable" vs "recognized-and-policy-disabled"
+  distinction, successful recovery through each of the three reusable
+  adapters with the full/partial length threshold, Ashby job-not-found,
+  scraper errors, empty recovered description).
+  `tests/test_resolve_snippets.py` (6 cases, DB-independent helpers only).
+- **Verified more thoroughly than SUP-01B/SUP-02 could be**: this sandbox's
+  Python 3.10 can't normally import this project's code (`datetime.UTC`
+  needs 3.11+), but patching `datetime.UTC = datetime.timezone.utc` before
+  import -- an exact equivalence, not a behavior change -- let the *real*
+  modules run under `pytest` here. All 22 tests pass for real, not via a
+  hand-copied replica, after `pip install --break-system-packages pytest
+  sqlalchemy pgvector`. Worth reusing this trick in future sessions hitting
+  the same version wall.
+- **Not verified**: the database-integration path in
+  `resolve_pending_snippets` (needs live Postgres, unavailable here). The
+  `upsert_posting` -> `SELECT` fix above was confirmed via the Read tool
+  (authoritative) plus an isolated harness, not `uv run pytest` -- bash's
+  mounted view of this file went stale/frozen mid-session, matching the
+  same symptom documented in "SUP-02 follow-up" entries below. Run
+  `uv run pytest tests/test_full_jd_resolver.py tests/test_resolve_snippets.py -q`
+  then `uv run python scripts/resolve_adzuna_snippets.py` against live data
+  before treating this as verified end-to-end.
+
+### SUP-02 plateau accepted at 16/35; Phase S4 (aggregator full-JD resolver) started (2026-07-13)
+
+- Run 3 (after the network-request-capture fix) held at 16/35 verified, same
+  15 employers stuck at `adapter_not_detected` with `render_used: true,
+  render_error: null` -- the browser successfully rendered every one of
+  them and still matched nothing. Ground-truthed two by hand instead of
+  guessing more regex patterns: **Retool**'s "Apply" button resolves to
+  `jobs.gem.com/retool/{id}` (Gem, an unsupported ATS -- confirmed live via
+  Claude in Chrome network inspection); **Rippling** runs its own
+  first-party `ats.rippling.com/{slug}/jobs` product (confirmed via web
+  search). Both are real careers systems outside the seven adapters this
+  pipeline supports, not detection bugs. The remaining 13 stuck employers
+  were not individually confirmed this session (the browser connection
+  dropped mid-investigation) and are documented as "probable, unconfirmed"
+  rather than verified.
+- Decision: accept 16/35 as the plateau rather than keep patching detection
+  heuristics against employers with nothing in-adapter to detect. This means
+  Phase S2's "at least 25 verified" acceptance bar may not be met -- treated
+  as a legitimate evidence-based outcome, not a bug. Adding a Gem adapter (or
+  others) to close the gap for real is separate, unscoped feature work.
+  Full writeup in `docs/JOB_POOL_V2_IMPLEMENTATION_STATUS.md` under "SUP-02"
+  / "Plateau confirmed at 16/35".
+
+### SUP-02 follow-up 2: network-request-based detection (2026-07-13)
+
+- Second real run (5 -> 16/35 verified with the domcontentloaded fix)
+  showed 12 employers where the JS-render fallback genuinely rendered the
+  page and still found nothing (`render_used: true, render_error: null,
+  status: adapter_not_detected`). Root cause: some careers pages fetch the
+  ATS's JSON API directly via client-side JS and never render a plain
+  `<a href>` link at all -- the slug never appears in `page.content()`,
+  only in the network request URL for the API call itself.
+- Fixed: `BrowserRenderer.render` now also captures every network request
+  URL made while the page loads (`page.on("request", ...)`), returned as
+  `RenderResult.network_urls`. `probe_employer` scans the rendered DOM
+  *and* these captured URLs together. Added `_API_PATTERNS` -- each
+  adapter's real JSON API URL shape, confirmed against each scraper's own
+  fetch URL in `src/intake/*.py` (not guessed): `boards-api.greenhouse.io/
+  v1/boards/{slug}`, `api.lever.co/v0/postings/{slug}`, `api.ashbyhq.com/
+  posting-api/job-board/{slug}`, `api.smartrecruiters.com/v1/companies/
+  {slug}`, `apply.workable.com/api/v3/accounts/{slug}`. Also added
+  `_WORKDAY_CXS_RE` for Workday's real `.../wday/cxs/{tenant}/{site}/jobs`
+  API shape, since the generic page-link pattern's optional site segment
+  would otherwise misread the literal `"wday"` path component as a site
+  name -- `_NOT_SLUGS` now excludes `"wday"`, `"cxs"`, `"api"`,
+  `"accounts"`, and version segments (`"v0"`-`"v3"`) for the same reason
+  across all adapters.
+- **Caught and fixed before shipping**: the first version of this change
+  scanned patterns via `{**_ADAPTER_PATTERNS, **_API_PATTERNS}`. Since both
+  dicts share adapter-name keys (both have `"greenhouse"` etc.), that dict
+  merge silently *overwrites* rather than combines -- it would have dropped
+  the original public-link pattern for 5 of 6 adapters, breaking every
+  already-working static detection (Writer, Hebbia, Ironclad, Benchling,
+  Modern Health, ServiceTitan, Uniphore). Confirmed with a throwaway
+  `{**a, **b}` REPL check before rewriting it as two separate scan loops.
+  Regression test added: `test_static_public_link_detection_is_not_shadowed_by_api_patterns`.
+- `run_probe`'s console summary now includes `render_error` per failed
+  employer, not just `render_used` -- the previous run needed a full read
+  of `data/audits/employer_cohort_probe.json` to find that five failures
+  were `networkidle` timeouts from a stale-but-still-running earlier
+  process, because the summary dropped that field.
+- Tests added: one API-pattern-detection test per adapter, the Workable
+  API-vs-public-link disambiguation, the Workday CXS-vs-generic-pattern
+  disambiguation, and an end-to-end `probe_employer` test where the
+  rendered DOM has nothing but a captured network request resolves the
+  endpoint.
+
+### SUP-02 hotfix: silent-run + networkidle-hang risk in the JS-render fallback (2026-07-13)
+
+- Arya's first run with the JS-render fallback sat with zero output for
+  several minutes -- looked identical to a hang, and the wait strategy made
+  it likely to actually behave like one. Two fixes to
+  `scripts/probe_employer_cohort.py`:
+  - `BrowserRenderer.render` no longer waits for Playwright's
+    `"networkidle"` -- modern marketing sites routinely keep a connection
+    open forever (chat widgets, analytics beacons, websockets), so
+    networkidle reliably burns the full per-employer timeout on exactly
+    the pages this fallback targets. Switched to `"domcontentloaded"` plus
+    a fixed 2.5s settle pause (`_JS_SETTLE_MS`), which is far faster and
+    still gives client-side JS time to inject the ATS widget.
+  - `run_probe` now prints `[i/n] probing <name>...` and the outcome to
+    stderr as each employer is processed, flushed immediately, instead of
+    staying silent until the final JSON summary. A multi-minute run with
+    no progress output is indistinguishable from a hang; this fixes that.
+
+### SUP-02 follow-up: Workday detail-fetch + JS-render fallback (2026-07-13)
+
+- First real run of `scripts/probe_employer_cohort.py` against the live 35
+  employers: 5/35 verified. Root-caused the 30 failures instead of taking
+  the count at face value -- 25 were `adapter_not_detected` (static HTML
+  had no ATS links at all, consistent with JS-rendered careers pages), 2
+  were correctly-detected Workday endpoints failing only on missing
+  descriptions, 1 was a rebrand-driven identity-check near-miss (Tray.io /
+  Tray.ai), 1 was a stale/wrong Greenhouse slug found on the page (Aisera).
+- Fixed: `fetch_sample` now calls `scraper.fetch_job_detail(job)` for
+  Workday samples before verification -- Workday's list endpoint carries
+  no description field at all, so without this every Workday candidate
+  failed `has_full_description` regardless of endpoint quality.
+- Added, per Arya's explicit choice given the 25/35 static-detection miss
+  rate: `BrowserRenderer`, a lazy, run-scoped headless Chromium fallback
+  (`playwright.sync_api`) used only when static HTML detection finds
+  nothing. One instance is reused for the whole cohort run; it never
+  launches for employers whose static HTML already resolves. Recovered
+  candidates are tagged `detection_method: "js_render"`; a missing/broken
+  Playwright install degrades to a recorded `render_error` on the
+  employers that needed it, never a crash. New CLI flags:
+  `--no-js-render`, `--render-timeout-ms`.
+- Tests added to `tests/test_probe_employer_cohort.py`: Workday
+  detail-fetch invocation and non-Workday exemption, `BrowserRenderer`
+  laziness and graceful degradation, the static-hit-skips-render /
+  static-miss-triggers-render / render-finds-nothing-vs-render-unavailable
+  distinctions in `probe_employer`, and an end-to-end `run_probe` test
+  confirming the renderer is constructed, wired through, and closed.
+  Existing `run_probe` tests were updated to pass `use_js_render=False`
+  explicitly so they stay pure-Python/no-network.
+- Full breakdown of the first run's results and what's still a manual-review
+  case (Tray.io, Aisera) vs. what's fixed is in
+  `docs/JOB_POOL_V2_IMPLEMENTATION_STATUS.md` under "SUP-02" / "First real
+  run and two follow-up fixes".
+
+### SUP-02: read-only cohort endpoint detector and audit artifact (2026-07-12)
+
+- Added `scripts/probe_employer_cohort.py`, per
+  `docs/JOB_SUPPLY_EXPANSION_PLAN.md` Phase S2 / ticket SUP-02. For each of
+  the 35 employers in `config/employer_cohort.v1.yaml`: fetches the
+  official `careers_url` (redirects followed), detects a Greenhouse/Lever/
+  Ashby/Workday/SmartRecruiters/Workable/Recruitee endpoint from the
+  resolved URL + page HTML, samples through the real production scraper
+  class for that adapter (no duplicate fetch logic), and runs five
+  verification checks (identity, unique non-empty IDs, direct application
+  URLs, location, full description). Writes an audit (every employer, pass
+  and fail) plus two proposed YAML patches under `data/audits/` --
+  `config/companies.yaml` and `config/employer_cohort.v1.yaml` are never
+  written to directly, and nothing produced by this script can set
+  `verification_status: verified_approved` or `enabled: true` on its own
+  (`scripts/validate_employer_cohort.py`'s release gate still requires an
+  explicit separate human step for that).
+- Tests: `tests/test_probe_employer_cohort.py`, pure Python, HTTP faked at
+  the `httpx.Client` boundary and scraper fetches faked via
+  `_SCRAPER_CLASSES` substitution -- covers adapter detection (including
+  the Workday "site segment missing" incomplete-match case), all five
+  verification checks with an explicit fail-closed-on-empty-sample case,
+  scraper failure isolation, and `run_probe`'s end-to-end artifact writing
+  including the never-`enabled: true` invariant.
+- Full contract, what was and wasn't verifiable in the implementation
+  sandbox, and the exact next commands to run are in
+  `docs/JOB_POOL_V2_IMPLEMENTATION_STATUS.md` under "SUP-02".
+- Also flagged, not yet fixed: `src/jobs/source_endpoints.py::_update_endpoint_health`
+  (from SUP-01B) tracks failure/recovery counters correctly but doesn't
+  drive `SourceEndpoint.state` transitions the way the canonical
+  `src/intake/source_health.py::transition_health` state machine would --
+  noted as a follow-up in the implementation status doc rather than folded
+  into this ticket's scope.
+
+### SUP-01B: real acquisition instrumentation for the supply funnel (2026-07-12)
+
+- Replaced SUP-01's disclosed estimate-only fallback with real per-endpoint
+  fetch telemetry, per Arya's explicit instruction not to fabricate endpoint
+  or query-arm metrics:
+  - `src/intake/search.py::_fetch_board` now times every attempted
+    direct-ATS board and classifies the outcome (`success`/`empty`/
+    `error`/`cache_hit`), reported via a new `endpoint_metrics`
+    out-parameter on `search_jobs` (threaded through
+    `src.application.jobs.search_jobs` into
+    `src.orchestration.portfolio_run.run_portfolio_v2` -- the smallest
+    interface that avoids duplicating the fetch pipeline, per the
+    instruction to identify one before coding). One broken employer board
+    still cannot fail the whole discovery run; the existing per-future
+    try/except isolation in the ThreadPoolExecutor loop is unchanged, only
+    now also records the failed attempt before re-raising.
+  - All seven ATS scrapers (`greenhouse`, `lever`, `ashby`, `workday`,
+    `smartrecruiters`, `workable`, `recruitee`) set
+    `self.last_fetch_stats = {provider_records, normalized_records,
+    malformed_records}` before returning, so provider-vs-parsed counts are
+    observed, not assumed equal.
+  - New `src/jobs/source_endpoints.py` (`upsert_source_endpoint`,
+    `record_endpoint_runs`) turns that telemetry into real `SourceEndpoint`
+    / `SourceEndpointRun` rows inside `run_portfolio_v2`'s existing
+    transaction. It only ever writes passive health fields
+    (`last_checked_at`, `last_success_at`, `last_nonempty_at`,
+    `consecutive_failures`, `consecutive_empty`, `recovery_successes`,
+    `first_failure_at`); it never touches `state`/`compliance_status`, so a
+    passing fetch can never masquerade as a SUP-02-verified, activated
+    source.
+  - Postings are tagged with their exact origin at fetch time
+    (`raw_data.source_endpoint_adapter`/`source_endpoint_key` for direct
+    ATS, unchanged `source_query_term`/`source_query_location` for Adzuna)
+    and `JobSnapshot.source_endpoint_run_id`/`source_query_run_id` (schema
+    columns that previously had no writer) are now actually set -- only on
+    a brand-new snapshot, never a reused one, respecting snapshot
+    immutability. A posting with neither tag is bucketed by
+    `source_funnel_report` as `endpoint_kind: "attribution_unknown"` rather
+    than guessed from company name (explicit requirement: attribute
+    conservatively, mark unknown rather than guess).
+  - `SourceQueryRun.routed_pairs`/`viable_evaluations` are now computed
+    after evaluation and written back for real. `viable_evaluations` uses
+    the architecture's literal Tier B label ("B -- viable",
+    `JOB_POOL_V2_ARCHITECTURE.md` Section 5.4) per the instruction to defer
+    to an explicit architecture definition when one exists -- it is
+    deliberately narrower than `source_funnel_report`'s own combined Tier
+    A/B "A/B evaluations" stage, which is reported separately and remains
+    unchanged. `review_positives` reflects real surfaced-card attribution.
+  - `source_funnel_report`'s `instrumented: false` fallback (fetched count
+    estimated from evaluated postings, no duration/last-success) is
+    preserved exactly as SUP-01 shipped it, for any source/endpoint lacking
+    a real `SourceEndpointRun`/`SourceQueryRun` row in that specific run --
+    Remotive, HN, and LinkedIn (LinkedIn stays excluded from `source="all"`
+    entirely) remain permanently in this category by design, not as a bug.
+- Tests added: `tests/test_intake_endpoint_metrics.py` (pure Python, no DB
+  -- success/empty/failure-isolation/cache-hit at the fetch boundary, via
+  scraper classes patched at their `src.intake.search` import names, with
+  `persist_and_sync_ids` mocked out so this file can never hang waiting on
+  Postgres). `tests/test_source_endpoints_persistence.py` (DB-backed --
+  one row per attempted endpoint with real counts, upsert never touches
+  activation state, consecutive-failure/recovery tracking across runs,
+  empty-vs-nonempty distinction). `tests/test_source_funnel_report.py`
+  gained an `attribution_unknown` case and a multi-target
+  no-double-counting reconciliation case (one posting evaluated against
+  three targets must still count once at fetched/unique), and its existing
+  employer-board case now uses the real fetch-time tag instead of the old
+  company-name-derived grouping.
+- **Not run this session**: no reachable Postgres and no Python 3.12
+  interpreter were available in the implementation sandbox, so none of the
+  above tests have actually been executed, and the SPA was not rebuilt.
+  Full detail and the exact command to run first is in
+  `docs/JOB_POOL_V2_IMPLEMENTATION_STATUS.md` under "SUP-01 / SUP-01B" and
+  in `docs/SONNET_START_HERE.md`'s "Next task" section. Treat this as
+  reviewed-but-unverified, not shipped, until that run is green.
+
+### SUP-01: per-source/endpoint supply funnel report (2026-07-12)
+
+- Added `src/application/source_funnel.py::source_funnel_report`, extending
+  the Search Quality screen with one row per source (and, where the data
+  distinguishes it, per endpoint/query arm) showing
+  `fetched -> unique -> in-policy geography -> target-routed -> full-JD -> A/B
+  -> surfaced`, plus duplicates, description-completeness breakdown, and
+  rolling 7-/30-day unique A/B yield. New read-only route:
+  `GET /api/job-pool-v2/source-funnel` (optional `run_id`). Wired into
+  `frontend/src/views/JobPoolQualityView.vue` as a new table below the
+  existing tier-supply card.
+- Every row is built from the immutable ledger (`job_target_evaluations`,
+  `job_evaluation_reasons`, `discovery_run_evaluations`, `portfolio_decisions`)
+  so counts reconcile to a specific discovery run and every stage carries its
+  source snapshot ids. Rows with several fetched jobs but zero routed or zero
+  full-JD jobs are labeled `low_yield` per the SUP-01 acceptance criteria.
+  Adzuna postings are grouped by query arm (`source_query_term` /
+  `source_query_location`); direct-ATS postings by `(source, company)` since
+  individual `SourceEndpoint` rows don't exist yet for those boards
+  (that's SUP-02); everything else by source alone.
+- Known, disclosed gap: `SourceEndpointRun` (per-endpoint fetch duration/http
+  status/provider-record telemetry) is a real table but nothing writes to it
+  yet -- direct-ATS adapters fetch through one shared `search_jobs(source=
+  "all")` call rather than per endpoint. `SourceQueryRun.routed_pairs` /
+  `viable_evaluations` / `review_positives` are also still hardcoded to 0 at
+  write time in `portfolio_run.py`. Until that instrumentation lands, the
+  report's `fetch.instrumented` flag is `False` and duration/last-success are
+  `None` rather than fabricated; "fetched" falls back to the count of
+  postings actually evaluated in the run. Wiring real per-fetch telemetry
+  into the intake adapters is a larger, separate change and is not part of
+  this ticket.
+- Tests: `tests/test_source_funnel_report.py` (DB-backed; needs Postgres up).
+  Builds one healthy `greenhouse`/"Acme Corp" endpoint (3 postings, one fails
+  geography, one surfaced) and one low-yield `adzuna` query arm (6 postings,
+  zero routed, zero full-JD) inside a single discovery run and asserts counts
+  reconcile, snapshot ids trace back correctly, and the aggregator arm is
+  flagged `low_yield` while the healthy endpoint is not. Two smaller tests
+  cover "no run yet" and "run with no linked evaluations".
+
+### Job Pool V2 supply, repeat-run, and live-canary hardening (2026-07-12)
+
+- Reduced portfolio CPU work by computing job facts and employer/posting
+  assessments once per posting rather than once for every target. The measured
+  live run fell from about 5m39s to 3m36s.
+- Balanced early query-arm scheduling across targets, raised the V2 acquisition
+  budget and Adzuna recall cap to 15, expanded RevOps/TCS terms, and enabled the
+  already-verified Remotive feed for V2 searches.
+- Added an exploration-only Tier C near-miss view that cannot reserve review
+  cards or generate materials and excludes hard gate failures.
+- Added `discovery_run_evaluations` so immutable evaluations reused across runs
+  remain visible in each run's reports and replays. Durable selected portfolio
+  decisions now prevent cleared queue rows from immediately resurfacing.
+- Corrected loss reporting to count distinct failed/deferred evaluations.
+- Marked Adzuna descriptions as snippets and capped snippet-only jobs below
+  Tier B until a full employer JD is recovered. The live Orion Health result
+  exposed the defect; its review entry was marked stale.
+- Restarted the live web/worker processes after the final scorer/history fixes.
+  Focused regression verification: 37 tests passed; the production SPA build
+  and full 8,440-pair read-only v2.4 replay passed.
+- Added `docs/JOB_SUPPLY_EXPANSION_PLAN.md`: a bounded direct-employer cohort,
+  official ATS adapter, full-JD recovery, compliant board, and adaptive-yield
+  roadmap. Indeed/Wellfound scraping remains prohibited.
+
+### Job Pool V2 five-card canary activation (2026-07-12)
+
+- Activated the user-requested V2 trial with a hard global capacity of five
+  review cards. The five independent V1 plans are disabled so `Run Plans Now`
+  cannot mix legacy and V2 candidates in the same review queue.
+- The canary still admits only Tier A/B candidates and may create fewer than
+  five cards. Materials are generated only for successfully reserved review
+  cards; application submission remains explicitly human-approved.
+- Rollback remains one edit: restore `matching.pipeline_version: v1`, disable
+  `nightly-portfolio-v2`, and re-enable the five legacy plans.
+
+### Job Pool V2 additive implementation and shadow gate (2026-07-12)
+
+- Implemented the canonical candidate evidence bank, five strict target specs,
+  duplicate-key-safe loaders, role/capability taxonomies, and a read-only V1
+  generation adapter. The live authority remains `matching.pipeline_version:
+  v1`; an enabled global `v2_shadow` plan writes audit data only.
+- Added deterministic JobFactsV2, tri-state eligibility, employer/posting
+  assessments, separate Story Fit/Candidacy/Review Index components, hard A/B
+  tier floors, confidence, evidence-linked explanations, and bounded structured
+  feedback priors. Broad-funnel evaluation makes no LLM calls.
+- Added the immutable V2 ledger migration for endpoints, discovery/query runs,
+  job-target evaluations and reasons, portfolio runs/decisions, structured
+  review feedback, and frozen evaluation sets. The migration was upgraded on
+  the local PostgreSQL database and retains every V1 table/path.
+- Added one-refresh/five-target orchestration and a transactionally reserved
+  global portfolio: 20 quality-limited core slots plus five additive startup
+  slots, A before B, no C filler, and canonical/company/target ownership caps.
+  Shadow mode creates neither review cards nor material tasks; no path submits
+  applications automatically.
+- Added structured negative feedback in the review queue and surfaced-week
+  evaluation journeys for business conversion. Legacy events remain readable
+  but are explicitly excluded where their evaluation binding is uncertain.
+- Added deterministic offline replay, canonical-group temporal isolation,
+  V1/V2 comparison metrics, Wilson intervals, and seeded blinded-set export
+  that hides model arm, tier, score, and selection fields.
+- Added a nontechnical Search Quality screen with target tier supply, attrition
+  reasons, endpoint health, proposed-versus-created cards, and missing-data
+  reporting. Rebuilt the production SPA.
+- Added disabled-by-default SmartRecruiters, Workable, and Recruitee public
+  adapters plus normalization fixtures. Activation still requires live
+  conformance and useful unique A/B yield.
+- Added a validated 35-employer/73-target-link research cohort. Every candidate
+  is inactive and pending endpoint/evidence verification; release validation
+  intentionally fails until verification and Arya approval are recorded.
+- Cutover is intentionally not claimed: the required seven shadow cycles,
+  50-item blinded review with at least 60% A/B precision, canary, and two-week
+  rollback soak are real-world gates and have not yet elapsed.
+- Live shadow rehearsal retrieved 1,699 unique jobs and evaluated 8,495
+  job-target pairs without creating cards or materials. That rehearsal exposed
+  and fixed an overlong HN employer field, `Sr.` seniority leakage, company-age
+  years misread as required experience, boilerplate remote text overriding an
+  explicit office requirement, unsupported-specialization leakage, and missing
+  AI deployment/startup signals. A read-only full-snapshot v2.3 replay retained
+  only two A/B candidates (Nooks AI Deployment Strategist and Vantage Solutions
+  Engineer), demonstrating intentional empty slots rather than quota filler.
+
+### Job Pool V2 authoritative design (2026-07-12)
+
+- Added `docs/JOB_POOL_V2_ARCHITECTURE.md`, the approved implementation contract
+  for replacing copied profiles, opaque similarity ranking, split search
+  configuration, independent plan quotas, and unaudited source attrition.
+- The design defines one canonical evidence bank, five target specifications,
+  a reconciled staged funnel, tri-state eligibility, separate Story Fit and
+  Candidacy judgments, deterministic tier floors, structured feedback, source
+  health and employer/posting assessments, and a transactional global portfolio
+  with five additive startup slots.
+- Added bounded V2-00 through V2-15 tickets with exact file boundaries, tests,
+  dependencies, migrations, rollback behavior, and completion criteria for
+  smaller implementation models. The additive implementation above now follows
+  this contract; V1 remains the live authority until the prospective gates pass.
+- Recorded the controlling architecture decision as D031.
+
+### Sol Ultra job-pool redesign brief (2026-07-12)
+
+- Added `docs/SOL_ULTRA_JOB_POOL_REDESIGN_BRIEF.md`, a design-authority handoff
+  documenting measured pool, profile, scoring, source, filter, employer,
+  feedback, and selection failures. It includes exact evidence, implicated
+  files, invariants, required design deliverables, and acceptance criteria for
+  smaller implementation models.
+- Confirmed the core matching defect: analyst, implementation, and TAM profile
+  bodies are identical after ignored comment headers; sales differs mainly in
+  QA prose that matching does not consume. Historical score bands are also
+  non-predictive of apply/skip behavior (30% take at 0.6-0.8 versus 31% at
+  0.4-0.6).
+- An unfinished target-fit scorer experiment was removed before the handoff;
+  existing matching behavior remains intact and 34 matching tests pass.
+
+### Automation plan quality and queue diversity (2026-07-12)
+
+- Added a plan-level role-family gate so analyst, TAM, sales-engineering,
+  implementation, and AI-implementation plans cannot select unrelated software
+  engineering roles merely because their descriptions share technical terms.
+- Added a direct-employer quality gate for identifiable staffing/recruiter
+  listings, wrong-domain sales-title exclusions, a hard 0.50 fit floor, and a
+  conservative selection-time company/title collapse. No database records are
+  fuzzy-merged or deleted.
+- Plans now exclude jobs already pending review before Top-N selection, so
+  concurrent plans backfill distinct cards instead of reporting the same five
+  jobs repeatedly. The current single-process threaded worker serializes this
+  selection/reservation step.
+- Expanded TAM discovery with entry-friendly technical customer-success terms.
+  AI implementation keeps a broader, role-gated startup discovery lane so up
+  to five relevant startup bonuses remain available without displacing Top-N.
+- Reports now distinguish role-compatible jobs, weak employers, jobs below the
+  score floor, exact duplicates, previously applied jobs, already-pending jobs,
+  newly created review cards, total startups, raw/source counts, search-filter
+  attrition, and the actual selected job list.
+- Added `scripts/audit_plan_quality.py`, a no-enqueue/no-materials rehearsal
+  that writes `data/audits/latest_plan_quality.json` for Claude/Codex review.
+- Reduced local embedding input to 4,000 characters after live rehearsals
+  proved 20,000 and 8,000 still caused repeated Ollama context-length failures.
+- Final rehearsal: 26 jobs selected (21 core + 5 startup bonuses). Four role
+  families produced five core matches; TAM intentionally stopped at three
+  rather than admit two candidates scoring 0.39 and 0.37.
+- Follow-up raw-pool audit corrected the initial diagnosis: discovery volume is
+  high (610–970 raw records per plan), but direct-source quality is uneven.
+  Analyst had only 7 ATS keyword matches versus 384 Adzuna results;
+  implementation had 19 versus 355; TAM retained only 21 role-compatible jobs,
+  of which 17 were weak-employer, sub-0.50, or already applied. The remaining
+  source-quality bottleneck is therefore real even though raw volume is ample.
+
+### Startup bonus lane (2026-07-11)
+
+- Every scored `source=all` search now keeps a separate HN startup candidate
+  lane. Exact keyword matches remain normal ranked results; non-keyword startup
+  candidates must still pass location, experience, compensation, hard-rule,
+  and minimum-fit gates.
+- Interactive searches add only enough highest-scoring bonus candidates to
+  reach five startup results. Normal best matches are never displaced.
+- Scheduled plans and `Run Plans Now.bat` select their configured `top_n` plus
+  enough qualified, not-previously-applied startup jobs to reach five. Reports
+  expose `startup_bonus_selected` for auditability.
+
+### Cover-letter repair loop and official HN startup jobs (2026-07-12)
+
+- Added a three-attempt cover-letter repair loop. Rejected short/drifted drafts
+  feed their exact failure reason into the next attempt; final failure remains
+  fail-closed with no boilerplate artifact.
+- Declined Wellfound browser scraping because its current terms prohibit
+  scraping/harvesting. Existing pasted-JD materials remain the safe Wellfound
+  intake path.
+- Added the official Hacker News Firebase `jobstories` feed as a cached,
+  startup-native source alongside the monthly HN hiring thread.
+
+### Cover-letter and job-quality recalibration (2026-07-11)
+
+- Diagnosed recent generic letters as silent deterministic fallbacks: the
+  generator emitted an artifact even while validation warned it was too short,
+  underfilled, under-structured, and a raw evidence dump.
+- Cover-letter generation now fails closed and applies fact-drift checks on the
+  active generator path, preventing both boilerplate and invented metrics.
+- Recalibrated job quality with a 0.50 display floor, shared clearance and
+  staffing gates, robust `Sr` recognition, restored HN unknown-pay startup
+  posts, startup/entry signals, and high-selectivity employer penalties.
+
+### Funnel analytics, duplicate clusters, and legacy uniqueness (2026-07-11)
+
+- Added append-only, idempotent funnel milestones from discovery through offer,
+  weekly conversion APIs/views, source/profile/material dimensions, and elapsed
+  application time capture.
+- Added conservative canonical fingerprints and non-destructive `Possible
+  duplicate` clusters in the Job Database.
+- Audited the live legacy table (zero normalized duplicate groups), aligned
+  Python deduplication with source-global identity, and added a transactional
+  normalized unique index/backfill migration.
+- Added `docs/FUNNEL_IDENTITY_HANDOFF.md` with practice-run evidence and explicit
+  contracts for Claude and future maintainers.
+
+### Repository audit and conservative cleanup (2026-07-11)
+
+- Added `docs/AUDIT_2026-07-11.md` with a current architecture map, risk assessment, prioritized
+  engineering roadmap, product avenues, and a hiring-focused operating strategy.
+- Aligned package metadata with the existing `0.18.9` product version shown in the README.
+- Removed unused imports from the document engines, question-answer service, and task tests;
+  removed a dataclass-helper shadow in plan-run search-profile mapping; wrapped one lint overflow.
+- Verification: 135 focused backend tests passed; a full run reached 495 passes before PostgreSQL
+  was closed; the frontend production build passed with the existing large-chunk warning.
 
 ### Fix: local embeddings circuit breaker tripped by long JDs, not just Ollama outages (2026-07-11)
 

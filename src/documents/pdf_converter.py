@@ -37,6 +37,13 @@ def convert_to_pdf(docx_path: Path, output_path: Path | None = None) -> Path:
         from docx2pdf import convert
 
         convert(str(docx_path), str(output_path))
+        # Word COM can fail without raising (busy/hung Word instance,
+        # modal dialog) and docx2pdf swallows per-file errors in batch
+        # mode. Never report a PDF that isn't actually on disk — a
+        # recorded-but-missing artifact breaks review-card previews
+        # and the artifact ledger (observed 2026-07-15: resume PDF
+        # recorded in versions/*.json but absent from data/output).
+        _verify_pdf_written(output_path)
         logger.info("Converted %s → %s (docx2pdf)", docx_path.name, output_path.name)
         return output_path
     except Exception as e:
@@ -45,12 +52,22 @@ def convert_to_pdf(docx_path: Path, output_path: Path | None = None) -> Path:
     # Fall back to LibreOffice CLI
     libreoffice = _find_libreoffice()
     if libreoffice:
-        return _convert_via_libreoffice(libreoffice, docx_path, output_path)
+        result = _convert_via_libreoffice(libreoffice, docx_path, output_path)
+        _verify_pdf_written(result)
+        return result
 
     raise RuntimeError(
         "Could not convert to PDF. Install Microsoft Word or LibreOffice. "
         "Alternatively: pip install docx2pdf"
     )
+
+
+def _verify_pdf_written(output_path: Path) -> None:
+    """Raise if the converter reported success but wrote no usable file."""
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise RuntimeError(
+            f"PDF conversion reported success but produced no file: {output_path}"
+        )
 
 
 def _find_libreoffice() -> str | None:

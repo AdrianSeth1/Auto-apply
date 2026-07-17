@@ -1,0 +1,17 @@
+schema_version: 2
+id: default
+core_capacity: 20
+reservoir_target: 40
+minimum_core_tier: B
+per_target_max: 5
+company_max: 2
+startup_bonus:
+  capacity: 5
+  minimum_tier: B
+  company_max: 2
+  per_target_max: 2
+exploration:
+  tier_b_share: 0.10
+stretch:
+  enabled: false
+  capacity: 0

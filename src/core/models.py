@@ -56,6 +56,7 @@ class Job(Base):
     visa_sponsorship: Mapped[bool | None] = mapped_column(Boolean)
     ats_type: Mapped[str | None] = mapped_column(String(50))
     application_url: Mapped[str | None] = mapped_column(Text)
+    canonical_fingerprint: Mapped[str | None] = mapped_column(String(24), index=True)
     raw_data: Mapped[dict | None] = mapped_column(JSONB)
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -78,10 +79,16 @@ class Application(Base):
         nullable=True,
         index=True,
     )
+    evaluation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), index=True
+    )
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="DISCOVERED")
     match_score: Mapped[float | None] = mapped_column(Float)
     resume_version: Mapped[str | None] = mapped_column(Text)
     cover_letter_version: Mapped[str | None] = mapped_column(Text)
+    profile_variant: Mapped[str | None] = mapped_column(String(100))
+    material_variant: Mapped[str | None] = mapped_column(String(1000))
+    time_spent_seconds: Mapped[int | None] = mapped_column(Integer)
     qa_responses: Mapped[dict | None] = mapped_column(JSONB)
     screenshot_paths: Mapped[dict | None] = mapped_column(JSONB)
     error_log: Mapped[str | None] = mapped_column(Text)
@@ -106,6 +113,36 @@ class Application(Base):
     # API. ``DELETE /api/applications/{id}`` flips this; permanent
     # deletion happens after ``cleanup.soft_deleted_retention_days``.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class FunnelEvent(Base):
+    """Append-only, idempotent milestones for weekly conversion analytics."""
+
+    __tablename__ = "funnel_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "entity_type", "entity_id", "stage", name="uq_funnel_event_stage"
+        ),
+        Index("ix_funnel_events_tenant_time", "tenant_id", "occurred_at"),
+        Index("ix_funnel_events_stage_time", "tenant_id", "stage", "occurred_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    entity_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    stage: Mapped[str] = mapped_column(String(30), nullable=False)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    posting_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    application_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    evaluation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    journey_key: Mapped[str | None] = mapped_column(String(120), index=True)
+    source: Mapped[str | None] = mapped_column(String(50))
+    profile_variant: Mapped[str | None] = mapped_column(String(100))
+    material_variant: Mapped[str | None] = mapped_column(String(1000))
+    time_spent_seconds: Mapped[int | None] = mapped_column(Integer)
+    event_metadata: Mapped[dict | None] = mapped_column(JSONB)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class ApplicantProfile(Base):
@@ -152,12 +189,15 @@ class JobPosting(Base):
     source_id: Mapped[str] = mapped_column(String(200), nullable=False)
     company: Mapped[str] = mapped_column(String(200), nullable=False)
     canonical_url: Mapped[str | None] = mapped_column(Text)
+    canonical_fingerprint: Mapped[str | None] = mapped_column(String(24), index=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     state: Mapped[str] = mapped_column(String(20), nullable=False, default="new")
     latest_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    source_endpoint_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    employer_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
 
 
 class JobSnapshot(Base):
@@ -185,6 +225,13 @@ class JobSnapshot(Base):
     requirements: Mapped[dict | None] = mapped_column(JSONB)
     application_url: Mapped[str | None] = mapped_column(Text)
     raw_data: Mapped[dict | None] = mapped_column(JSONB)
+    provenance: Mapped[dict | None] = mapped_column(JSONB)
+    source_endpoint_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), index=True
+    )
+    source_query_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), index=True
+    )
     scraped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
@@ -536,6 +583,10 @@ class ReviewQueueEntry(Base):
     run_id: Mapped[str | None] = mapped_column(String(64))
     materials_path: Mapped[str | None] = mapped_column(String(400))
     score_breakdown: Mapped[dict | None] = mapped_column(JSONB)
+    evaluation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    portfolio_decision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), index=True
+    )
     company: Mapped[str | None] = mapped_column(String(200))
     title: Mapped[str | None] = mapped_column(String(300))
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
@@ -631,4 +682,450 @@ class CleanupItem(Base):
     mtime: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     quarantined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Job Pool V2 — additive source, evaluation, portfolio, and feedback ledger.
+# V1 does not read these tables; v2_shadow writes them without queue mutations.
+# ---------------------------------------------------------------------------
+
+
+class Employer(Base):
+    __tablename__ = "employers"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "normalized_name", name="uq_employers_tenant_name"),
+        Index("ix_employers_tenant_name", "tenant_id", "normalized_name"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    normalized_name: Mapped[str] = mapped_column(String(240), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(240), nullable=False)
+    aliases: Mapped[list | None] = mapped_column(JSONB)
+    canonical_domain: Mapped[str | None] = mapped_column(String(240))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class EmployerAssessment(Base):
+    __tablename__ = "employer_assessments"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "employer_id", "classifier_version", name="uq_employer_assessment_version"
+        ),
+        Index("ix_employer_assessments_tenant_employer", "tenant_id", "employer_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    employer_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("employers.id", ondelete="CASCADE"), nullable=False
+    )
+    classifier_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    employment_relationship: Mapped[str] = mapped_column(String(40), nullable=False)
+    business_model: Mapped[str] = mapped_column(String(60), nullable=False)
+    lifecycle: Mapped[str] = mapped_column(String(30), nullable=False)
+    funding_stage: Mapped[str] = mapped_column(String(30), nullable=False)
+    selectivity_tier: Mapped[str] = mapped_column(String(30), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[list | None] = mapped_column(JSONB)
+    manual_override: Mapped[dict | None] = mapped_column(JSONB)
+    assessed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class SourceEndpoint(Base):
+    __tablename__ = "source_endpoints"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "adapter", "endpoint_key", name="uq_source_endpoints_adapter_key"
+        ),
+        Index("ix_source_endpoints_due", "tenant_id", "state", "next_probe_at"),
+        Index("ix_source_endpoints_employer", "tenant_id", "employer_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    adapter: Mapped[str] = mapped_column(String(50), nullable=False)
+    endpoint_key: Mapped[str] = mapped_column(String(300), nullable=False)
+    employer_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("employers.id", ondelete="SET NULL")
+    )
+    careers_url: Mapped[str | None] = mapped_column(Text)
+    adapter_config: Mapped[dict | None] = mapped_column(JSONB)
+    discovery_provenance: Mapped[dict | None] = mapped_column(JSONB)
+    state: Mapped[str] = mapped_column(String(30), nullable=False, default="candidate")
+    compliance_status: Mapped[str] = mapped_column(String(40), nullable=False, default="unknown")
+    manual_override: Mapped[dict | None] = mapped_column(JSONB)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    consecutive_empty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    recovery_successes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    first_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_nonempty_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class DiscoveryRun(Base):
+    __tablename__ = "discovery_runs"
+    __table_args__ = (
+        Index("ix_discovery_runs_tenant_started", "tenant_id", "started_at"),
+        Index("ix_discovery_runs_status", "tenant_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    mode: Mapped[str] = mapped_column(String(30), nullable=False)
+    pipeline_version: Mapped[str] = mapped_column(String(30), nullable=False)
+    config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_ids: Mapped[list | None] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="running")
+    counts: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SourceEndpointRun(Base):
+    __tablename__ = "source_endpoint_runs"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "fetch_run_id", name="uq_source_endpoint_fetch_run"),
+        Index("ix_source_endpoint_runs_endpoint_started", "endpoint_id", "started_at"),
+        Index("ix_source_endpoint_runs_discovery", "discovery_run_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    endpoint_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("source_endpoints.id", ondelete="CASCADE"), nullable=False
+    )
+    discovery_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("discovery_runs.id", ondelete="SET NULL")
+    )
+    fetch_run_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    provider_records: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    normalized_records: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    malformed_records: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    response_signature: Mapped[str | None] = mapped_column(String(64))
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    error_detail: Mapped[str | None] = mapped_column(Text)
+    retry_after_seconds: Mapped[int | None] = mapped_column(Integer)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SourceQueryArm(Base):
+    __tablename__ = "source_query_arms"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "target_id",
+            "adapter",
+            "normalized_query",
+            "geography",
+            "version",
+            name="uq_source_query_arm_version",
+        ),
+        Index("ix_source_query_arms_due", "tenant_id", "state", "next_run_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    target_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    adapter: Mapped[str] = mapped_column(String(50), nullable=False)
+    query: Mapped[str] = mapped_column(String(300), nullable=False)
+    normalized_query: Mapped[str] = mapped_column(String(300), nullable=False)
+    geography: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    state: Mapped[str] = mapped_column(String(30), nullable=False, default="active")
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    call_cost: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    run_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    useful_yield_positive: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    useful_yield_total: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class SourceQueryRun(Base):
+    __tablename__ = "source_query_runs"
+    __table_args__ = (
+        Index("ix_source_query_runs_arm_started", "query_arm_id", "started_at"),
+        Index("ix_source_query_runs_discovery", "discovery_run_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    query_arm_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("source_query_arms.id", ondelete="CASCADE"), nullable=False
+    )
+    discovery_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("discovery_runs.id", ondelete="SET NULL")
+    )
+    search_query_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("search_queries.id", ondelete="SET NULL")
+    )
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    provider_records: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unique_postings: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    routed_pairs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    viable_evaluations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    review_positives: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    applications: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    metrics: Mapped[dict | None] = mapped_column(JSONB)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class JobQualityAssessment(Base):
+    __tablename__ = "job_quality_assessments"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "snapshot_id", "classifier_version", name="uq_job_quality_snapshot_version"
+        ),
+        Index("ix_job_quality_snapshot", "tenant_id", "snapshot_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("job_snapshots.id", ondelete="CASCADE"), nullable=False
+    )
+    classifier_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    assessment: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    trust_score: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    assessed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class JobTargetEvaluation(Base):
+    __tablename__ = "job_target_evaluations"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "snapshot_id",
+            "target_id",
+            "candidate_version",
+            "target_version",
+            "parser_version",
+            "role_taxonomy_version",
+            "capability_taxonomy_version",
+            "scorer_version",
+            name="uq_job_target_evaluation_version",
+        ),
+        Index("ix_job_target_eval_run_target", "discovery_run_id", "target_id"),
+        Index("ix_job_target_eval_tier", "tenant_id", "target_id", "tier"),
+        Index("ix_job_target_eval_snapshot", "tenant_id", "snapshot_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    discovery_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("discovery_runs.id", ondelete="SET NULL")
+    )
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("job_snapshots.id", ondelete="CASCADE"), nullable=False
+    )
+    target_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    candidate_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    parser_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    role_taxonomy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    capability_taxonomy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    scorer_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    model_version: Mapped[str] = mapped_column(String(100), nullable=False, default="deterministic")
+    pipeline_version: Mapped[str] = mapped_column(String(30), nullable=False)
+    stage_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    facts: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    gate_results: Mapped[list] = mapped_column(JSONB, nullable=False)
+    component_scores: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    component_confidence: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    story_fit: Mapped[float] = mapped_column(Float, nullable=False)
+    candidacy_index: Mapped[float] = mapped_column(Float, nullable=False)
+    review_index: Mapped[float] = mapped_column(Float, nullable=False)
+    adjusted_review_index: Mapped[float] = mapped_column(Float, nullable=False)
+    tier: Mapped[str] = mapped_column(String(20), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    explanation: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    employer_assessment: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    posting_assessment: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class DiscoveryRunEvaluation(Base):
+    """Many-to-many occurrence of an immutable evaluation in discovery runs."""
+
+    __tablename__ = "discovery_run_evaluations"
+    __table_args__ = (
+        UniqueConstraint("discovery_run_id", "evaluation_id", name="uq_discovery_run_evaluation"),
+        Index("ix_discovery_run_evaluations_run", "discovery_run_id"),
+        Index("ix_discovery_run_evaluations_evaluation", "evaluation_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    discovery_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("discovery_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    evaluation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("job_target_evaluations.id", ondelete="CASCADE"), nullable=False
+    )
+    linked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class JobEvaluationReason(Base):
+    __tablename__ = "job_evaluation_reasons"
+    __table_args__ = (
+        Index("ix_job_eval_reasons_run_target", "discovery_run_id", "target_id"),
+        Index("ix_job_eval_reasons_code", "tenant_id", "stage", "reason_code"),
+        Index("ix_job_eval_reasons_evaluation", "evaluation_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    evaluation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("job_target_evaluations.id", ondelete="CASCADE"), nullable=False
+    )
+    discovery_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("discovery_runs.id", ondelete="SET NULL")
+    )
+    target_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    stage: Mapped[str] = mapped_column(String(50), nullable=False)
+    decision: Mapped[str] = mapped_column(String(30), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False)
+    evidence: Mapped[list | None] = mapped_column(JSONB)
+    details: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class PortfolioRun(Base):
+    __tablename__ = "portfolio_runs"
+    __table_args__ = (
+        Index("ix_portfolio_runs_tenant_started", "tenant_id", "started_at"),
+        Index("ix_portfolio_runs_discovery", "discovery_run_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    discovery_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("discovery_runs.id", ondelete="SET NULL")
+    )
+    portfolio_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    portfolio_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[str] = mapped_column(String(30), nullable=False)
+    seed: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="running")
+    counts: Mapped[dict | None] = mapped_column(JSONB)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PortfolioDecision(Base):
+    __tablename__ = "portfolio_decisions"
+    __table_args__ = (
+        UniqueConstraint("portfolio_run_id", "evaluation_id", name="uq_portfolio_decision_eval"),
+        Index("ix_portfolio_decisions_run_lane", "portfolio_run_id", "lane", "selected"),
+        Index("ix_portfolio_decisions_canonical", "portfolio_run_id", "canonical_group"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    portfolio_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("portfolio_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    evaluation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("job_target_evaluations.id", ondelete="CASCADE"), nullable=False
+    )
+    canonical_group: Mapped[str] = mapped_column(String(100), nullable=False)
+    owned_target_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    secondary_target_ids: Mapped[list | None] = mapped_column(JSONB)
+    company_key: Mapped[str] = mapped_column(String(240), nullable=False)
+    lane: Mapped[str] = mapped_column(String(30), nullable=False)
+    utility: Mapped[float] = mapped_column(Float, nullable=False)
+    rank: Mapped[int | None] = mapped_column(Integer)
+    selected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reason_codes: Mapped[list | None] = mapped_column(JSONB)
+    review_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class ReviewFeedback(Base):
+    __tablename__ = "review_feedback"
+    __table_args__ = (
+        Index("ix_review_feedback_target_created", "tenant_id", "target_id", "created_at"),
+        Index("ix_review_feedback_evaluation", "evaluation_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    review_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    evaluation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("job_target_evaluations.id", ondelete="CASCADE"), nullable=False
+    )
+    target_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    judgment: Mapped[str] = mapped_column(String(40), nullable=False)
+    action: Mapped[str] = mapped_column(String(30), nullable=False)
+    primary_reason: Mapped[str] = mapped_column(String(100), nullable=False)
+    secondary_reasons: Mapped[list | None] = mapped_column(JSONB)
+    free_text: Mapped[str | None] = mapped_column(Text)
+    learnable: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    model_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class EvaluationSet(Base):
+    __tablename__ = "evaluation_sets"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", "version", name="uq_evaluation_set_version"),
+        Index("ix_evaluation_sets_tenant_created", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    definition: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    seed: Mapped[str] = mapped_column(String(100), nullable=False)
+    frozen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class EvaluationItem(Base):
+    __tablename__ = "evaluation_items"
+    __table_args__ = (
+        UniqueConstraint("evaluation_set_id", "snapshot_id", "target_id", name="uq_evaluation_item_pair"),
+        Index("ix_evaluation_items_order", "evaluation_set_id", "presentation_order"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default=TENANT_DEFAULT)
+    evaluation_set_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("evaluation_sets.id", ondelete="CASCADE"), nullable=False
+    )
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("job_snapshots.id", ondelete="CASCADE"), nullable=False
+    )
+    target_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    evaluation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("job_target_evaluations.id", ondelete="SET NULL")
+    )
+    hidden_arm: Mapped[str] = mapped_column(String(30), nullable=False)
+    presentation_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    canonical_group: Mapped[str | None] = mapped_column(String(100))
+    judgment: Mapped[str | None] = mapped_column(String(40))
+    primary_reason: Mapped[str | None] = mapped_column(String(100))
+    secondary_reasons: Mapped[list | None] = mapped_column(JSONB)
+    judged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

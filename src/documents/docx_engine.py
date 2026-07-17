@@ -19,7 +19,6 @@ from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
 
 from src.documents._shared import (
-    clean_cover_letter_location as _clean_cover_letter_location,
     clean_field as _clean_field,
     cover_letter_contact_lines as _cover_letter_contact_lines,
     cover_letter_date as _cover_letter_date,

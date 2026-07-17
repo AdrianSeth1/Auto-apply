@@ -61,6 +61,11 @@ class GreenhouseScraper(BaseScraper):
             except Exception as e:
                 logger.warning("Skipping malformed Greenhouse job %s: %s", item.get("id"), e)
 
+        self.last_fetch_stats = {
+            "provider_records": len(raw_jobs_list),
+            "normalized_records": len(jobs),
+            "malformed_records": len(raw_jobs_list) - len(jobs),
+        }
         logger.info("Fetched %d jobs from Greenhouse/%s", len(jobs), company_slug)
         return jobs
 
@@ -103,6 +108,15 @@ class GreenhouseScraper(BaseScraper):
         employment_type = classify_employment_type(item.get("employment_type", "") or title)
         seniority = classify_seniority(title)
 
+        # Compensation: boards sometimes publish salary via custom metadata
+        # fields (e.g. "Budgeted Salary" with value_type "currency"). Promote
+        # them to the normalized raw_data keys job_facts already reads
+        # (salary_min / salary_max) so pay-aware scoring sees them.
+        pay_min, pay_max = _extract_pay_metadata(item)
+        if pay_min is not None or pay_max is not None:
+            item.setdefault("salary_min", pay_min if pay_min is not None else pay_max)
+            item.setdefault("salary_max", pay_max if pay_max is not None else pay_min)
+
         # Description
         description_html = item.get("content", "")
         description = strip_html(description_html) if description_html else None
@@ -128,11 +142,87 @@ class GreenhouseScraper(BaseScraper):
 
 
 def _infer_company_name(slug: str, item: dict) -> str:
-    """Try to get a proper company name from the job data."""
-    # Some Greenhouse responses include a company field
-    if "company" in item and item["company"]:
-        name = item["company"].get("name", "")
+    """Try to get a proper company name from the job data.
+
+    The board-level API returns the employer display name as a flat
+    ``company_name`` string on every job (e.g. ``"First Due"`` for the
+    ``localitymediallcdbafirstdue`` board). The nested ``company.name``
+    shape exists on some older/other responses. Only fall back to
+    title-casing the board slug when neither is present — slug casing
+    produced letters addressed to "Localitymediallcdbafirstdue".
+    """
+    flat_name = _sanitize_company_name(item.get("company_name"))
+    if flat_name:
+        return flat_name
+    nested = item.get("company")
+    if isinstance(nested, dict):
+        name = _sanitize_company_name(nested.get("name"))
         if name:
-            return name.strip()
+            return name
     # Fall back to slug with basic formatting
     return slug.replace("-", " ").replace("_", " ").title()
+
+
+def _sanitize_company_name(value: object) -> str | None:
+    """Clean an employer-published display name for storage/letters.
+
+    Observed in the wild: zero-width/direction marks (ConnectWise ships
+    ``‎`` in front of its name) which would render invisibly in a
+    letter but corrupt matching and copy/paste.
+    """
+    if not isinstance(value, str):
+        return None
+    cleaned = "".join(
+        ch for ch in value if ch.isprintable() and ch not in "‎‏​﻿"
+    )
+    cleaned = " ".join(cleaned.split())
+    return cleaned or None
+
+
+def _extract_pay_metadata(item: dict) -> tuple[int | None, int | None]:
+    """Pull salary figures out of Greenhouse custom metadata fields.
+
+    Boards publish compensation in ``metadata`` entries such as::
+
+        {"name": "Budgeted Salary", "value_type": "currency",
+         "value": {"amount": "90000.0", "unit": "USD"}}
+        {"name": "Salary Range", "value_type": "currency_range",
+         "value": {"min_value": "80000", "max_value": "110000"}}
+
+    Only names that look compensation-related are considered, and only
+    plausible annual amounts (>= 10,000) are accepted so hourly rates or
+    unrelated currency fields don't masquerade as salaries.
+    """
+
+    def _amount(value: object) -> int | None:
+        try:
+            number = float(str(value).replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+        if number < 10_000:  # hourly rates / bonuses / junk
+            return None
+        return int(number)
+
+    pay_min: int | None = None
+    pay_max: int | None = None
+    for entry in item.get("metadata") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").casefold()
+        if not any(term in name for term in ("salary", "compensation", "pay")):
+            continue
+        value = entry.get("value")
+        value_type = str(entry.get("value_type") or "")
+        if value_type == "currency" and isinstance(value, dict):
+            amount = _amount(value.get("amount"))
+            if amount is not None:
+                pay_min = amount if pay_min is None else min(pay_min, amount)
+                pay_max = amount if pay_max is None else max(pay_max, amount)
+        elif value_type == "currency_range" and isinstance(value, dict):
+            low = _amount(value.get("min_value"))
+            high = _amount(value.get("max_value"))
+            if low is not None:
+                pay_min = low if pay_min is None else min(pay_min, low)
+            if high is not None:
+                pay_max = high if pay_max is None else max(pay_max, high)
+    return pay_min, pay_max

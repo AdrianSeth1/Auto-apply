@@ -92,6 +92,21 @@ def validate_resume_document(
                             )
                         )
 
+    experience_bullet_count = sum(len(item.bullets) for item in document.experiences)
+    if document.experiences and experience_bullet_count < 5:
+        issues.append(
+            ValidationIssue(
+                type="thin_professional_experience",
+                severity="warning",
+                section="experience",
+                message=(
+                    "Professional experience carries fewer than five evidence bullets; "
+                    "do not trade work history for project or skills density."
+                ),
+                details={"experience_bullet_count": experience_bullet_count},
+            )
+        )
+
     repeated_verbs = _repeated_action_verbs([bullet.text for bullet in bullets])
     if repeated_verbs:
         issues.append(
@@ -129,6 +144,7 @@ def validate_resume_document(
     metrics = {
         "bullet_count": len(bullets),
         "experience_count": len(document.experiences),
+        "experience_bullet_count": experience_bullet_count,
         "project_count": len(document.projects),
         "estimated_pages": estimated_pages,
         "estimated_resume_page_fill_ratio": estimated_page_fill,
@@ -274,10 +290,14 @@ def validate_cover_letter_artifacts(
 def validate_cover_letter_document(
     document: CoverLetterDocument,
     *,
-    min_words: int = 260,
+    # 2026-07-16: aligned with cover_letter._length_window_for (min 180 /
+    # target 240). The old 260-word minimum flagged 20/20 letters in the
+    # first real batch — including the good ones — making the warning
+    # meaningless. Keep these two thresholds in sync.
+    min_words: int = 180,
     max_words: int = 430,
     min_paragraphs: int = 4,
-    min_estimated_page_fill: float = 0.58,
+    min_estimated_page_fill: float = 0.45,
     target_pages: int = 1,
 ) -> ValidationResult:
     """Validate cover-letter content and rough page-fit before rendering."""
@@ -351,13 +371,30 @@ def validate_cover_letter_document(
                 },
             )
         )
-    if re.search(r"\bAt\s+[^,]+,\s+[A-Z]", body_text):
+    # 2026-07-16: the old heuristic (regex for any "At <Company>, <X>"
+    # sentence) flagged 20/20 letters because the generation prompt
+    # *instructs* that style ("At SDS, I redesigned onboarding…").
+    # Only flag genuine dumps: a resume bullet copied near-verbatim.
+    evidence_bullets = list((document.metadata or {}).get("evidence_bullets") or [])
+    if _contains_verbatim_bullet(body_text, evidence_bullets):
         issues.append(
             ValidationIssue(
                 type="raw_evidence_dump",
                 severity="warning",
                 section="body",
-                message="Cover letter appears to include raw resume bullet phrasing.",
+                message=(
+                    "Cover letter copies a resume bullet near-verbatim "
+                    "instead of retelling it."
+                ),
+            )
+        )
+    if re.search(r"</?[a-z][^>]*>", body_text, flags=re.IGNORECASE):
+        issues.append(
+            ValidationIssue(
+                type="raw_html_markup",
+                severity="error",
+                section="body",
+                message="Cover letter contains raw HTML markup and must be regenerated.",
             )
         )
     quality_issues = list((document.metadata or {}).get("quality_issues") or [])
@@ -384,6 +421,24 @@ def validate_cover_letter_document(
             "cover_letter_quality_issues": quality_issues,
         },
     )
+
+
+def _contains_verbatim_bullet(body_text: str, evidence_bullets: list[str]) -> bool:
+    """True when a substantial evidence bullet appears near-verbatim.
+
+    Retelling evidence is the whole point of the letter; copying a long
+    bullet word-for-word is lazy dumping. Normalize whitespace/case and
+    look for the first ~12 words of each bullet as a contiguous run.
+    """
+    normalized_body = " ".join(re.findall(r"[a-z0-9]+", body_text.lower()))
+    for bullet in evidence_bullets:
+        tokens = re.findall(r"[a-z0-9]+", str(bullet).lower())
+        if len(tokens) < 8:
+            continue
+        probe = " ".join(tokens[:12])
+        if probe and probe in normalized_body:
+            return True
+    return False
 
 
 def _estimate_cover_letter_page_fill(document: CoverLetterDocument) -> float:

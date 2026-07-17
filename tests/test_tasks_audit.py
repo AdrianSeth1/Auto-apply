@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -132,6 +133,40 @@ def test_safe_update_no_op_on_empty_id() -> None:
     audit._session_factory = _broken_factory  # type: ignore[assignment]
     audit._safe_update("", lambda row: None)
     assert sentinel == []
+
+
+def test_orchestration_error_result_is_recorded_as_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _apply_mutation(celery_task_id: str, mutate: object) -> None:
+        row = SimpleNamespace(
+            kind="orchestration.plan_run",
+            status="running",
+            finished_at=None,
+            last_error=None,
+            result=None,
+        )
+        mutate(row)  # type: ignore[operator]
+        captured["task_id"] = celery_task_id
+        captured["row"] = row
+
+    monkeypatch.setattr(audit, "_safe_update", _apply_mutation)
+    audit.task_postrun_handler(
+        task_id="failed-plan",
+        state="SUCCESS",
+        retval={
+            "status": "error",
+            "errors": ["score: profile 'default' not found"],
+        },
+    )
+
+    row = captured["row"]
+    assert captured["task_id"] == "failed-plan"
+    assert row.status == "failed"
+    assert "profile 'default' not found" in row.last_error
+    assert row.result["status"] == "error"
 
 
 def test_phase_14_2_migration_file_exists() -> None:

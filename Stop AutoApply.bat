@@ -27,7 +27,7 @@ wsl --shutdown >NUL 2>&1
 REM --- 4. Ollama (frees VRAM: unloads models, kills server + tray app) ----
 echo Stopping Ollama and freeing VRAM...
 powershell -NoProfile -Command ^
-  "Stop-Process -Name 'ollama' -Force -ErrorAction SilentlyContinue; Stop-Process -Name 'ollama app' -Force -ErrorAction SilentlyContinue; Stop-Process -Name 'ollama_llama_server' -Force -ErrorAction SilentlyContinue"
+  "Stop-Process -Name 'ollama' -Force -ErrorAction SilentlyContinue; Stop-Process -Name 'ollama app' -Force -ErrorAction SilentlyContinue; Stop-Process -Name 'ollama_llama_server' -Force -ErrorAction SilentlyContinue; Stop-Process -Name 'llama-server' -Force -ErrorAction SilentlyContinue"
 
 echo.
 echo Done. Web server, workers, Postgres, Redis, Docker Desktop, WSL VM,

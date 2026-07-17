@@ -70,6 +70,10 @@ uv run autoapply start
 
 Open the web console at `http://127.0.0.1:8000`.
 
+Setting this up for another person, especially on a 16 GB GPU? Follow the
+[second-PC setup guide](docs/FRIEND_SETUP.md). It includes private profile
+creation and the recommended local Ollama model settings.
+
 `autoapply start` runs Docker Compose for **data dependencies**
 (Postgres + Redis), applies Alembic migrations, starts Celery worker
 and Beat, then launches the Python web app on the host. Use
@@ -156,15 +160,15 @@ Use the deployment guides for complete setup and production notes.
 
 | Document | Purpose |
 |---|---|
+| [Master Handoff](docs/HANDOFF.md) | Current live state, policies, schedules, and open risks — start here |
+| [Job Pool V2 Architecture](docs/JOB_POOL_V2_ARCHITECTURE.md) | Normative matching/portfolio design contracts |
 | [Deployment Guide](docs/DEPLOYMENT.md) | Installation, database, Redis, workers, and deployment operations |
-| [部署与使用教程](docs/DEPLOYMENT_zh.md) | Chinese deployment and usage guide |
-| [Project Management](docs/PROJECT_MANAGEMENT.md) | Current project state, next roadmap, verification baseline, and doc ownership |
+| [Second-PC Setup](docs/FRIEND_SETUP.md) | Windows onboarding, private profile creation, and 16 GB VRAM Ollama setup |
 | [Phase History](docs/PHASE_HISTORY.md) | Compact shipped-phase archive without README-level noise |
 | [Changelog](docs/CHANGELOG.md) | Implementation-level change log and verification notes |
 | [Architecture Decisions](docs/DECISIONS.md) | Accepted design decisions and rationale |
 | [Agent Architecture](docs/AGENT_ARCHITECTURE.md) | Agent harness, tool boundary, HITL, trace, and eval contracts |
-| [Implementation Plan](docs/plan_en.md) | Long-form planning reference in English |
-| [实施计划](docs/plan_zh.md) | Long-form planning reference in Chinese |
+| [Funnel & Identity Handoff](docs/FUNNEL_IDENTITY_HANDOFF.md) | Outcome-funnel and job-identity constraints |
 
 ## Project Layout
 

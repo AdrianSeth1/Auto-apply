@@ -1,0 +1,144 @@
+schema_version: employer-supply-activation.v1
+version: 2026-07-14
+status: all_verified_approved_active_rotating
+candidate_source: config/employer_supply_expansion.v1.yaml
+evidence_sources:
+  - data/audits/supply_expansion_2026-07-14/employer_cohort_probe.json
+  - data/audits/supply_expansion_2026-07-14-delta/employer_cohort_probe.json
+selected_count: 100
+selection_note: >-
+  All selected endpoints are net-new to config/companies.yaml and passed the
+  production-adapter evidence contract. Lone Wolf was the 101st verified
+  endpoint and was omitted because its current role mix was weaker for the
+  target cohort.
+evidence_contract:
+  sample_size: 5
+  required_checks: [sample_nonempty, employer_identity_match, unique_nonempty_ids, direct_application_urls, has_location, has_full_description]
+activation_policy:
+  wave_size: 25
+  refresh_strategy: rotating_25_endpoint_groups
+  all_groups_eligible_for_snapshot_reuse: true
+  primary_metric: net_new_complete_direct_apply_ab_jobs
+  raw_posting_count_is_not_a_success_metric: true
+  promotion_requires_human_review: false
+  active_registry: config/companies.yaml
+waves:
+  - id: wave-1
+    status: active_rotating
+    canary_runs_completed: 0
+    last_canary_attempt:
+      run_id: b44af8c0-7c2d-43d0-a2e1-e74881691657
+      status: failed
+      measurement_valid: false
+      reason: operator_terminated_after_5m_timeout_before_linked_evaluations
+    rationale: Highest-fit current AI implementation, SaaS onboarding, solutions, and RevOps boards.
+    employers:
+      - {name: Writer, adapter: ashby, endpoint: WRITER}
+      - {name: Glean, adapter: greenhouse, endpoint: gleanwork}
+      - {name: Cresta, adapter: greenhouse, endpoint: cresta}
+      - {name: Ada, adapter: greenhouse, endpoint: ada18}
+      - {name: Decagon, adapter: ashby, endpoint: decagon}
+      - {name: Hebbia, adapter: ashby, endpoint: hebbia-ai}
+      - {name: Highspot, adapter: lever, endpoint: highspot}
+      - {name: Ironclad, adapter: ashby, endpoint: ironcladhq}
+      - {name: Drata, adapter: ashby, endpoint: drata}
+      - {name: Braze, adapter: greenhouse, endpoint: braze}
+      - {name: Agilysys, adapter: greenhouse, endpoint: agilysys}
+      - {name: Doxel, adapter: lever, endpoint: doxel}
+      - {name: Hyperbound, adapter: ashby, endpoint: Hyperbound}
+      - {name: Paragon, adapter: ashby, endpoint: Paragon}
+      - {name: Paradigm, adapter: greenhouse, endpoint: joinparadigm}
+      - {name: Tebra, adapter: greenhouse, endpoint: tebra}
+      - {name: Everway, adapter: greenhouse, endpoint: everway}
+      - {name: ApartmentIQ, adapter: greenhouse, endpoint: apartmentiq}
+      - {name: CoreView, adapter: greenhouse, endpoint: coreview}
+      - {name: PitchBook, adapter: greenhouse, endpoint: pitchbookdata}
+      - {name: Onbe, adapter: greenhouse, endpoint: onbe}
+      - {name: Telnyx, adapter: greenhouse, endpoint: telnyx54}
+      - {name: StackBlitz, adapter: greenhouse, endpoint: stackblitz}
+      - {name: Documo, adapter: greenhouse, endpoint: documocareers}
+      - {name: First Due, adapter: greenhouse, endpoint: localitymediallcdbafirstdue}
+  - id: wave-2
+    status: active_rotating
+    employers:
+      - {name: Persona, adapter: ashby, endpoint: persona}
+      - {name: Benchling, adapter: ashby, endpoint: benchling}
+      - {name: Modern Health, adapter: greenhouse, endpoint: modernhealth}
+      - {name: Verkada, adapter: greenhouse, endpoint: verkada}
+      - {name: Yes Energy, adapter: greenhouse, endpoint: yesenergy}
+      - {name: OpenEye, adapter: greenhouse, endpoint: openeye}
+      - {name: Archera, adapter: greenhouse, endpoint: archera}
+      - {name: KnowBe4, adapter: greenhouse, endpoint: knowbe4}
+      - {name: Karbon, adapter: greenhouse, endpoint: karbon}
+      - {name: AccuWeather, adapter: greenhouse, endpoint: accuweather}
+      - {name: Otter, adapter: greenhouse, endpoint: otter}
+      - {name: Mitratech, adapter: greenhouse, endpoint: mitratech}
+      - {name: Redwood Software, adapter: greenhouse, endpoint: redwoodsoftware}
+      - {name: MarqVision, adapter: greenhouse, endpoint: marqvision}
+      - {name: Subsplash, adapter: greenhouse, endpoint: subsplash}
+      - {name: TextUs, adapter: greenhouse, endpoint: textus}
+      - {name: Scotch, adapter: greenhouse, endpoint: scotch}
+      - {name: Instawork, adapter: greenhouse, endpoint: instawork}
+      - {name: NetDocuments, adapter: greenhouse, endpoint: netdocuments}
+      - {name: AlertMedia, adapter: greenhouse, endpoint: alertmedia}
+      - {name: Bloomreach, adapter: greenhouse, endpoint: bloomreach}
+      - {name: Dashlane, adapter: greenhouse, endpoint: dashlane}
+      - {name: Wrike, adapter: greenhouse, endpoint: wrike}
+      - {name: Varicent, adapter: greenhouse, endpoint: varicent}
+      - {name: Similarweb, adapter: greenhouse, endpoint: similarweb}
+  - id: wave-3
+    status: active_rotating
+    employers:
+      - {name: ContactMonkey, adapter: greenhouse, endpoint: contactmonkey}
+      - {name: Reddit, adapter: greenhouse, endpoint: reddit}
+      - {name: Contentful, adapter: greenhouse, endpoint: contentful}
+      - {name: Honeycomb, adapter: greenhouse, endpoint: honeycomb}
+      - {name: Culture Amp, adapter: greenhouse, endpoint: cultureamp}
+      - {name: Calendly, adapter: greenhouse, endpoint: calendly}
+      - {name: Maven Clinic, adapter: greenhouse, endpoint: mavenclinic}
+      - {name: Zocdoc, adapter: greenhouse, endpoint: zocdoc}
+      - {name: Customerio, adapter: greenhouse, endpoint: customerio}
+      - {name: Branch, adapter: greenhouse, endpoint: branch}
+      - {name: Infomedia, adapter: greenhouse, endpoint: infomedia}
+      - {name: Datacor, adapter: greenhouse, endpoint: datacor}
+      - {name: CoderPad, adapter: lever, endpoint: coderpad}
+      - {name: Onboarded, adapter: lever, endpoint: onboarded}
+      - {name: Aledade, adapter: lever, endpoint: aledade}
+      - {name: Quiq, adapter: lever, endpoint: quiq}
+      - {name: Jamloop, adapter: lever, endpoint: jam-loop}
+      - {name: Quantum Metric, adapter: lever, endpoint: quantummetric}
+      - {name: envelio, adapter: lever, endpoint: envelio}
+      - {name: Canvas Medical, adapter: lever, endpoint: canvasmedical}
+      - {name: Element451, adapter: ashby, endpoint: element451}
+      - {name: Airwallex, adapter: ashby, endpoint: airwallex}
+      - {name: Radar, adapter: ashby, endpoint: radar}
+      - {name: Thinkific, adapter: ashby, endpoint: thinkific}
+      - {name: Unit, adapter: ashby, endpoint: unit}
+  - id: wave-4
+    status: active_rotating
+    employers:
+      - {name: Curri, adapter: ashby, endpoint: curri}
+      - {name: Vantage, adapter: ashby, endpoint: vantage}
+      - {name: Mach9, adapter: ashby, endpoint: mach9}
+      - {name: Enode, adapter: ashby, endpoint: enode}
+      - {name: Singular, adapter: ashby, endpoint: singular}
+      - {name: Airspeed, adapter: ashby, endpoint: airspeed}
+      - {name: Lumos, adapter: ashby, endpoint: lumos}
+      - {name: 1Password, adapter: ashby, endpoint: 1password}
+      - {name: Sitemate, adapter: ashby, endpoint: Sitemate}
+      - {name: Common Room, adapter: ashby, endpoint: commonroom}
+      - {name: Vivun, adapter: ashby, endpoint: vivun}
+      - {name: Watershed, adapter: ashby, endpoint: Watershed}
+      - {name: Crusoe, adapter: ashby, endpoint: Crusoe}
+      - {name: Ashby, adapter: ashby, endpoint: Ashby}
+      - {name: Orb, adapter: ashby, endpoint: orb}
+      - {name: Lovable, adapter: ashby, endpoint: lovable}
+      - {name: OpenRouter, adapter: ashby, endpoint: openrouter}
+      - {name: Unstructured, adapter: ashby, endpoint: unstructured}
+      - {name: Runway, adapter: ashby, endpoint: Runway}
+      - {name: CoinTracker, adapter: ashby, endpoint: cointracker}
+      - {name: Cognition, adapter: ashby, endpoint: cognition}
+      - {name: DoiT, adapter: greenhouse, endpoint: doitintl}
+      - {name: Yoodli, adapter: greenhouse, endpoint: yoodliinc}
+      - {name: Uniphore, adapter: workday, endpoint: {tenant: uniphore, host: wd503, site: Uniphore}}
+      - {name: ServiceTitan, adapter: workday, endpoint: {tenant: servicetitan, host: wd1, site: ServiceTitan}}

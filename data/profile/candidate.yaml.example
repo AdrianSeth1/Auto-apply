@@ -1,0 +1,71 @@
+schema_version: 2
+candidate_id: your-name
+identity:
+  full_name: Your Name
+  email: you@example.com
+  phone: "+1 555 010 0000"
+  location: Chicago, IL
+  linkedin_url: ""
+  github_url: ""
+  portfolio_url: ""
+  citizenship: ""
+  work_authorization:
+    country: US
+    status: citizen
+    sponsorship_needed: false
+  willing_to_relocate: false
+  professional_experience_years: 1
+  graduation_date: "2025-05"
+preferences:
+  preferred_locations: [Chicago, IL, US Remote]
+  remote_us_allowed: true
+  onsite_hybrid_us_allowed: false
+  onsite_hybrid_locations: [Chicago, IL]
+  employment_types: [fulltime]
+  compensation:
+    currency: USD
+    preferred_base_min: 70000
+    hard_base_min: null
+  travel_ceiling_percent: 20
+  startup_interest: 0.5
+  preferred_companies: []
+  excluded_role_signals: []
+  quota_bearing_ok: true
+  light_coding_implementation_ok: true
+education:
+  - id: edu_example_university
+    institution: Example University
+    degree: Bachelor of Science
+    field: Information Systems
+    location: Chicago, IL
+    start_date: "2021-08"
+    end_date: "2025-05"
+    gpa: ""
+    honors: []
+    relevant_courses: []
+experiences:
+  - id: exp_example_company
+    company: Example Company
+    title: Implementation Intern
+    location: Chicago, IL
+    start_date: "2024-05"
+    end_date: "2024-08"
+    description: Supported customer onboarding and process improvement.
+    bullets:
+      - id: expb_example_company_1
+        text: Documented an onboarding workflow and reduced handoff time by 20%.
+        capabilities: [cap_process_documentation]
+        tags: [onboarding, documentation]
+        impact: Reduced handoff time by 20%.
+        evidence_strength: quantified_professional
+        verification: self_reported
+projects: []
+skills:
+  tools: [Excel, SQL]
+stories: []
+qa_bank: []
+capabilities:
+  - id: cap_process_documentation
+    label: Process documentation
+    level: demonstrated
+    evidence_refs: [expb_example_company_1]

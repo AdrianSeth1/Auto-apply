@@ -67,6 +67,11 @@ class AshbyScraper(BaseScraper):
             except Exception as e:
                 logger.warning("Skipping malformed Ashby job %s: %s", item.get("id"), e)
 
+        self.last_fetch_stats = {
+            "provider_records": len(raw_jobs_list),
+            "normalized_records": len(jobs),
+            "malformed_records": len(raw_jobs_list) - len(jobs),
+        }
         logger.info("Fetched %d jobs from Ashby/%s", len(jobs), company_slug)
         return jobs
 

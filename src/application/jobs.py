@@ -43,7 +43,7 @@ SENIORITY_LEVELS = {"internship", "entry", "mid", "senior", "staff", "unknown"}
 # Free tier is 250 calls/day and five overnight automation plans run daily
 # -- capping each search to ~10 Adzuna calls keeps one search from burning
 # a large chunk of the daily quota.
-ADZUNA_MAX_CALLS_PER_SEARCH = 10
+ADZUNA_MAX_CALLS_PER_SEARCH = 15
 
 PAY_RANGE_RE = re.compile(
     r"(?:\$|usd\s*)(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(k|m)?\s*"
@@ -71,9 +71,12 @@ async def search_jobs(
     source: str = "ats",
     ats: str | None = None,
     company: str | None = None,
+    companies: dict[str, list] | None = None,
     score: bool = False,
     keyword: str | None = None,
     keywords: list[str] | None = None,
+    aggregator_keywords: list[str] | None = None,
+    aggregator_query_arms: list[dict[str, str]] | None = None,
     search_location: str | None = None,
     time_filter: str = "week",
     experience_levels: list[str] | None = None,
@@ -94,12 +97,16 @@ async def search_jobs(
     include_views: bool = False,
     force_refresh: bool = False,
     use_job_index: bool = False,
+    include_remote_sources: bool = False,
+    endpoint_metrics: list[dict] | None = None,
 ) -> dict:
     jobs = []
     ats_jobs: list = []
     linkedin_jobs: list = []
     adzuna_jobs: list = []
     hn_jobs: list = []
+    hn_jobstories: list = []
+    startup_bonus_pool: list = []
     remotive_jobs: list = []
     errors: list[str] = []
     error_code: str | None = None
@@ -119,6 +126,7 @@ async def search_jobs(
     education_levels = _normalize_list(education_levels)
     keywords = _normalize_string_list(keywords)
     linkedin_keywords = _resolve_linkedin_keywords(keyword, keywords)
+    aggregator_terms = _normalize_string_list(aggregator_keywords) or linkedin_keywords
     linkedin_search_locations = _resolve_linkedin_search_locations(
         source=source,
         search_location=search_location,
@@ -135,10 +143,13 @@ async def search_jobs(
             ats_jobs = search_ats_jobs(
                 profile=profile,
                 config_dir=config_dir,
-                companies=_build_companies_filter(config_dir, ats, company),
+                companies=(
+                    companies if companies is not None else _build_companies_filter(config_dir, ats, company)
+                ),
                 parse_jds=not no_parse,
                 use_llm=use_llm,
                 force_refresh=force_refresh,
+                endpoint_metrics=endpoint_metrics,
             )
             # Keywords must narrow ATS results too. The boards return the
             # ENTIRE company board (no server-side search exists), so
@@ -160,7 +171,11 @@ async def search_jobs(
 
     if source in ("all",):
         try:
-            adzuna_jobs = _search_adzuna(linkedin_keywords, search_location)
+            adzuna_jobs = _search_adzuna(
+                aggregator_terms,
+                search_location,
+                query_arms=aggregator_query_arms,
+            )
             # Adzuna results MUST pass the normal ATS-style location/keyword
             # filters (invariant #2) -- treat like ATS, not like LinkedIn.
             # The boards-style keyword narrowing below is extra precision on
@@ -179,21 +194,47 @@ async def search_jobs(
             from src.intake.hn_hiring import fetch_latest_hn_hiring_jobs
 
             hn_jobs = fetch_latest_hn_hiring_jobs(force_refresh=force_refresh)
+            for job in hn_jobs:
+                job.raw_data["startup_bonus_candidate"] = True
+            startup_bonus_pool.extend(hn_jobs)
             # Same treatment as ATS/Adzuna: HN's own "search" is really just
             # the whole thread, so keyword narrowing happens here. Location
             # narrowing is generic (applied to every non-LinkedIn source
             # later in _apply_search_filters) and needs no special-casing.
             if linkedin_keywords:
                 hn_jobs = [job for job in hn_jobs if _job_matches_keywords(job, linkedin_keywords)]
+            for job in hn_jobs:
+                job.raw_data["startup_keyword_match"] = True
             counts["hn"] = len(hn_jobs)
             jobs.extend(hn_jobs)
         except Exception as exc:
             errors.append(f"HN: {exc}")
 
+    if source in ("all",):
+        try:
+            from src.intake.hn_jobstories import fetch_hn_jobstories
+
+            hn_jobstories = fetch_hn_jobstories(force_refresh=force_refresh)
+            for job in hn_jobstories:
+                job.raw_data["startup_bonus_candidate"] = True
+            startup_bonus_pool.extend(hn_jobstories)
+            if linkedin_keywords:
+                hn_jobstories = [
+                    job
+                    for job in hn_jobstories
+                    if _job_matches_keywords(job, linkedin_keywords)
+                ]
+            for job in hn_jobstories:
+                job.raw_data["startup_keyword_match"] = True
+            counts["hn"] += len(hn_jobstories)
+            jobs.extend(hn_jobstories)
+        except Exception as exc:
+            errors.append(f"HN jobstories: {exc}")
+
     # Remotive is a remote-only jobs board -- only worth a call when the
     # caller actually wants remote roles, so it's gated on location_types
     # rather than always firing under "all" like Adzuna/HN.
-    if source in ("all",) and "remote" in location_types:
+    if source in ("all",) and ("remote" in location_types or include_remote_sources):
         try:
             remotive_jobs = _search_remotive(linkedin_keywords[0] if linkedin_keywords else "")
             if linkedin_keywords:
@@ -204,6 +245,35 @@ async def search_jobs(
             jobs.extend(remotive_jobs)
         except Exception as exc:
             errors.append(f"Remotive: {exc}")
+
+    # 2026-07-11 fix: adzuna/hn/remotive never persisted their jobs
+    # anywhere, unlike the ATS block above (search_ats_jobs calls
+    # persist_and_sync_ids internally). Their RawJob.id stayed an
+    # ephemeral in-memory UUID all the way through scoring and into the
+    # review-queue row. materials.generate would run fine and write real
+    # docx/pdf artifacts, but its write-back matches on job_id, found no
+    # row in `jobs` or `job_postings`, and silently no-op'd -- orphaning
+    # every artifact and leaving materials_path NULL forever. Persist
+    # these three sources into the legacy `jobs` table the same way ATS
+    # jobs are, before anything downstream (scoring, review-queue
+    # creation, materials.generate enqueue) sees their id.
+    # persist_and_sync_ids does the case-insensitive company match per
+    # CLAUDE.md invariant #7 already, so this is safe to reuse as-is.
+    new_source_jobs = _dedupe_jobs_by_signature(
+        adzuna_jobs + startup_bonus_pool + remotive_jobs
+    )
+    if new_source_jobs:
+        try:
+            from src.core.database import get_session_factory
+            from src.intake.storage import persist_and_sync_ids
+
+            factory = get_session_factory()
+            with factory() as session:
+                persist_and_sync_ids(session, new_source_jobs)
+        except Exception as exc:  # noqa: BLE001 -- best-effort, mirrors ATS block
+            logger.warning(
+                "Failed to persist adzuna/hn/remotive jobs to Job table: %s", exc
+            )
 
     # LinkedIn is deliberately NOT part of "all" -- automated LinkedIn
     # access is permanently off after an account restriction (see
@@ -281,6 +351,13 @@ async def search_jobs(
             except Exception as exc:
                 errors.append(f"LinkedIn: {exc}")
 
+    # Startup bonus lane: HN is an employer-posted startup source. Its jobs
+    # still face every location/pay/experience/quality rule below, but they
+    # do not have to contain a saved search's exact role keywords. This gives
+    # scoring a broad startup pool from which it can choose five credible
+    # bonus jobs without displacing the normal best matches.
+    jobs.extend(startup_bonus_pool)
+
     # Cross-source dedupe: with source="all" the same posting often arrives
     # from both an ATS board and the LinkedIn search. ATS copies win (they
     # carry the full JD and a direct apply URL) because they were appended
@@ -337,6 +414,18 @@ async def search_jobs(
         scored, scoring_errors = _score_jobs(jobs, warn_on_missing_profile=warn_on_missing_profile)
         errors.extend(scoring_errors)
 
+    if score and scored:
+        minimum_score = _minimum_display_score()
+        if minimum_score > 0:
+            jobs = [
+                job
+                for job in jobs
+                if not (job.raw_data or {}).get("disqualified")
+                and _coerce_match_score(job.raw_data.get("match_score")) >= minimum_score
+            ]
+
+        jobs = _cap_startup_bonus_jobs(jobs, target=5)
+
     if score and include_views:
         jobs.sort(key=_job_sort_key)
         ats_jobs.sort(key=_job_sort_key)
@@ -344,6 +433,13 @@ async def search_jobs(
         fetched_jobs.sort(key=_job_sort_key)
 
     counts["total"] = len(jobs)
+
+    try:
+        from src.application.funnel import record_search_events
+
+        record_search_events(fetched_jobs, jobs)
+    except Exception:  # noqa: BLE001 -- analytics must never fail search
+        logger.warning("Failed to record search funnel events", exc_info=True)
 
     return {
         "search_params": {
@@ -357,6 +453,8 @@ async def search_jobs(
             "score": score,
             "keyword": keyword or "",
             "keywords": linkedin_keywords,
+            "aggregator_keywords": aggregator_terms,
+            "aggregator_query_arms": aggregator_query_arms or [],
             "location": search_location or "",
             "search_locations": linkedin_search_locations,
             "time_filter": time_filter,
@@ -398,6 +496,52 @@ async def search_jobs(
             "events": job_index_events,
         },
     }
+
+
+def _minimum_display_score() -> float:
+    matching = load_config().get("matching", {}) or {}
+    try:
+        return max(0.0, min(float(matching.get("minimum_display_score", 0.5)), 1.0))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def _coerce_match_score(value) -> float:
+    try:
+        return float(value) if value is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_startup_job(job) -> bool:
+    raw_data = getattr(job, "raw_data", None) or {}
+    return (
+        getattr(job, "source", "") == "hn"
+        or raw_data.get("employer_type") == "startup"
+        or bool(raw_data.get("startup_bonus_candidate"))
+    )
+
+
+def _cap_startup_bonus_jobs(jobs: list, *, target: int = 5) -> list:
+    """Keep the ranked normal lane intact and add only enough startup-only
+    candidates to reach ``target`` startup results.
+
+    Exact keyword matches remain normal results. Candidates that entered only
+    through the startup lane are bonus rows and never evict a normal match.
+    """
+    normal = [
+        job
+        for job in jobs
+        if not (job.raw_data or {}).get("startup_bonus_candidate")
+        or (job.raw_data or {}).get("startup_keyword_match")
+    ]
+    bonus_only = [job for job in jobs if job not in normal]
+    startup_in_normal = sum(1 for job in normal if _is_startup_job(job))
+    needed = max(0, target - startup_in_normal)
+    bonus_only.sort(key=_job_sort_key)
+    for job in bonus_only[:needed]:
+        job.raw_data["startup_bonus"] = True
+    return normal + bonus_only[:needed]
 
 
 async def _search_linkedin_with_job_index(
@@ -557,12 +701,21 @@ def _adzuna_settings() -> dict:
         results_per_query = max(int(raw.get("results_per_query", 50)), 1)
     except (TypeError, ValueError):
         results_per_query = 50
+    blocklist_raw = raw.get("company_blocklist", [])
+    if not isinstance(blocklist_raw, list):
+        blocklist_raw = []
+    company_blocklist = {
+        str(term).strip().lower() for term in blocklist_raw if str(term).strip()
+    }
     return {
         "enabled": bool(raw.get("enabled", False)),
         "app_id": str(raw.get("app_id") or "").strip(),
         "app_key_env": str(raw.get("app_key_env") or "AUTOAPPLY_ADZUNA_KEY").strip(),
         "country": str(raw.get("country") or "us").strip(),
         "results_per_query": results_per_query,
+        # User-extendable on top of AdzunaScraper.DEFAULT_COMPANY_BLOCKLIST
+        # -- see config/settings.yaml's adzuna.company_blocklist comment.
+        "company_blocklist": company_blocklist,
     }
 
 
@@ -581,7 +734,12 @@ def _search_remotive(keyword: str) -> list:
         return scraper.fetch_jobs(keyword)
 
 
-def _search_adzuna(keywords: list[str], location: str | None) -> list:
+def _search_adzuna(
+    keywords: list[str],
+    location: str | None,
+    *,
+    query_arms: list[dict[str, str]] | None = None,
+) -> list:
     """Query the Adzuna search API, once per keyword, capped at
     ``ADZUNA_MAX_CALLS_PER_SEARCH`` calls.
     """
@@ -598,29 +756,35 @@ def _search_adzuna(keywords: list[str], location: str | None) -> list:
 
     from src.intake.adzuna import AdzunaScraper
 
-    search_keywords = keywords or [""]
-    if len(search_keywords) > ADZUNA_MAX_CALLS_PER_SEARCH:
+    search_arms = [
+        (str(arm.get("query") or ""), str(arm.get("geography") or ""))
+        for arm in (query_arms or [])
+    ] or [(keyword, location or "") for keyword in (keywords or [""])]
+    if len(search_arms) > ADZUNA_MAX_CALLS_PER_SEARCH:
         logger.warning(
             "Adzuna call cap (%d) reached; searching only the first %d of %d keywords",
             ADZUNA_MAX_CALLS_PER_SEARCH,
             ADZUNA_MAX_CALLS_PER_SEARCH,
-            len(search_keywords),
+            len(search_arms),
         )
-        search_keywords = search_keywords[:ADZUNA_MAX_CALLS_PER_SEARCH]
+        search_arms = search_arms[:ADZUNA_MAX_CALLS_PER_SEARCH]
 
     all_jobs: list = []
     with AdzunaScraper(
         app_id=settings["app_id"], app_key=app_key, country=settings["country"]
     ) as scraper:
-        for kw in search_keywords:
+        for kw, arm_location in search_arms:
             try:
-                all_jobs.extend(
-                    scraper.search(
-                        keyword=kw,
-                        location=location or "",
-                        results_per_page=settings["results_per_query"],
-                    )
+                jobs = scraper.search(
+                    keyword=kw,
+                    location=arm_location,
+                    results_per_page=settings["results_per_query"],
+                    company_blocklist=settings["company_blocklist"],
                 )
+                for job in jobs:
+                    job.raw_data["source_query_term"] = kw
+                    job.raw_data["source_query_location"] = arm_location
+                all_jobs.extend(jobs)
             except Exception as exc:  # noqa: BLE001 -- one bad keyword must not fail the search
                 logger.warning("Adzuna search failed for keyword=%r: %s", kw, exc)
 
@@ -1733,6 +1897,16 @@ def serialize_job(job, match_score: float | None = None) -> dict:
         "pay_min": metadata.get("pay_min"),
         "pay_max": metadata.get("pay_max"),
         "raw_data": job.raw_data,
+        "requirements": (
+            getattr(job, "requirements").model_dump(mode="json")
+            if hasattr(getattr(job, "requirements", None), "model_dump")
+            else getattr(job, "requirements", None)
+        ),
+        "provenance": (
+            job.provenance.model_dump(mode="json")
+            if getattr(job, "provenance", None) is not None
+            else None
+        ),
         "discovered_at": _isoformat(job.discovered_at),
     }
 
@@ -1842,6 +2016,7 @@ def _apply_search_filters(
             pay_operator
             and pay_amount is not None
             and (job.raw_data or {}).get("strict_pay")
+            and _hn_known_pay_required()
             and metadata.get("pay_min") is None
             and metadata.get("pay_max") is None
         ):
@@ -1868,6 +2043,12 @@ def _apply_search_filters(
         filtered.append(job)
 
     return filtered
+
+
+def _hn_known_pay_required() -> bool:
+    """Whether HN startup posts with omitted compensation should be hidden."""
+    search_cfg = load_config().get("search", {}) or {}
+    return bool(search_cfg.get("hn_require_known_pay", False))
 
 
 def _prepare_jobs_for_search_filters(jobs, *, use_llm: bool) -> None:
@@ -1922,7 +2103,9 @@ def _classify_experience_level(title: str) -> str:
         return "director"
     if any(token in text for token in ("manager", "management")):
         return "manager"
-    if any(token in text for token in ("senior", "sr.", " sr ", "lead", "staff", "principal")):
+    if re.search(r"(?<![a-z])sr\.?($|\s)", text) or any(
+        token in text for token in ("senior", "lead", "staff", "principal")
+    ):
         return "senior"
     if any(
         token in text
@@ -3529,6 +3712,13 @@ def _is_linkedin_url(url: str) -> bool:
 def _load_profile(profile_id: str | None = None) -> dict | None:
     profile_path = get_profile_path(profile_id) if profile_id else get_active_profile_path()
     if profile_path is None or not profile_path.exists():
+        if profile_id:
+            try:
+                from src.matching.profile_v2 import load_resolved_target, to_legacy_profile
+
+                return to_legacy_profile(load_resolved_target(profile_id))
+            except (FileNotFoundError, ValueError):
+                return None
         return None
 
     from src.memory.profile import load_profile_yaml
@@ -3712,6 +3902,15 @@ def _create_tracking_application(
                 match_score=match_score,
                 resume_version=str(resume_path),
                 cover_letter_version=str(cover_letter_path) if cover_letter_path else None,
+                profile_variant=(job.raw_data or {}).get("best_profile"),
+                material_variant="|".join(
+                    value
+                    for value in (
+                        str(resume_path),
+                        str(cover_letter_path) if cover_letter_path else None,
+                    )
+                    if value
+                ),
             )
             session.commit()
             return application.id

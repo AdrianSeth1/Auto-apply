@@ -43,14 +43,14 @@
     "experience": {
       "enabled": true,
       "max_items": 4,
-      "max_bullets_per_item": 5,
+      "max_bullets_per_item": 4,
       "max_words_per_bullet": 24,
       "max_lines": null
     },
     "projects": {
       "enabled": true,
-      "max_items": 3,
-      "max_bullets_per_item": 3,
+      "max_items": 2,
+      "max_bullets_per_item": 2,
       "max_words_per_bullet": 22,
       "max_lines": null
     },
@@ -58,24 +58,24 @@
       "enabled": true,
       "max_items": null,
       "max_bullets_per_item": null,
-      "_note": "max_lines raised 4->6 (2026-07-10): the 4-line cap silently dropped Certifications and Domains from every render",
+      "_note": "Five compact technical/domain lines; soft skills are demonstrated in evidence bullets, not listed here.",
       "max_words_per_bullet": null,
-      "max_lines": 6
+      "max_lines": 5
     }
   },
   "section_order": [
     "header",
     "education",
-    "skills",
+    "experience",
     "projects",
-    "experience"
+    "skills"
   ],
   "capacity": {
     "max_pages": 1,
     "max_sections": 5,
-    "max_experience_items": 3,
-    "max_project_items": 3,
-    "max_bullets_total": 13,
+    "max_experience_items": 4,
+    "max_project_items": 2,
+    "max_bullets_total": 12,
     "max_words_per_bullet": 24,
     "max_skill_lines": 4
   },

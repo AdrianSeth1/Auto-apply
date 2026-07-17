@@ -1,0 +1,77 @@
+schema_version: 2
+id: associate-solutions-engineering
+aliases: [sales-engineer]
+display_name: Associate Solutions Engineering & Presales
+enabled: true
+priority: 0.6
+positioning: Customer-facing technical generalist who runs discovery, explains systems clearly, and builds practical demos and proofs of concept.
+role:
+  core_titles:
+    - associate solutions engineer
+    - associate sales engineer
+    - junior solutions engineer
+    - presales consultant
+    - solutions engineering associate
+  adjacent_titles:
+    - solutions engineer
+    - sales engineer
+    - technical presales specialist
+    - demo engineer
+  stretch_titles:
+    - solutions consultant
+    - customer engineer
+  description_only_titles:
+    - technical solutions specialist
+  excluded_title_terms:
+    - senior
+    - principal
+    - enterprise security
+    - HVAC
+    - industrial
+    - channel sales
+  responsibility_signals:
+    - technical discovery
+    - product demonstrations
+    - proof of concept
+    - solution design
+    - APIs and integrations
+    - answer technical questions
+  negative_responsibility_signals:
+    - own enterprise quota
+    - hardware territory sales
+    - network security architecture
+    - channel partner management
+  domain_signals: [B2B SaaS, developer tools, workflow software, applied AI]
+candidacy:
+  core_max_required_years: 2
+  stretch_max_required_years: 4
+  allowed_seniority: [entry, associate, junior, unknown]
+  unsupported_specializations: [industrial equipment, HVAC, enterprise networking, deep security]
+  required_capability_groups:
+    - any_of: [cap_discovery, cap_requirements, cap_scoping]
+      weight: 3.0
+    - any_of: [cap_demos, cap_presentations, cap_public_speaking]
+      weight: 2.5
+    - any_of: [cap_stakeholder_translation, cap_technical_translation, cap_communication]
+      weight: 2.0
+  preferred_capabilities:
+    - {id: cap_solution_design, weight: 1.5}
+    - {id: cap_client_facing, weight: 1.0}
+    - {id: cap_implementation, weight: 1.0}
+constraints:
+  employment_types: [fulltime]
+  geography_policy: candidate_default
+  compensation_policy: candidate_default
+  active_clearance: reject
+  staffing_intermediary: reject_auto
+discovery:
+  query_terms: [associate solutions engineer, associate sales engineer, junior solutions engineer, presales consultant, solutions engineer]
+  description_only_lane: false
+  employer_cohorts: [b2b_saas, developer_tools, vertical_saas, applied_ai]
+selection:
+  minimum_core_tier: B
+  per_run_soft_cap: 5
+  allow_stretch_in_core: false
+materials:
+  preferred_evidence_refs: [exp_sds, exp_baylor_university, proj_prof_ai]
+  section_priority: [experience, projects, skills, education]

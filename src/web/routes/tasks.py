@@ -236,6 +236,12 @@ class AutomationPlanPayload(BaseModel):
     dry_run: bool = False
 
 
+class AutomationPlanRunNowPayload(BaseModel):
+    """One-off run controls; UI-triggered runs default to safe practice mode."""
+
+    dry_run: bool = True
+
+
 # ---- /api/tasks --------------------------------------------------------
 
 
@@ -386,12 +392,12 @@ def list_automation_plan_runs(
         tenant_id=tenant,
         limit=500,
         status=status,
-        kind="orchestration.plan_run",
     )
     filtered = [
         row
         for row in rows
-        if isinstance(row.payload, dict)
+        if row.kind in {"orchestration.plan_run", "orchestration.portfolio_run"}
+        and isinstance(row.payload, dict)
         and row.payload.get("automation_plan_id") in active_plan_ids
     ]
     return TaskListDTO(
@@ -426,11 +432,19 @@ def delete_automation_plan(plan_id: str) -> dict[str, str]:
 
 
 @router.post("/api/automation-plans/{plan_id}/run-now")
-def automation_plan_run_now(plan_id: str, tenant: str = Depends(get_tenant)) -> dict[str, str]:
+def automation_plan_run_now(
+    plan_id: str,
+    body: AutomationPlanRunNowPayload | None = None,
+    tenant: str = Depends(get_tenant),
+) -> dict[str, str]:
     plan = get_automation_plan(plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail=f"no such automation plan: {plan_id}")
-    return dispatch_schedule_entry(schedule_entry_for_plan(plan), tenant_id=tenant)
+    # The Plans screen is an operator-triggered practice surface.  Scheduled
+    # executions continue to use the plan's persisted dry_run setting.
+    dry_run = True if body is None else body.dry_run
+    entry = schedule_entry_for_plan(plan, dry_run_override=dry_run)
+    return dispatch_schedule_entry(entry, tenant_id=tenant)
 
 
 @router.post("/api/schedule/{name}/run-now")
@@ -555,6 +569,7 @@ def _schedule_dto(
 
 def _custom_plan_dto(plan: dict[str, Any], now: datetime) -> ScheduleEntryDTO:
     entry = schedule_entry_for_plan(plan)
+    is_portfolio = plan.get("task") == "orchestration.portfolio_run"
     return ScheduleEntryDTO(
         name=f"automation:{plan['id']}",
         plan_id=plan["id"],
@@ -577,9 +592,9 @@ def _custom_plan_dto(plan: dict[str, Any], now: datetime) -> ScheduleEntryDTO:
         minute=plan["minute"],
         day_of_week=plan["day_of_week"],
         day_of_month=plan["day_of_month"],
-        profile_id=plan["profile_id"],
-        search_profile_id=plan["search_profile_id"],
-        top_n=plan["top_n"],
+        profile_id="canonical candidate" if is_portfolio else plan["profile_id"],
+        search_profile_id="global V2 acquisition" if is_portfolio else plan["search_profile_id"],
+        top_n=(plan.get("canary_capacity") or plan["top_n"]) if is_portfolio else plan["top_n"],
         dry_run=plan["dry_run"],
         scrape_enabled=plan["scrape_enabled"],
         apply_mode=plan["apply_mode"],
@@ -588,6 +603,12 @@ def _custom_plan_dto(plan: dict[str, Any], now: datetime) -> ScheduleEntryDTO:
 
 
 def _automation_description(plan: dict[str, Any]) -> str:
+    if plan.get("task") == "orchestration.portfolio_run":
+        capacity = plan.get("canary_capacity") or plan.get("top_n") or 20
+        return (
+            f"Evaluate all five target paths together and prepare up to {capacity} "
+            "Tier A/B jobs for review."
+        )
     filter_name = plan.get("search_profile_id") or "selected filter"
     applicant = plan.get("profile_id") or "default"
     action = "auto-apply" if plan.get("apply_mode") == "auto_apply" else "prepare for review"

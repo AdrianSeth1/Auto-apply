@@ -186,9 +186,39 @@ def _resolve_service_ports(
     return resolved_postgres, resolved_redis
 
 
+def _existing_autoapply_instance(host: str, port: int) -> bool:
+    """True when an AutoApply web server already answers on host:port."""
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            f"http://{host}:{port}/api/instance", timeout=3
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return payload.get("app") == "autoapply"
+    except Exception:  # noqa: BLE001 -- any failure means "not ours / not healthy"
+        return False
+
+
 def _resolve_web_port(*, host: str, port: int, auto_ports: bool) -> int:
     if _port_is_bindable(host, port):
         return port
+    # 2026-07-16 single-instance guard: auto-picking a fallback web port
+    # when 8000 was busy is exactly how a full DUPLICATE stack (second
+    # web + worker + Beat, ~1.2 GB RAM) ended up running on :60416 —
+    # the P0 in the 2026-07-15 handoff. If the thing holding the port is
+    # already an AutoApply instance, reuse it instead of starting twins.
+    if _existing_autoapply_instance(host, port):
+        url = f"http://{host}:{port}"
+        click.secho(
+            f"AutoApply is already running at {url} — not starting a second "
+            "stack. Opening the existing instance instead. (Stop it first if "
+            "you really want a fresh start.)",
+            fg="yellow",
+        )
+        webbrowser.open(url)
+        raise SystemExit(0)
     if not auto_ports:
         raise click.ClickException(
             f"Web port {host}:{port} is not bindable. Free it, pass --port, "

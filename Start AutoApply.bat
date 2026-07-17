@@ -10,6 +10,12 @@ echo.
 REM --- 1. Ollama (local LLM) -------------------------------------------
 REM autoapply start handles Docker/Postgres/Redis/worker/web itself,
 REM but not Ollama, so we make sure it's up first.
+REM A 30B model nearly fills a 24 GB GPU. Without these caps Ollama may
+REM spawn two llama-server processes for two concurrent materials tasks,
+REM duplicating the model and pushing VRAM to the limit. Celery can stay at
+REM concurrency 2; Ollama queues LLM calls while other task types stay live.
+set OLLAMA_NUM_PARALLEL=1
+set OLLAMA_MAX_LOADED_MODELS=1
 where ollama >NUL 2>&1
 if errorlevel 1 (
     echo [warn] ollama not found on PATH - LLM features will be unavailable.

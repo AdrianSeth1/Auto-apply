@@ -1,9 +1,71 @@
 plans:
+- id: nightly-portfolio-v2
+  name: Job Pool V2 Reservoir
+  task: orchestration.portfolio_run
+  enabled: true
+  pipeline_version: v2
+  target_ids:
+  - ai-implementation
+  - saas-implementation
+  - revenue-operations-analyst
+  - associate-solutions-engineering
+  - technical-customer-success
+  portfolio_id: default
+  cadence: daily
+  interval_every: 1
+  interval_unit: hours
+  # 08:00 UTC = 3:00am Central during daylight-saving time. The overnight
+  # launcher starts the stack at 2:00am and keeps it awake long enough for
+  # the portfolio's resume + cover-letter tasks to finish before morning.
+  hour: 8
+  minute: 0
+  day_of_week: 1
+  day_of_month: 1
+  scrape_enabled: true
+  apply_mode: review_queue
+  skip_previously_applied: true
+  top_n: 20
+  dry_run: false
+  force_refresh: false
+  # Hard delivery cap for the live run. This also disables the additive
+  # startup-bonus lane for this scheduled batch, keeping overnight material
+  # generation bounded to 20 jobs.
+  canary_capacity: 20
+  created_at: '2026-07-12T00:00:00+00:00'
+  updated_at: '2026-07-15T00:00:00+00:00'
+- id: portfolio-reservoir-refill-v2
+  name: Job Pool V2 Reservoir Refill
+  task: orchestration.portfolio_run
+  enabled: true
+  pipeline_version: v2
+  target_ids:
+  - ai-implementation
+  - saas-implementation
+  - revenue-operations-analyst
+  - associate-solutions-engineering
+  - technical-customer-success
+  portfolio_id: default
+  cadence: interval
+  interval_every: 6
+  interval_unit: hours
+  hour: 0
+  minute: 45
+  day_of_week: 1
+  day_of_month: 1
+  scrape_enabled: true
+  apply_mode: review_queue
+  skip_previously_applied: true
+  top_n: 20
+  dry_run: true
+  force_refresh: false
+  canary_capacity: null
+  created_at: '2026-07-15T00:12:00+00:00'
+  updated_at: '2026-07-15T00:12:00+00:00'
 - id: ai-solutions
   name: ai-solutions
-  enabled: true
+  enabled: false
   search_profile_id: ai-solutions
-  profile_id: solutions-consultant
+  profile_id: ai-implementation
   cadence: daily
   interval_every: 1
   interval_unit: hours
@@ -33,7 +95,7 @@ plans:
   updated_at: '2026-07-07T00:00:00+00:00'
 - id: analyst
   name: analyst
-  enabled: true
+  enabled: false
   search_profile_id: analyst
   profile_id: analyst
   cadence: daily
@@ -69,7 +131,7 @@ plans:
   updated_at: '2026-06-30T06:56:14.006222+00:00'
 - id: implementation-consultant
   name: implementation-consultant
-  enabled: true
+  enabled: false
   search_profile_id: implementation-consultant
   profile_id: solutions-consultant
   cadence: daily
@@ -100,7 +162,7 @@ plans:
   updated_at: '2026-06-30T06:55:42.333432+00:00'
 - id: sales-engineer
   name: sales-engineer
-  enabled: true
+  enabled: false
   search_profile_id: sales-engineer
   profile_id: sales-engineer
   cadence: daily
@@ -131,7 +193,7 @@ plans:
   updated_at: '2026-06-30T06:55:56.956710+00:00'
 - id: tam
   name: tam
-  enabled: true
+  enabled: false
   search_profile_id: tam
   profile_id: tam
   cadence: daily

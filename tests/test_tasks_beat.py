@@ -27,8 +27,12 @@ EXPECTED_ENTRIES: set[str] = {
     # LinkedIn flagged the account for automated access.
     "cache_eviction",
     "gate_expire_sweep",
-    # Phase 17.1: end-to-end plan-run orchestrator
-    "plan_run",
+    # 2026-07-16: static Phase 17.1 "plan_run" removed — it had no
+    # payload, so it invoked the nonexistent legacy `default` profile
+    # and failed every night. The live delivery is the automation-plan
+    # entry `automation:nightly-portfolio-v2`.
+    # 2026-07-16: daily dry-run ledger retention (aggregates kept).
+    "ledger_retention",
     # Phase 17.6: morning digest banner producer
     "morning_digest",
     # 2026-07-07: Gmail reply ingestion (rejection/OA/interview/offer
@@ -65,6 +69,18 @@ def test_every_entry_has_task_schedule_and_options() -> None:
 def test_daily_search_lands_on_search_queue() -> None:
     schedule = beat.get_schedule()
     assert schedule["daily_search"]["options"]["queue"] == "search"
+
+
+def test_live_v2_portfolio_runs_at_three_am_and_prepares_twenty() -> None:
+    """The morning queue is prepared before the operator reviews it."""
+    entry = beat.get_schedule()["automation:nightly-portfolio-v2"]
+
+    assert entry["task"] == "orchestration.portfolio_run"
+    assert entry["schedule"].hour == {8}
+    assert entry["schedule"].minute == {0}
+    assert entry["kwargs"]["pipeline_version"] == "v2"
+    assert entry["kwargs"]["dry_run"] is False
+    assert entry["kwargs"]["canary_capacity"] == 20
 
 
 def test_maintenance_entries_land_on_maintenance_queue() -> None:

@@ -3,11 +3,12 @@ title AutoApply Overnight
 cd /d "%~dp0"
 
 REM Runs from Windows Task Scheduler at 2:00 AM (wakes the PC).
-REM Starts the stack headless; Celery Beat then fires the four automation
-REM plans at 2:30 / 2:45 / 3:00 / 3:15 AM Central (07:30-08:15 UTC):
-REM search -> score -> top-5 -> review queue -> generate materials.
-REM Material generation (local LLM, serialized) can take 1.5-2.5h for a
-REM full 4x5-job night, so the keep-awake hold below runs until 6:30 AM.
+REM Starts the stack headless; Celery Beat fires the live V2 portfolio at
+REM 3:00 AM Central (08:00 UTC during daylight-saving time):
+REM search -> score -> select about 20 -> review queue -> generate materials.
+REM Materials are generated while cards are still pending; approval is only
+REM the later human gate for submission. Local generation can take 1.5-2.5h,
+REM so the keep-awake hold below runs until 6:30 AM.
 REM Digest lands at 7:00 AM Central. You wake up to the list.
 
 REM --- Skip stack startup if it's already running -------------------------
@@ -19,6 +20,9 @@ if %errorlevel%==0 (
 
 REM --- Ollama --------------------------------------------------------------
 where ollama >NUL 2>&1 && (
+    REM Prevent concurrent 30B model copies from exhausting 24 GB VRAM.
+    set OLLAMA_NUM_PARALLEL=1
+    set OLLAMA_MAX_LOADED_MODELS=1
     tasklist /FI "IMAGENAME eq ollama.exe" 2>NUL | find /I "ollama.exe" >NUL || start "Ollama" /MIN ollama serve
 )
 
@@ -30,7 +34,7 @@ start "AutoApply Stack" /MIN cmd /c "cd /d "%~dp0" && uv run autoapply start --n
 :keepawake
 REM --- Keep the PC awake for 4.5 hours (2:00 -> 6:30 AM) --------------------
 REM ES_CONTINUOUS | ES_SYSTEM_REQUIRED. Sized for the worst case: last plan
-REM enqueues materials ~3:20, serialized local-LLM generation for 20 jobs
+REM enqueues materials shortly after 3:00, serialized local-LLM generation for 20 jobs
 REM needs up to ~2.5h -> done by ~6:00 with margin. After release the PC
 REM may sleep per its power plan; the stack resumes when you wake it.
 REM NOTE: decimal literals, not hex — PowerShell parses 0x80000001 as a

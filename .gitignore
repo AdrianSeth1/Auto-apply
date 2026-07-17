@@ -41,6 +41,7 @@ temp/
 *.db
 *.sqlite3
 data/profile/profile.yaml
+data/profile/candidate.yaml
 data/output/*
 !data/output/.gitkeep
 data/quarantine/
@@ -74,6 +75,8 @@ hello.py
 data/agent_traces/
 # Phase 17.6 morning digest source -- one JSON per plan_run
 data/plan_runs/
+data/audits/
+tmp/
 
 # Local secrets / scratch (not the tracked .env.example)
 config/.env.txt

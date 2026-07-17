@@ -1,10 +1,9 @@
-"""Interactively run any subset of the overnight automation plans right now.
+"""Interactively practice any subset of the overnight automation plans.
 
 2026-07-10: manual counterpart to the 2:30am Beat schedule. Loads the same
-plans from config/automation_plans.yaml and enqueues orchestration.plan_run
-with EXACTLY the kwargs Beat would send (via schedule_entry_for_plan), so a
-manual run behaves identically to an overnight one: search -> score ->
-top-N -> review queue -> materials.
+plans from config/automation_plans.yaml and uses the same validated task and
+payload contract as Beat. Manual runs force dry_run=True: they search, score,
+and report selection yield without creating review cards or materials.
 
 Requires the stack to be running (worker + Redis); launched via
 "Run Plans Now.bat".
@@ -22,6 +21,8 @@ from src.application.automation_plans import (  # noqa: E402
     load_automation_plans_data,
     schedule_entry_for_plan,
 )
+from src.application.schedule_control import dispatch_schedule_entry  # noqa: E402
+from src.core.models import TENANT_DEFAULT  # noqa: E402
 
 
 def main() -> int:
@@ -32,12 +33,18 @@ def main() -> int:
         print("No enabled automation plans found in config/automation_plans.yaml.")
         return 1
 
-    print("\nOvernight plans (same ones Beat runs at 2:30-3:30am):\n")
+    print("\nPractice plans (dry-run; no review cards, materials, or submissions):\n")
     for index, plan in enumerate(plans, 1):
+        is_portfolio = plan.get("task") == "orchestration.portfolio_run"
+        limit_label = (
+            f"capacity: {plan.get('canary_capacity')}"
+            if is_portfolio
+            else f"top-N: {plan.get('top_n')}"
+        )
         print(
             f"  {index}. {plan['id']:<26} "
             f"search: {plan.get('search_profile_id') or '(none)':<26} "
-            f"resume: {plan.get('profile_id'):<22} top-N: {plan.get('top_n')}"
+            f"resume: {plan.get('profile_id'):<22} {limit_label}"
         )
 
     choice = input(
@@ -60,7 +67,7 @@ def main() -> int:
             return 1
 
     override_raw = input(
-        "Override top-N for this run? (blank = keep each plan's setting): "
+        "Override selection limit for this practice run? (blank = keep plan setting): "
     ).strip()
     override = None
     if override_raw:
@@ -69,21 +76,20 @@ def main() -> int:
         except ValueError:
             print("Not a number — keeping each plan's own top-N.")
 
-    from src.tasks.app import celery_app  # noqa: PLC0415 -- needs Redis up
-
     for plan in picked:
-        kwargs = dict(schedule_entry_for_plan(plan)["kwargs"])
+        entry = schedule_entry_for_plan(plan, dry_run_override=True)
         if override is not None:
-            kwargs["top_n"] = override
-        result = celery_app.send_task(
-            "orchestration.plan_run", kwargs=kwargs, queue="search"
-        )
-        print(f"  queued {plan['id']}  (task {result.id})")
+            if entry["task"] == "orchestration.portfolio_run":
+                entry["kwargs"]["canary_capacity"] = min(override, 20)
+            else:
+                entry["kwargs"]["top_n"] = override
+        result = dispatch_schedule_entry(entry, tenant_id=TENANT_DEFAULT)
+        task_suffix = f"  (task {result['task_id']})" if result.get("task_id") else ""
+        print(f"  queued {plan['id']} as {result['enqueued']}{task_suffix}")
 
     print(
-        "\nDone. Plans run one at a time on the worker (roughly 1-3 min of "
-        "search each, then material generation in the background). Results "
-        "land in Awaiting Review; reports under data/plan_runs/."
+        "\nDone. Practice plans run on the worker and record selection/yield "
+        "results without creating review entries, materials, or submissions."
     )
     return 0
 

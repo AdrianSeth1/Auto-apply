@@ -1,0 +1,85 @@
+schema_version: 2
+id: ai-implementation
+aliases: [ai-solutions]
+display_name: AI Implementation & Applied AI Solutions
+enabled: true
+priority: 0.9
+positioning: Early-career applied-AI implementer who discovers workflows, translates customer needs, and deploys practical AI solutions.
+role:
+  core_titles:
+    - AI deployment strategist
+    - AI implementation specialist
+    - AI solutions engineer
+    - applied AI consultant
+    - AI deployment consultant
+    - customer engineer
+  adjacent_titles:
+    - forward deployed engineer
+    - professional services engineer
+    - AI solutions consultant
+    - implementation engineer
+  stretch_titles:
+    - AI solutions architect
+    - technical implementation manager
+  description_only_titles:
+    - solutions engineer
+    - technical consultant
+  excluded_title_terms:
+    - research scientist
+    - machine learning researcher
+    - ML infrastructure engineer
+    - founding engineer
+    - staff engineer
+    - principal engineer
+  responsibility_signals:
+    - workflow discovery
+    - discovery sessions
+    - customer requirements
+    - configure AI solutions
+    - product configuration
+    - deploy AI workflows
+    - implementation
+    - onboarding
+    - build workflows
+    - proof of concept
+    - customer enablement
+    - translate business needs
+  negative_responsibility_signals:
+    - train foundation models
+    - distributed model infrastructure
+    - publish machine learning research
+    - own production backend services
+  domain_signals: [applied AI, workflow automation, generative AI, B2B SaaS]
+candidacy:
+  core_max_required_years: 3
+  stretch_max_required_years: 4
+  allowed_seniority: [entry, associate, junior, unknown]
+  unsupported_specializations: [core ML research, distributed ML infrastructure, computer vision research]
+  required_capability_groups:
+    - any_of: [cap_ai, cap_llm, cap_rag]
+      weight: 3.0
+    - any_of: [cap_implementation, cap_deployment, cap_solution_design]
+      weight: 3.0
+    - any_of: [cap_discovery, cap_requirements, cap_client_facing]
+      weight: 2.0
+  preferred_capabilities:
+    - {id: cap_stakeholder_translation, weight: 2.0}
+    - {id: cap_python, weight: 1.0}
+    - {id: cap_architecture, weight: 1.0}
+constraints:
+  employment_types: [fulltime, contract]
+  geography_policy: candidate_default
+  compensation_policy: candidate_default
+  active_clearance: reject
+  staffing_intermediary: reject_auto
+discovery:
+  query_terms: [AI implementation, AI solutions engineer, applied AI consultant, customer engineer, forward deployed engineer, AI deployment]
+  description_only_lane: true
+  employer_cohorts: [ai_workflow, vertical_ai, b2b_saas, healthtech_saas, edtech]
+selection:
+  minimum_core_tier: B
+  per_run_soft_cap: 5
+  allow_stretch_in_core: false
+materials:
+  preferred_evidence_refs: [exp_sds, proj_prof_ai, proj_autoapply]
+  section_priority: [experience, projects, skills, education]

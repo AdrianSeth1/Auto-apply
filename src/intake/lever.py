@@ -61,6 +61,11 @@ class LeverScraper(BaseScraper):
             except Exception as e:
                 logger.warning("Skipping malformed Lever job %s: %s", item.get("id"), e)
 
+        self.last_fetch_stats = {
+            "provider_records": len(raw_list),
+            "normalized_records": len(jobs),
+            "malformed_records": len(raw_list) - len(jobs),
+        }
         logger.info("Fetched %d jobs from Lever/%s", len(jobs), company_slug)
         return jobs
 

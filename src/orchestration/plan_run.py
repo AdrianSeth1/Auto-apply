@@ -10,8 +10,8 @@ or a manual "Run now". The name no longer implies a specific time of day.
 * **Filter** -- ``matching.scorer.score_jobs`` with the active
   applicant profile; each ``ScoreBreakdown`` carries the Phase 16.1
   structured ``disqualify_results`` for the review-queue UI.
-* **Top-N selection** -- qualified jobs ranked by ``final_score``,
-  capped at ``top_n``.
+* **Top-N selection** -- qualified jobs ranked by ``final_score``, capped at
+  ``top_n``, plus up to five startup bonus jobs that do not consume Top-N slots.
 * **Enqueue** -- per top-N job: one ``materials.generate`` + one
   ``application.prepare`` task. Both ride the Phase 14 audit/trace
   trail; submission is never enqueued -- the operator approves via
@@ -45,6 +45,8 @@ from __future__ import annotations
 
 import functools
 import logging
+import re
+import threading
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
@@ -53,6 +55,8 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+_PLAN_SELECTION_LOCK = threading.Lock()
+_MIN_SELECTION_SCORE = 0.50
 
 
 # Where the Phase 17.7 kill switch lives. A tenant-aware version would
@@ -79,11 +83,24 @@ class PlanRunReport:
     finished_at: str
     duration_seconds: float
     top_n: int
+    raw_jobs_fetched: int = 0
+    search_filtered_out: int = 0
+    source_counts: dict[str, int] = field(default_factory=dict)
     total_jobs_seen: int = 0
     qualified: int = 0
     disqualified: int = 0
     borderline: int = 0  # count of jobs whose final_score sits in [0.4, 0.6]
     selected: int = 0  # jobs that actually reached the enqueue step
+    startup_bonus_selected: int = 0
+    startup_selected_total: int = 0
+    role_compatible: int = 0
+    employer_quality_rejected: int = 0
+    low_score_rejected: int = 0
+    exact_duplicates_removed: int = 0
+    previously_applied_removed: int = 0
+    pending_deduplicated: int = 0
+    new_review_entries: int = 0
+    selected_jobs: list[dict[str, Any]] = field(default_factory=list)
     materials_task_ids: list[str] = field(default_factory=list)
     application_prepare_task_ids: list[str] = field(default_factory=list)
     application_submit_task_ids: list[str] = field(default_factory=list)
@@ -156,6 +173,119 @@ def _borderline_count(breakdowns: list[Any]) -> int:
         if not getattr(b, "disqualified", False)
         and BORDERLINE_LOW <= getattr(b, "final_score", 0.0) <= BORDERLINE_HIGH
     )
+
+
+def _select_with_startup_bonus(
+    qualified: list[Any], *, top_n: int, startup_target: int = 5
+) -> tuple[list[Any], int]:
+    """Select normal Top-N, then append startups until the target is met."""
+    if top_n <= 0:
+        return [], 0
+    selected = list(qualified[:top_n])
+    selected_ids = {str(getattr(item, "job_id", "")) for item in selected}
+    startup_count = sum(bool(getattr(item, "is_startup", False)) for item in selected)
+    appended = 0
+    for item in qualified:
+        if startup_count >= startup_target:
+            break
+        item_id = str(getattr(item, "job_id", ""))
+        if item_id in selected_ids or not bool(getattr(item, "is_startup", False)):
+            continue
+        selected.append(item)
+        selected_ids.add(item_id)
+        startup_count += 1
+        appended += 1
+    return selected, appended
+
+
+_ROLE_TITLE_PATTERNS = {
+    "ai-solutions": re.compile(
+        r"(?i)\b(forward[- ]?deployed|applied ai|ai (solutions?|implementation|"
+        r"deployment|consultant|engineer)|genai|llm|customer engineer|"
+        r"solutions architect|professional services engineer)\b"
+    ),
+    "implementation-consultant": re.compile(
+        r"(?i)\b(implementation|professional services|deployment specialist|"
+        r"technical consultant|solutions consultant|onboarding consultant|"
+        r"implementation analyst|clinical deployment)\b"
+    ),
+    "sales-engineer": re.compile(
+        r"(?i)\b(sales engineer|solutions engineer|pre[- ]?sales|"
+        r"technical sales|sales engineering)\b"
+    ),
+    "tam": re.compile(
+        r"(?i)\b(technical account|customer success|client success|partner success|"
+        r"technical customer success|customer enablement|client services manager|"
+        r"customer success manager|account manager)\b"
+    ),
+    "analyst": re.compile(
+        r"(?i)\b(analyst|analytics|revenue operations|revops|business intelligence|"
+        r"insights|strategy and operations|strategy & operations|operations associate)\b"
+    ),
+}
+_VAGUE_MULTI_ROLE_TITLE = re.compile(
+    r"(?i)\b(multiple roles|various roles|several roles|many roles|is hiring|"
+    r"software engineers?, data engineers?|engineers?/data scientists?)\b"
+)
+_ROLE_TITLE_EXCLUSIONS = {
+    "sales-engineer": re.compile(
+        r"(?i)\b(hvac|mechanical|machinery|industrial equipment|construction "
+        r"equipment|electrical equipment|building systems?|plumbing|territory)\b"
+    ),
+}
+_LOW_QUALITY_EMPLOYER = re.compile(
+    r"(?i)(@|\b(staffing|recruitment|recruiting)\b|\bteksystems\b|"
+    r"\bnet2source\b|\bmichael page\b|\bselby jennings\b|\ballegis\b|"
+    r"\bnogigiddy\b|\bjobot\b|\bcybercoders\b|\bmotion recruitment\b|"
+    r"\binsight global\b|\bteknohire\b|\bbusiness intelli solutions\b)"
+)
+
+
+def _role_compatible(breakdown: Any, search_profile_id: str | None) -> bool:
+    """Require the title to belong to the plan's actual role family.
+
+    Startup bonus discovery may bypass exact search keywords, but it may not
+    turn an analyst plan into a software-engineering plan.
+    """
+    pattern = _ROLE_TITLE_PATTERNS.get(search_profile_id or "")
+    if pattern is None:
+        return True
+    title = str(getattr(breakdown, "title", "") or "").strip()
+    if not title or _VAGUE_MULTI_ROLE_TITLE.search(title):
+        return False
+    exclusion = _ROLE_TITLE_EXCLUSIONS.get(search_profile_id or "")
+    if exclusion is not None and exclusion.search(title):
+        return False
+    return bool(pattern.search(title))
+
+
+def _dedupe_exact_role_identity(breakdowns: list[Any]) -> list[Any]:
+    """Keep one representative per normalized company/title pair.
+
+    This is a conservative selection-time collapse only. It does not merge or
+    delete database records, so regional postings remain available for review
+    and canonical duplicate clustering elsewhere in the system.
+    """
+    seen: set[tuple[str, str]] = set()
+    unique: list[Any] = []
+    for breakdown in breakdowns:
+        company = re.sub(
+            r"[^a-z0-9]+", " ", str(getattr(breakdown, "company", "")).lower()
+        ).strip()
+        title = re.sub(
+            r"[^a-z0-9]+", " ", str(getattr(breakdown, "title", "")).lower()
+        ).strip()
+        key = (company, title)
+        if not all(key) or key not in seen:
+            unique.append(breakdown)
+            seen.add(key)
+    return unique
+
+
+def _acceptable_employer(breakdown: Any) -> bool:
+    """Prefer identifiable direct employers over staffing/recruiter listings."""
+    company = str(getattr(breakdown, "company", "") or "").strip()
+    return bool(company) and not _LOW_QUALITY_EMPLOYER.search(company)
 
 
 async def run_plan(
@@ -249,7 +379,16 @@ async def run_plan(
     search_fn = search_fn or _default_search_fn
     try:
         search_kwargs: dict[str, Any] = {
-            "profile": search_profile_id or profile_id,
+            # The AI implementation plan uses explicit saved-search filters
+            # below plus the orchestration role/score gates. Skipping only its
+            # intake profile preserves the broader ATS startup lane; otherwise
+            # relevant stretch roles disappear before the five bonus startup
+            # slots can be considered.
+            "profile": (
+                None
+                if search_profile_id == "ai-solutions"
+                else search_profile_id or profile_id
+            ),
             "source": "all",
             "score": False,  # we run scoring ourselves below so we can
                              # capture the structured breakdowns
@@ -284,6 +423,13 @@ async def run_plan(
         )
 
     jobs = list(search_result.get("jobs") or search_result.get("items") or [])
+    raw_counts = search_result.get("counts") or {}
+    raw_jobs_fetched = int(raw_counts.get("raw_total") or len(jobs))
+    search_filtered_out = max(0, raw_jobs_fetched - len(jobs))
+    source_counts = {
+        key: int(raw_counts.get(key) or 0)
+        for key in ("ats", "adzuna", "hn", "remotive", "linkedin")
+    }
     total_jobs_seen = len(jobs)
 
     # No results is a *legitimate* outcome (LinkedIn returned nothing
@@ -302,6 +448,9 @@ async def run_plan(
             finished_at=_isoformat(finished_at),
             duration_seconds=(finished_at - started_at).total_seconds(),
             top_n=top_n,
+            raw_jobs_fetched=raw_jobs_fetched,
+            search_filtered_out=search_filtered_out,
+            source_counts=source_counts,
             total_jobs_seen=0,
             dry_run=dry_run,
         )
@@ -337,15 +486,55 @@ async def run_plan(
     qualified = [b for b in breakdowns if not getattr(b, "disqualified", False)]
     disqualified = total_jobs_seen - len(qualified)
     borderline = _borderline_count(breakdowns)
+    role_qualified = [
+        breakdown
+        for breakdown in qualified
+        if _role_compatible(breakdown, search_profile_id)
+    ]
+    role_compatible = len(role_qualified)
+    employer_qualified = [
+        breakdown for breakdown in role_qualified if _acceptable_employer(breakdown)
+    ]
+    employer_quality_rejected = role_compatible - len(employer_qualified)
+    score_qualified = [
+        breakdown
+        for breakdown in employer_qualified
+        if float(getattr(breakdown, "final_score", 0.0) or 0.0)
+        >= _MIN_SELECTION_SCORE
+    ]
+    low_score_rejected = len(employer_qualified) - len(score_qualified)
 
     # Top-N already sorted descending by score_jobs. ``top_n <= 0`` is
     # an explicit "select none" -- codex P2 fix; the previous expression
     # treated 0/negative as "no cap" which silently fanned out tasks
     # for the entire qualified pool when the operator intended to
     # enqueue nothing.
-    selected = qualified[:top_n] if top_n > 0 else []
-    if skip_previously_applied:
-        selected = _drop_previously_applied(tenant_id=tenant_id, selected=selected)
+    review_entry_ids: list[str] = []
+    with _PLAN_SELECTION_LOCK:
+        eligible = _dedupe_exact_role_identity(score_qualified)
+        exact_duplicates_removed = len(score_qualified) - len(eligible)
+        if skip_previously_applied:
+            before_applied = len(eligible)
+            eligible = _drop_previously_applied(tenant_id=tenant_id, selected=eligible)
+            previously_applied_removed = before_applied - len(eligible)
+        else:
+            previously_applied_removed = 0
+        before_pending = len(eligible)
+        eligible = _drop_pending_review_jobs(tenant_id=tenant_id, selected=eligible)
+        pending_deduplicated = before_pending - len(eligible)
+        selected, startup_bonus_selected = _select_with_startup_bonus(
+            eligible, top_n=top_n, startup_target=5
+        )
+        if not dry_run:
+            try:
+                review_entry_ids = _create_review_entries(
+                    tenant_id=tenant_id,
+                    run_id=run_id,
+                    selected=selected,
+                )
+            except Exception as exc:  # noqa: BLE001 -- non-fatal; record + continue
+                logger.exception("plan_run: review_queue insert failed")
+                errors.append(f"review_queue: {type(exc).__name__}: {exc}")
 
     # ----- 3. Persist review-queue rows + enqueue (skipped on dry_run)
     #
@@ -360,23 +549,8 @@ async def run_plan(
     materials_ids: list[str] = []
     application_prepare_ids: list[str] = []
     application_submit_ids: list[str] = []
-    review_entry_ids: list[str] = []
-
     if not dry_run:
         enqueue_fn = enqueue_fn or _default_enqueue_fn
-        # Persist review entries first so the kanban shows them even if
-        # the enqueue step trips on broker hiccups later. The factory is
-        # late-imported to keep this module light for the test harness.
-        try:
-            review_entry_ids = _create_review_entries(
-                tenant_id=tenant_id,
-                run_id=run_id,
-                selected=selected,
-            )
-        except Exception as exc:  # noqa: BLE001 -- non-fatal; record + continue
-            logger.exception("plan_run: review_queue insert failed")
-            errors.append(f"review_queue: {type(exc).__name__}: {exc}")
-
         for breakdown in selected:
             job_id = getattr(breakdown, "job_id", None)
             if not job_id:
@@ -481,11 +655,45 @@ async def run_plan(
         finished_at=_isoformat(finished_at),
         duration_seconds=(finished_at - started_at).total_seconds(),
         top_n=top_n,
+        raw_jobs_fetched=raw_jobs_fetched,
+        search_filtered_out=search_filtered_out,
+        source_counts=source_counts,
         total_jobs_seen=total_jobs_seen,
         qualified=len(qualified),
         disqualified=disqualified,
         borderline=borderline,
         selected=len(selected),
+        startup_bonus_selected=startup_bonus_selected,
+        startup_selected_total=sum(
+            bool(getattr(item, "is_startup", False)) for item in selected
+        ),
+        role_compatible=role_compatible,
+        employer_quality_rejected=employer_quality_rejected,
+        low_score_rejected=low_score_rejected,
+        exact_duplicates_removed=exact_duplicates_removed,
+        previously_applied_removed=previously_applied_removed,
+        pending_deduplicated=pending_deduplicated,
+        new_review_entries=len(review_entry_ids),
+        selected_jobs=[
+            {
+                "job_id": str(getattr(item, "job_id", "")),
+                "company": str(getattr(item, "company", "") or ""),
+                "title": str(getattr(item, "title", "") or ""),
+                "score": round(float(getattr(item, "final_score", 0.0) or 0.0), 4),
+                "is_startup": bool(getattr(item, "is_startup", False)),
+                "employer_type": str(
+                    getattr(
+                        item,
+                        "employer_type",
+                        "startup" if getattr(item, "is_startup", False) else "",
+                    )
+                    or ""
+                ),
+                "source": str(getattr(item, "source", "") or ""),
+                "url": str(getattr(item, "url", "") or ""),
+            }
+            for item in selected
+        ],
         materials_task_ids=materials_ids,
         application_prepare_task_ids=application_prepare_ids,
         application_submit_task_ids=application_submit_ids,
@@ -549,27 +757,27 @@ def _saved_search_profile_kwargs(search_profile_id: str | None) -> dict[str, Any
         kwargs["source"] = saved["source"]
     if saved.get("keywords"):
         kwargs["keywords"] = list(saved["keywords"])
-    for field in (
+    for field_name in (
         "ats",
         "company",
         "time_filter",
         "pay_operator",
         "experience_operator",
     ):
-        if saved.get(field):
-            kwargs[field] = saved[field]
-    for field in (
+        if saved.get(field_name):
+            kwargs[field_name] = saved[field_name]
+    for field_name in (
         "experience_levels",
         "employment_types",
         "location_types",
         "locations",
         "education_levels",
     ):
-        if saved.get(field):
-            kwargs[field] = list(saved[field])
-    for field in ("pay_amount", "experience_years", "max_pages"):
-        if saved.get(field) is not None:
-            kwargs[field] = saved[field]
+        if saved.get(field_name):
+            kwargs[field_name] = list(saved[field_name])
+    for field_name in ("pay_amount", "experience_years", "max_pages"):
+        if saved.get(field_name) is not None:
+            kwargs[field_name] = saved[field_name]
     if saved.get("location"):
         kwargs["search_location"] = saved["location"]
     return kwargs
@@ -643,6 +851,29 @@ def _default_score_fn(
     raw_jobs = [_coerce_job_to_rawjob(j) for j in jobs]
     raw_jobs = [j for j in raw_jobs if j is not None]
     breakdowns = score_ranked(raw_jobs, ctx)
+
+    metadata_by_raw_id = {
+        str(job.id): {
+            "is_startup": (
+                job.source == "hn"
+                or (job.raw_data or {}).get("employer_type") == "startup"
+                or bool((job.raw_data or {}).get("startup_bonus_candidate"))
+            ),
+            "employer_type": str((job.raw_data or {}).get("employer_type") or ""),
+            "source": str(job.source or ""),
+            "url": str(job.application_url or ""),
+        }
+        for job in raw_jobs
+    }
+    for breakdown in breakdowns:
+        # Dynamic metadata keeps the stable ScoreBreakdown serialization
+        # contract unchanged while letting orchestration reserve bonus slots
+        # and write a useful, Claude-readable selection audit.
+        metadata = metadata_by_raw_id.get(str(breakdown.job_id), {})
+        breakdown.is_startup = bool(metadata.get("is_startup", False))
+        breakdown.employer_type = metadata.get("employer_type", "")
+        breakdown.source = metadata.get("source", "")
+        breakdown.url = metadata.get("url", "")
 
     if tenant_id:
         try:
@@ -846,6 +1077,46 @@ def _drop_previously_applied(*, tenant_id: str, selected: list[Any]) -> list[Any
             ).scalars()
         )
     return [bd for job_id, bd in by_uuid.items() if job_id not in existing]
+
+
+def _drop_pending_review_jobs(*, tenant_id: str, selected: list[Any]) -> list[Any]:
+    """Reserve queue diversity by excluding jobs already awaiting review."""
+    if not selected:
+        return []
+
+    import uuid as uuid_mod  # noqa: PLC0415
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from src.core.database import get_session_factory  # noqa: PLC0415
+    from src.core.models import ReviewQueueEntry  # noqa: PLC0415
+
+    by_uuid: dict[uuid_mod.UUID, Any] = {}
+    passthrough: list[Any] = []
+    for breakdown in selected:
+        try:
+            job_uuid = uuid_mod.UUID(str(getattr(breakdown, "job_id", "")))
+        except ValueError:
+            passthrough.append(breakdown)
+            continue
+        by_uuid[job_uuid] = breakdown
+    if not by_uuid:
+        return selected
+
+    factory = get_session_factory()
+    with factory() as session:
+        pending = set(
+            session.execute(
+                select(ReviewQueueEntry.job_id).where(
+                    ReviewQueueEntry.tenant_id == tenant_id,
+                    ReviewQueueEntry.job_id.in_(list(by_uuid)),
+                    ReviewQueueEntry.status == "pending",
+                )
+            ).scalars()
+        )
+    return passthrough + [
+        breakdown for job_id, breakdown in by_uuid.items() if job_id not in pending
+    ]
 
 
 def _default_enqueue_fn(task_name: str, payload: dict[str, Any]) -> str:

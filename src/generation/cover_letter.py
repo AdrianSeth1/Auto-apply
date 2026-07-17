@@ -12,6 +12,7 @@ style drift and hallucination.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -34,6 +35,7 @@ from src.generation.validator import (
     validate_cover_letter_document,
     validate_latex_artifacts,
 )
+from src.intake.html_utils import strip_html
 from src.intake.schema import RawJob
 from src.utils.llm import LLMError, generate_text
 
@@ -46,7 +48,7 @@ DEFAULT_OUTPUT_DIR = Path("data/output")
 # determines the worst-case generation latency. 1 retry keeps total
 # wall time within the front-end's poll budget while still giving the
 # LLM a second shot when the first draft missed the page target.
-_MAX_LLM_LENGTH_REGENS = 1
+_MAX_LLM_LENGTH_REGENS = 0
 # Absolute ceiling so a degenerate "LLM always returns junk" loop still
 # terminates with *some* output. Higher than _MAX_LLM_LENGTH_REGENS so
 # the deterministic paragraph-drop fallback still gets attempts.
@@ -277,17 +279,25 @@ def generate_cover_letter(
     strategy = _infer_cover_letter_strategy(job, evidence_bullets)
 
     text_from_llm = False
+    letter_origin = "deterministic_baseline"
+    origin_issues: list[str] = []
     if use_llm:
         try:
-            text = _generate_with_llm(
+            text, letter_origin, origin_issues = _generate_high_quality_cover_letter_text(
                 job,
                 profile_data,
                 evidence_bullets,
                 target_pages=target_pages,
                 strategy=strategy,
             )
-            text_from_llm = True
-        except (LLMError, Exception) as e:
+            text_from_llm = letter_origin == "llm"
+        except Exception as e:  # noqa: BLE001 -- surface quality failures explicitly
+            if _cover_letter_fail_closed():
+                logger.warning("LLM cover letter generation failed quality checks: %s", e)
+                raise LLMError(
+                    "Cover letter failed quality/grounding checks; no generic "
+                    f"fallback was written. {e}"
+                ) from e
             logger.warning("LLM cover letter generation failed (%s), using template", e)
             text = _generate_template(
                 job, identity, evidence_bullets, profile_data, strategy=strategy
@@ -314,6 +324,8 @@ def generate_cover_letter(
         evidence_bullets=evidence_bullets,
         strategy=strategy,
         quality_issues=[] if text_from_llm else None,
+        letter_origin=letter_origin,
+        origin_issues=origin_issues,
     )
     document = _fit_cover_letter_document(document, template_manifest)
     document, docx_path, pdf_path = _render_cover_letter_to_target_pages(
@@ -349,6 +361,221 @@ def generate_cover_letter(
     if pdf_path:
         result["pdf"] = pdf_path
     return result
+
+
+def _generate_high_quality_cover_letter_text(
+    job: RawJob,
+    profile_data: dict[str, Any],
+    evidence_bullets: list[str],
+    *,
+    target_pages: int,
+    strategy: dict[str, Any],
+    max_attempts: int = 2,
+) -> tuple[str, str, list[str]]:
+    """Generate at most two drafts and return the best usable version.
+
+    Returns ``(text, origin, issues)`` where ``origin`` is ``"llm"`` or
+    ``"deterministic_baseline"``. The origin MUST be propagated to the
+    document metadata / review card: a baseline letter is a factual but
+    templated draft that the operator should rewrite before approving,
+    and shipping it unlabeled is how two template letters went to the
+    review queue unnoticed on 2026-07-15.
+
+    Empty/meta output still fails closed because it is not a letter. Structural,
+    style, or grounding warnings make a candidate score worse and steer the
+    second attempt, but no longer destroy every artifact. The user reviews the
+    surfaced draft before submission.
+    """
+    feedback: str | None = None
+    previous: str | None = None
+    last_error: Exception | None = None
+    baseline = _generate_template(
+        job,
+        profile_data.get("identity", {}),
+        evidence_bullets,
+        profile_data,
+        strategy=strategy,
+    )
+    # A factual deterministic letter is always available. The LLM must beat
+    # this small baseline penalty without grounding/style warnings.
+    candidates: list[tuple[int, str, list[str], str]] = [
+        (45, baseline, ["deterministic evidence baseline"], "deterministic_baseline")
+    ]
+
+    for attempt in range(max(1, max_attempts)):
+        try:
+            text = _generate_with_llm(
+                job,
+                profile_data,
+                evidence_bullets,
+                target_pages=target_pages,
+                length_feedback=feedback,
+                previous_attempt=previous,
+                strategy=strategy,
+                allow_quality_warnings=True,
+            )
+        except LLMError as exc:
+            last_error = exc
+            feedback = f"Attempt {attempt + 1} was unusable: {exc}. Return only a letter body."
+            previous = None
+            continue
+
+        score, issues = _score_cover_letter_candidate(
+            text,
+            job=job,
+            profile_data=profile_data,
+            evidence_bullets=evidence_bullets,
+            target_pages=target_pages,
+        )
+        candidates.append((score, text, issues, "llm"))
+        if not issues:
+            return text, "llm", []
+        feedback = (
+            f"Attempt {attempt + 1} had these problems: {'; '.join(issues)}. "
+            "Repair only those problems. Never move a detail from the job description "
+            "into the applicant's history."
+        )
+        previous = text
+
+    if candidates:
+        candidates.sort(key=lambda candidate: candidate[0])
+        best_score, best_text, best_issues, best_origin = candidates[0]
+        logger.warning(
+            "Cover letter using best available draft (score=%d, origin=%s): %s",
+            best_score,
+            best_origin,
+            best_issues,
+        )
+        return best_text, best_origin, best_issues
+    raise LLMError(f"Cover letter produced no usable draft: {last_error}") from last_error
+
+
+def _score_cover_letter_candidate(
+    text: str,
+    *,
+    job: RawJob,
+    profile_data: dict[str, Any],
+    evidence_bullets: list[str],
+    target_pages: int,
+) -> tuple[int, list[str]]:
+    """Lower is better. Warnings guide repair but do not suppress artifacts."""
+    from src.generation.fact_drift import check_fact_drift
+
+    issues: list[str] = []
+    score = 0
+    words = len(text.split())
+    paragraphs = [part for part in text.split("\n\n") if part.strip()]
+    min_words, _, max_words = _length_window_for(target_pages)
+    if words < int(min_words * 0.7):
+        issues.append(f"too short ({words} words)")
+        score += 20
+    if words > int(max_words * 1.5):
+        issues.append(f"too long ({words} words)")
+        score += 20
+    if len(paragraphs) < 4:
+        issues.append(f"only {len(paragraphs)} paragraphs")
+        score += 15
+    quality = _cover_letter_quality_issues(text, job_title=job.title)
+    issues.extend(quality)
+    score += 10 * len(quality)
+    drift = check_fact_drift(
+        text,
+        evidence_texts=evidence_bullets,
+        jd_snapshot_text=f"{job.company}\n{job.title}\n{job.description or ''}",
+        profile_text=json.dumps(profile_data, ensure_ascii=False, default=str),
+    )
+    if drift.number_drift:
+        issues.append("unsupported numbers: " + ", ".join(drift.number_drift))
+        score += 100 * len(drift.number_drift)
+    if drift.entity_drift:
+        issues.append("unsupported entities: " + ", ".join(drift.entity_drift))
+        score += 25 * len(drift.entity_drift)
+    unsupported_claims = _unsupported_applicant_claims(text, evidence_bullets)
+    if unsupported_claims:
+        issues.extend(f"unsupported claim: {claim}" for claim in unsupported_claims)
+        # Plausible connective detail is acceptable because the profile is not
+        # exhaustive. Prefer the cleaner draft, but reserve severe penalties
+        # for invented numbers/entities above.
+        score += 10 * len(unsupported_claims)
+    return score, issues
+
+
+_PAST_CLAIM_RE = re.compile(
+    r"\b(i|we|who)\s+(build|built|create|created|design|designed|develop|developed|"
+    r"implement|implemented|lead|led|run|ran|manage|managed|"
+    r"maintained|rewrote|transformed|helped|worked|directed|evaluated|identified|"
+    r"outlined|diagnosed|lifted|reduced|increased|improved|contributed|presented|"
+    r"operated|deployed|analyzed|validated|fixed|cut)\b|"
+    r"\b(this|that|these|the guides?|the work|the system|this approach|this involved)\s+"
+    r"(eliminated|prevented|became|kept|enabled|saved|ensured|reduced|increased|"
+    r"improved|lifted|cut|drove|contributed|standardized)\b",
+    re.IGNORECASE,
+)
+_CLAIM_STOPWORDS = {
+    "a", "an", "and", "at", "by", "for", "from", "i", "in", "into", "it",
+    "my", "of", "on", "or", "our", "that", "the", "their", "this", "to", "we",
+    "with", "while", "was", "were", "is", "are",
+}
+
+
+def _unsupported_applicant_claims(text: str, evidence_bullets: list[str]) -> list[str]:
+    """Flag past-tense applicant claims with weak evidence-token overlap."""
+    evidence_tokens = [_claim_tokens(item) for item in evidence_bullets if item]
+    unsupported: list[str] = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        sentence = sentence.strip()
+        if not sentence or not _PAST_CLAIM_RE.search(sentence):
+            continue
+        tokens = _claim_tokens(sentence)
+        if not tokens:
+            continue
+        overlap = max(
+            (len(tokens & source) / max(1, len(tokens)) for source in evidence_tokens),
+            default=0.0,
+        )
+        if overlap < 0.20:
+            unsupported.append(sentence[:140])
+    return unsupported
+
+
+def _claim_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if len(token) > 2 and token not in _CLAIM_STOPWORDS
+    }
+
+
+def _cover_letter_fail_closed() -> bool:
+    from src.core.config import load_config
+
+    generation = load_config().get("generation", {}) or {}
+    return bool(generation.get("cover_letter_fail_closed", True))
+
+
+def _assert_cover_letter_grounded(
+    text: str,
+    *,
+    job: RawJob,
+    profile_data: dict[str, Any],
+    evidence_bullets: list[str],
+) -> None:
+    """Reject invented numbers/entities on the active generation path."""
+    from src.generation.fact_drift import check_fact_drift
+
+    report = check_fact_drift(
+        text,
+        evidence_texts=evidence_bullets,
+        jd_snapshot_text=f"{job.company}\n{job.title}\n{job.description or ''}",
+        profile_text=json.dumps(profile_data, ensure_ascii=False, default=str),
+    )
+    if report.has_blocking_drift:
+        details = []
+        if report.number_drift:
+            details.append("unsupported numbers: " + ", ".join(report.number_drift))
+        if report.entity_drift:
+            details.append("unsupported entities: " + ", ".join(report.entity_drift))
+        raise LLMError("Cover letter fact drift detected (" + "; ".join(details) + ")")
 
 
 def generate_cover_letter_latex(
@@ -410,6 +637,8 @@ def generate_cover_letter_latex(
         evidence_bullets=evidence_bullets,
         strategy=strategy,
         quality_issues=[] if text_from_llm else None,
+        letter_origin="llm" if text_from_llm else "deterministic_baseline",
+        origin_issues=[],
     )
     document = _fit_cover_letter_document(document, package.manifest)
     validation = validate_cover_letter_document(document, target_pages=target_pages)
@@ -455,15 +684,26 @@ def build_cover_letter_document(
     evidence_bullets: list[str],
     strategy: dict[str, Any] | None = None,
     quality_issues: list[str] | None = None,
+    letter_origin: str = "llm",
+    origin_issues: list[str] | None = None,
 ) -> CoverLetterDocument:
-    """Create a structured cover letter IR from generated body text."""
+    """Create a structured cover letter IR from generated body text.
+
+    ``letter_origin`` records whether the body came from the LLM or the
+    deterministic evidence template; it flows into the version ledger and
+    review card so a templated draft is never mistaken for a tailored one.
+    """
     identity = profile_data.get("identity", {})
     if strategy is None:
         strategy = _infer_cover_letter_strategy(job, evidence_bullets)
     if quality_issues is None:
         quality_issues = _cover_letter_quality_issues(body_text, job_title=job.title)
     return CoverLetterDocument(
-        recipient={"company": job.company, "hiring_manager": None, "location": job.location},
+        recipient={
+            "company": job.company,
+            "hiring_manager": None,
+            "location": _display_location(job.location),
+        },
         applicant={
             "name": identity.get("full_name", ""),
             "email": identity.get("email", ""),
@@ -479,8 +719,41 @@ def build_cover_letter_document(
                 bucket["name"] for bucket in strategy["capability_buckets"]
             ],
             "quality_issues": quality_issues,
+            "letter_origin": letter_origin,
+            "origin_issues": list(origin_issues or []),
+            # Give the validator real bullets to compare against instead
+            # of pattern-guessing what "raw evidence" looks like.
+            "evidence_bullets": [b for b in evidence_bullets if b][:12],
         },
     )
+
+
+_LOCATION_LOWER_WORDS = {"and", "or", "of", "the", "in", "at"}
+
+
+def _display_location(location: str | None) -> str | None:
+    """Render an ATS location string presentably in the letter header.
+
+    Sources frequently normalize to lowercase ("san francisco, ca",
+    "united states"); a letter header must not. Two-letter state/country
+    codes are uppercased, other words title-cased.
+    """
+    if not location or not location.strip():
+        return location
+    words = []
+    for raw_word in location.strip().split():
+        # Preserve separators attached to the word (e.g. "ca," keeps the comma)
+        core = raw_word.strip(",;")
+        suffix = raw_word[len(core):]
+        if len(core) == 2 and core.isalpha():
+            words.append(core.upper() + suffix)
+        elif core.lower() in _LOCATION_LOWER_WORDS:
+            words.append(core.lower() + suffix)
+        else:
+            words.append(core[:1].upper() + core[1:] + suffix)
+    result = " ".join(words)
+    # First word always capitalized even if it's a lower-word ("The Hague")
+    return result[:1].upper() + result[1:] if result else result
 
 
 def _fit_cover_letter_document(
@@ -517,9 +790,19 @@ def _manifest_for_template_path(template_path: Path | None) -> TemplateManifest 
 # Per-page word-count window. The cover letter renderer assumes 11pt
 # Times New Roman with 0.85" margins, which fits ~340 words on a single
 # page including the 5-paragraph frame. Multi-page targets multiply this.
-_WORDS_PER_PAGE_TARGET = 340
-_WORDS_PER_PAGE_MIN = 280
-_WORDS_PER_PAGE_MAX = 400
+#
+# 2026-07-16 recalibration: the previous window (min 220 / target 280)
+# combined with the validator's min of 260 flagged 20/20 letters in the
+# first real portfolio batch as "too short" — the local model reliably
+# produces 190-236 word letters, and the well-written ones (CoreView,
+# WalkMe) were in that band. A warning that fires 100% of the time
+# carries no signal and lets genuinely bad drafts hide among good ones.
+# 200-240 words is also simply a good cover-letter length; the old
+# budget encouraged padding. Keep the validator (validator.py
+# ``validate_cover_letter_document``) aligned with this window.
+_WORDS_PER_PAGE_TARGET = 240
+_WORDS_PER_PAGE_MIN = 180
+_WORDS_PER_PAGE_MAX = 340
 
 
 def _length_window_for(target_pages: int) -> tuple[int, int, int]:
@@ -602,6 +885,11 @@ Follow this structure:
 Voice rules (the most important part):
 - Read-aloud test: every sentence must sound natural spoken to a colleague.
   If it sounds like corporate writing, say it plainer.
+- Use contractions where natural ("I've", "I'd", "that's"). Include one small,
+  specific observation about why the work is interesting; do not make every
+  paragraph follow the same sentence rhythm.
+- It is fine to sound slightly conversational. Avoid sounding over-polished,
+  ceremonious, or like a generated summary of the resume.
 - Plain verbs. "built", "ran", "cut", "fixed", "led" — never "spearheaded",
   "leveraged", "utilized", "orchestrated", "delved", "fostered".
 - Ban these words/phrases entirely: "passionate", "excited to apply",
@@ -618,6 +906,23 @@ Hard rules:
 - {paragraph_rule}.
 - Do NOT fabricate experiences, skills, or achievements not in the provided
   profile/evidence/stories.
+- Treat the Job Description as COMPANY CONTEXT only. A tool, customer type,
+  workflow, metric, industry detail, or responsibility appearing only in the
+  JD must NEVER be written as something the applicant previously did.
+- Use evidence at its original level of specificity. Do not turn "implementation
+  guides" into security, clinical, EHR, infrastructure, or data-pipeline work
+  unless that exact domain appears in the applicant evidence.
+- Plausible connective detail is allowed: you may describe a reasonable
+  workflow, motivation, or lesson that makes the evidence read like a human
+  story. The profile is not an exhaustive diary.
+- Do NOT invent hard facts: no new numbers, credentials, employers, named tools,
+  regulated-domain experience, team size, revenue, scale, or major outcome.
+- Do not claim direct ownership when the evidence says "contributed" or
+  "helped." Modest interpretation is fine; material promotion is not.
+- In each proof paragraph, anchor the applicant-history sentence closely to ONE
+  supplied evidence bullet. You may simplify its wording, but do not append an
+  invented hard result. If the evidence says "contributed," do not upgrade it
+  to sole ownership with "built," "designed," or "led."
 - Do NOT include a greeting line (Dear Hiring Manager)
   or sign-off (Sincerely), those are added separately.
 - Do NOT use em dashes or en dashes. Prefer commas, periods, or semicolons.
@@ -742,6 +1047,19 @@ def _infer_cover_letter_strategy(
 
 def _classify_cover_letter_role(job: RawJob) -> str:
     text = _job_signal_text(job).lower()
+    title = (job.title or "").lower()
+    if any(
+        term in title
+        for term in (
+            "professional services",
+            "implementation",
+            "onboarding",
+            "solutions consultant",
+            "customer success",
+            "technical account",
+        )
+    ):
+        return "customer_implementation"
     if any(term in text for term in ("embedded", "firmware", "microcontroller", "rtos")):
         return "embedded_firmware"
     if any(term in text for term in ("test", "testing", "verification", "qa", "quality")):
@@ -885,6 +1203,11 @@ _CAPABILITY_BUCKETS: list[dict[str, Any]] = [
 
 _ROLE_BUCKET_BOOSTS_DEFAULT: dict[str, int] = {"software development and maintainability": 3}
 _ROLE_BUCKET_BOOSTS: dict[str, dict[str, int]] = {
+    "customer_implementation": {
+        "systems integration and collaboration": 5,
+        "workflow automation and data quality": 3,
+        "software development and maintainability": 1,
+    },
     "software_development_test": {
         "testing, debugging, and reliability": 5,
         "software development and maintainability": 3,
@@ -929,6 +1252,12 @@ def _match_bucket_evidence(bucket: dict[str, Any], evidence_bullets: list[str]) 
 
 def _quality_focus_for_role(role_type: str) -> list[str]:
     focus = {
+        "customer_implementation": [
+            "customer discovery",
+            "hands-on implementation",
+            "workflow design",
+            "adoption",
+        ],
         "software_development_test": [
             "testability",
             "verification",
@@ -1090,6 +1419,7 @@ def _generate_with_llm(
     length_feedback: str | None = None,
     previous_attempt: str | None = None,
     strategy: dict[str, Any] | None = None,
+    allow_quality_warnings: bool = False,
 ) -> str:
     """Generate cover letter body using the configured LLM.
 
@@ -1128,24 +1458,19 @@ def _generate_with_llm(
         try:
             from src.generation.prep_pack import rank_stories  # noqa: PLC0415
 
-            top_stories = rank_stories(
+            top_story = rank_stories(
                 story_bank, title=job.title, description=job.description or ""
-            )[:2]
-            lines = []
-            for story, _score in top_stories:
-                lines.append(
-                    f"- [{story.get('theme', 'story')}] "
-                    f"Situation: {story.get('context', '')} "
-                    f"Action: {story.get('action', '')} "
-                    f"Result: {story.get('result', '')}"
-                )
-            if lines:
+            )[:1]
+            if top_story:
+                story, _score = top_story[0]
                 stories_text = (
-                    "\nProof stories (weave EXACTLY ONE into the letter, told "
-                    "specifically and briefly — the one most relevant to this "
-                    "role; do not summarize both):\n" + "\n".join(lines) + "\n"
+                    "\nOptional story context (use naturally; reasonable connective "
+                    "detail is allowed, but do not invent hard facts):\n"
+                    f"- Situation: {story.get('context', '')} "
+                    f"Action: {story.get('action', '')} "
+                    f"Result: {story.get('result', '')}\n"
                 )
-        except Exception:  # noqa: BLE001 -- stories are an enhancement, never a blocker
+        except Exception:  # noqa: BLE001 -- evidence bullets remain sufficient
             logger.debug("story ranking for cover letter skipped", exc_info=True)
 
     feedback_block = ""
@@ -1216,6 +1541,7 @@ Generate the cover letter body following the instructions above."""
     if (
         previous_attempt is None
         and length_feedback is None
+        and not allow_quality_warnings
         and _cover_letter_critique_enabled()
     ):
         raw = _apply_critique_revision(
@@ -1226,6 +1552,7 @@ Generate the cover letter body following the instructions above."""
         raw,
         target_pages=target_pages,
         job_title=job.title,
+        allow_quality_warnings=allow_quality_warnings,
     )
 
 
@@ -1234,6 +1561,7 @@ def _clean_llm_cover_letter_output(
     *,
     target_pages: int = 1,
     job_title: str | None = None,
+    allow_quality_warnings: bool = False,
 ) -> str:
     """Reject CLI/meta responses so they fall back to deterministic templates.
 
@@ -1251,20 +1579,22 @@ def _clean_llm_cover_letter_output(
         raise LLMError("LLM returned an empty cover letter.")
     if any(pattern in lower for pattern in _INVALID_LLM_OUTPUT_PATTERNS):
         raise LLMError("LLM returned a meta-response instead of a cover letter.")
+    if _contains_html_markup(text):
+        raise LLMError("LLM returned raw HTML markup instead of cover-letter prose.")
     paragraphs = [part.strip() for part in text.split("\n\n") if part.strip()]
     min_words, _, max_words = _length_window_for(target_pages)
     # Allow a wider tolerance than the prompt target because the
     # iterative feedback loop is what will tighten the actual length.
-    if len(text.split()) < int(min_words * 0.7):
+    if not allow_quality_warnings and len(text.split()) < int(min_words * 0.7):
         raise LLMError("LLM returned a cover letter that is too short.")
-    if len(text.split()) > int(max_words * 1.5):
+    if not allow_quality_warnings and len(text.split()) > int(max_words * 1.5):
         raise LLMError("LLM returned a cover letter that is too long.")
     min_paragraphs = 4 if target_pages == 1 else 4 + (target_pages - 1)
-    if len(paragraphs) < min_paragraphs:
+    if not allow_quality_warnings and len(paragraphs) < min_paragraphs:
         raise LLMError("LLM returned a cover letter without enough paragraph structure.")
     text = _normalize_cover_letter_dashes(text)
     quality_issues = _cover_letter_quality_issues(text, job_title=job_title)
-    if quality_issues:
+    if quality_issues and not allow_quality_warnings:
         raise LLMError(
             "LLM returned a cover letter that failed quality checks: "
             + "; ".join(quality_issues)
@@ -1282,6 +1612,8 @@ def _normalize_cover_letter_dashes(text: str) -> str:
 def _cover_letter_quality_issues(text: str, *, job_title: str | None = None) -> list[str]:
     issues: list[str] = []
     lower = text.lower()
+    if _contains_html_markup(text):
+        issues.append("raw_html_markup")
     for phrase in _FORBIDDEN_COVER_LETTER_PHRASES:
         if phrase in lower:
             issues.append(f"generic_phrase:{phrase}")
@@ -1339,13 +1671,18 @@ def _generate_template(
     # each, close plainly. Short and honest beats long and fabricated.
     if strategy is None:
         strategy = _infer_cover_letter_strategy(job, evidence_bullets)
-    background = _candidate_background(identity, profile_data)
     role_refs = _role_references(job, strategy)
+    focus = _cover_letter_job_focus(job, strategy)
 
+    # The focus is a verb-phrase lifted from the JD ("partner with the
+    # assigned Implementation Manager…"). Splicing it bare into "stands
+    # out is <clause>" produced ungrammatical letters; quote it instead
+    # so any clause shape reads correctly, and never repeat it verbatim
+    # in the close.
     opening = (
         f"I am applying for {role_refs['opening']} at {job.company}. "
-        f"I am a {background}, and the experience below is the part of my "
-        f"background most relevant to this role."
+        f'The responsibility that stands out to me is "{focus}"; the examples below are the '
+        "closest evidence from my background."
     )
 
     seen: set[str] = set()
@@ -1357,23 +1694,62 @@ def _generate_template(
             proofs.append(cleaned)
         if len(proofs) == 3:
             break
-    evidence_paragraph = (
-        " ".join(proofs)
-        if proofs
-        else (
-            "My recent work spans client-facing operations and hands-on "
-            "technical projects; my resume lists the specifics."
-        )
-    )
+    proof_paragraphs = proofs[:2] or ["My resume contains the relevant evidence."]
 
     close = (
-        f"My resume covers the rest. I would welcome the chance to talk about how "
-        f"this experience applies to the work at {job.company}. "
+        f"I would welcome the chance to discuss how this experience could support "
+        f"that part of the role at {job.company}. "
         "Thank you for your time."
     )
 
     return _normalize_cover_letter_dashes(
-        f"{opening}\n\n{evidence_paragraph}\n\n{close}"
+        "\n\n".join([opening, *proof_paragraphs, close])
+    )
+
+
+def _cover_letter_job_focus(job: RawJob, strategy: dict[str, Any]) -> str:
+    requirements = getattr(job, "requirements", None)
+    responsibilities = getattr(requirements, "responsibilities", []) if requirements else []
+    for responsibility in responsibilities:
+        focus = _plain_cover_letter_text(str(responsibility))
+        # Requirements parsers sometimes promote a branded heading such as
+        # "You're a builder, not a maintainer" to a responsibility. It is not
+        # a concrete duty and must never be quoted in a letter.
+        if not _usable_job_focus(focus):
+            continue
+        words = focus.split()
+        if len(words) > 22:
+            focus = " ".join(words[:22]).rstrip(",;:")
+        return focus[0].lower() + focus[1:]
+    return _role_context_sentence(job, strategy)
+
+
+_HTML_MARKUP_RE = re.compile(r"</?[a-z][^>]*>", re.IGNORECASE)
+
+
+def _contains_html_markup(text: str) -> bool:
+    return bool(_HTML_MARKUP_RE.search(text or ""))
+
+
+def _plain_cover_letter_text(value: str) -> str:
+    """Convert upstream ATS/parser fragments to safe one-line prose."""
+    return re.sub(r"\s+", " ", strip_html(value or "")).strip(" .")
+
+
+def _usable_job_focus(value: str) -> bool:
+    words = value.split()
+    if len(words) < 5:
+        return False
+    lower = value.lower()
+    # Marketing/second-person headings are context, not a job duty.
+    if re.search(r"\b(you|your|you're|you’re|we|our)\b", lower):
+        return False
+    return bool(
+        re.search(
+            r"\b(build|develop|design|implement|deliver|configure|integrate|"
+            r"collaborate|manage|lead|analyze|support|drive|translate|onboard)\b",
+            lower,
+        )
     )
 
 
@@ -1419,6 +1795,11 @@ def _role_context_sentence(job: RawJob, strategy: dict[str, Any]) -> str:
         return (
             "the need for automation that is useful, bounded, and reliable "
             "under real workflow constraints"
+        )
+    if role_type == "customer_implementation":
+        return (
+            "the mix of customer discovery, hands-on implementation, and "
+            "making new workflows stick after launch"
         )
     if role_type == "embedded_firmware":
         return (
@@ -1473,6 +1854,8 @@ def _looks_like_term_label(text: str) -> bool:
 
 
 def _role_family_phrase(role_type: str | None, concise_title: str) -> str:
+    if role_type == "customer_implementation":
+        return "professional services and implementation"
     if role_type == "software_development_test":
         return "software development and test"
     if role_type == "backend":

@@ -1,18 +1,21 @@
 database:
-  host: localhost
+  host: 127.0.0.1
   port: 5432
   name: autoapply
   user: autoapply
   password: ''
 llm:
-  provider: codex-cli
-  primary_provider: codex-cli
-  fallback_provider: claude-cli
-  allow_fallback: true
-  timeout: 120
-  max_retries: 2
-  fallback_providers:
-  - claude-cli
+  # Friend-friendly local default. qwen3:14b is a 9.3 GB Ollama model and
+  # leaves useful VRAM headroom on a 16 GB GPU for context/KV cache.
+  provider: ollama
+  primary_provider: ollama
+  fallback_provider: null
+  allow_fallback: false
+  timeout: 300
+  max_retries: 1
+  fallback_providers: []
+  small_provider: ollama
+  small_model: qwen3:14b
   # Phase 17.9.5: optional cheap-model tier. Pure-extraction LLM calls
   # (job-description parsing, resume import) route here when set;
   # creative paths stay on the primary chain. Leave commented out to
@@ -100,9 +103,9 @@ cleanup:
 # global gate still bounds provider load across concurrent workers.
 parallelism:
   llm:
-    max_concurrent_global: 10
+    max_concurrent_global: 1
   bullet_rewrites:
-    max_concurrent_per_task: 5
+    max_concurrent_per_task: 1
   # Per-provider overrides. Add an entry like:
   #   provider:
   #     openai:
@@ -110,4 +113,20 @@ parallelism:
   #     anthropic:
   #       max_concurrent: 4
   # Missing entries inherit the global cap.
-  provider: {}
+  provider:
+    ollama:
+      max_concurrent: 1
+# Cover-letter safety: fail visibly instead of writing generic boilerplate
+# when the configured LLM fails quality or fact-grounding checks.
+generation:
+  cover_letter_fail_closed: true
+
+search:
+  hn_require_known_pay: false
+
+matching:
+  # V1 remains authoritative until V2 shadow/blind/canary gates pass.
+  pipeline_version: v1
+  minimum_display_score: 0.50
+source_registry:
+  enabled: false

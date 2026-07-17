@@ -68,6 +68,28 @@ const PATCH_AGGRESSIVENESS_OPTIONS = [
   { value: "aggressive", label: "Aggressive · rewrite freely to match the JD" },
 ]
 
+const SKIP_REASON_OPTIONS = [
+  { value: "wrong_role_family", label: "Wrong kind of role" },
+  { value: "wrong_work_content", label: "Title fits, actual work does not" },
+  { value: "too_senior", label: "Too senior" },
+  { value: "insufficient_direct_experience", label: "Not enough direct experience" },
+  { value: "missing_required_capability", label: "Missing a required capability" },
+  { value: "missing_credential", label: "Missing a required credential" },
+  { value: "high_selectivity_low_odds", label: "Very unlikely employer / role" },
+  { value: "domain_mismatch", label: "Wrong industry or specialization" },
+  { value: "location_or_work_mode", label: "Location or work mode" },
+  { value: "compensation", label: "Compensation" },
+  { value: "employer_not_interested", label: "Not interested in this employer" },
+  { value: "stale_or_ghost", label: "Looks stale or like a ghost posting" },
+  { value: "broken_apply_link", label: "Broken application link" },
+  { value: "duplicate", label: "Duplicate" },
+  { value: "already_seen", label: "Already reviewed this" },
+  { value: "timing", label: "Bad timing" },
+  { value: "no_time_today", label: "No time today" },
+  { value: "materials_bad", label: "Job is fine; generated materials are bad" },
+  { value: "not_interested_unspecified", label: "Just not interested" },
+]
+
 const state = reactive({
   loading: false,
   error: "",
@@ -90,6 +112,14 @@ const discardDialog = reactive({
   open: false,
   application: null,
   reason: "",
+})
+
+const skipDialog = reactive({
+  open: false,
+  entry: null,
+  primaryReason: "",
+  freeText: "",
+  submitting: false,
 })
 
 const replaceDialog = reactive({
@@ -183,6 +213,26 @@ async function refresh() {
 
 function materialDocumentType(materialType) {
   return materialType.startsWith("cover_letter") ? "cover_letter" : "resume"
+}
+
+// 2026-07-16: material quality digest written by materials.generate into
+// score_breakdown.materials_quality (keyed by document type). Powers the
+// "Template letter" / "N draft warnings" badges so a weak draft is
+// visible without opening the DOCX.
+function materialQuality(entry) {
+  const quality = entry.score_breakdown?.materials_quality || {}
+  let baseline = false
+  let warnings = 0
+  const notes = []
+  for (const [docType, digest] of Object.entries(quality)) {
+    if (!digest) continue
+    if (digest.letter_origin === "deterministic_baseline") baseline = true
+    for (const issue of digest.validation_issues || []) {
+      warnings += 1
+      notes.push(`${docType}: ${issue.type}`)
+    }
+  }
+  return { baseline, warnings, tooltip: notes.join("\n") || "Draft warnings" }
 }
 
 function replaceTemplateOptions() {
@@ -557,11 +607,48 @@ function selectAllPending() {
 }
 
 async function approveOne(entry) {
-  await runAction(() => api.reviewApprove(entry.id, { reviewer: "operator" }))
+  await runAction(() => api.reviewApprove(entry.id, {
+    reviewer: "operator",
+    judgment: "worth_reviewing",
+    action: "saved",
+  }))
 }
 
 async function rejectOne(entry) {
-  await runAction(() => api.reviewReject(entry.id, { reviewer: "operator" }))
+  if (!entry.evaluation_id) {
+    await runAction(() => api.reviewReject(entry.id, { reviewer: "operator" }))
+    return
+  }
+  skipDialog.entry = entry
+  skipDialog.primaryReason = ""
+  skipDialog.freeText = ""
+  skipDialog.open = true
+}
+
+function closeSkipDialog() {
+  if (skipDialog.submitting) return
+  skipDialog.open = false
+  skipDialog.entry = null
+  skipDialog.primaryReason = ""
+  skipDialog.freeText = ""
+}
+
+async function confirmSkip() {
+  if (!skipDialog.entry || !skipDialog.primaryReason) return
+  skipDialog.submitting = true
+  try {
+    await runAction(() => api.reviewReject(skipDialog.entry.id, {
+      reviewer: "operator",
+      judgment: "not_worth_reviewing",
+      action: "skipped",
+      primary_reason: skipDialog.primaryReason,
+      free_text: skipDialog.freeText.trim() || null,
+    }))
+    skipDialog.open = false
+    skipDialog.entry = null
+  } finally {
+    skipDialog.submitting = false
+  }
 }
 
 async function refreshOne(entry) {
@@ -621,6 +708,12 @@ async function bulkApprove() {
 
 async function bulkReject() {
   if (!state.selected.size) return
+  const selectedEntries = state.entries.filter((entry) => state.selected.has(entry.id))
+  if (selectedEntries.some((entry) => entry.evaluation_id)) {
+    state.message = "Skip V2 jobs one at a time so each gets an accurate reason."
+    state.messageVariant = "info"
+    return
+  }
   await runBulk(() =>
     api.reviewBulkReject([...state.selected], { reviewer: "operator" }),
   )
@@ -928,6 +1021,48 @@ onMounted(refresh)
       </CardContent>
     </Card>
 
+    <Dialog :open="skipDialog.open" @update:open="(value) => !value && closeSkipDialog()">
+      <DialogContent class="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Why are you skipping this job?</DialogTitle>
+          <DialogDescription>
+            Pick the main reason. This teaches job matching only when the reason is actually about the job; duplicates, timing, and bad materials stay separate.
+          </DialogDescription>
+        </DialogHeader>
+        <div class="space-y-4 py-2">
+          <label class="block space-y-1 text-sm">
+            <span class="font-medium">Main reason</span>
+            <AppSelect
+              v-model="skipDialog.primaryReason"
+              :options="SKIP_REASON_OPTIONS"
+              placeholder="Choose a reason"
+            />
+          </label>
+          <label class="block space-y-1 text-sm">
+            <span class="font-medium">Optional note</span>
+            <textarea
+              v-model="skipDialog.freeText"
+              class="min-h-20 w-full rounded-md border bg-background px-3 py-2"
+              placeholder="Anything useful for future searches"
+            />
+          </label>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" :disabled="skipDialog.submitting" @click="closeSkipDialog">
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            :disabled="skipDialog.submitting || !skipDialog.primaryReason"
+            @click="confirmSkip"
+          >
+            <Loader2 v-if="skipDialog.submitting" class="h-4 w-4 animate-spin" />
+            Skip job
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
     <Dialog :open="discardDialog.open" @update:open="(value) => !value && closeDiscardDialog()">
       <DialogContent>
         <DialogHeader>
@@ -1187,6 +1322,23 @@ onMounted(refresh)
                 variant="outline"
               >
                 Match {{ formatPercent(entry.score_breakdown.final_score, "0%") }}
+              </Badge>
+              <!-- 2026-07-16: material quality surfacing. A template
+                   (deterministic) letter must never look like a tailored
+                   one — rewrite or regenerate before approving. -->
+              <Badge
+                v-if="materialQuality(entry).baseline"
+                variant="destructive"
+                title="The LLM drafts failed quality checks; this letter is the deterministic template. Rewrite or regenerate it before applying."
+              >
+                Template letter
+              </Badge>
+              <Badge
+                v-else-if="materialQuality(entry).warnings > 0"
+                variant="outline"
+                :title="materialQuality(entry).tooltip"
+              >
+                {{ materialQuality(entry).warnings }} draft warning{{ materialQuality(entry).warnings === 1 ? "" : "s" }}
               </Badge>
             </div>
 

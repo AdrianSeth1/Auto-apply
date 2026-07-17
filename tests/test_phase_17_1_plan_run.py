@@ -13,6 +13,7 @@ from src.orchestration.plan_run import (
     PLAN_RUN_PAUSE_SENTINEL_NAME,
     PlanRunError,
     PlanRunReport,
+    _role_compatible,
     plan_run_pause_sentinel_path,
     plan_runs_paused,
     run_plan,
@@ -45,13 +46,14 @@ async def _search_with_jobs(**_kwargs):
 
 
 class _Breakdown:
-    def __init__(self, job_id: str, score: float):
+    def __init__(self, job_id: str, score: float, *, is_startup: bool = False):
         self.job_id = job_id
         self.company = f"Company {job_id}"
         self.title = "Engineer"
         self.final_score = score
         self.disqualified = False
         self.job_snapshot_id = None
+        self.is_startup = is_startup
 
     def to_dict(self):
         return {
@@ -107,6 +109,95 @@ def test_run_plan_dry_run_selects_jobs(tmp_path: Path):
     assert report.qualified == 2
     assert report.selected == 1
     assert report.materials_task_ids == []
+
+
+def test_startup_bonus_does_not_displace_top_n(tmp_path: Path):
+    async def search(**_kwargs):
+        return {
+            "jobs": [
+                {"id": f"job-{index}", "company": "Company", "title": "Role"}
+                for index in range(1, 9)
+            ]
+        }
+
+    def score(_jobs, _profile_id):
+        return [
+            _Breakdown(f"job-{index}", 1 - index / 100, is_startup=index >= 4)
+            for index in range(1, 9)
+        ]
+
+    report = _async(
+        run_plan(
+            tenant_id="default",
+            profile_id="default",
+            top_n=3,
+            dry_run=True,
+            search_fn=search,
+            score_fn=score,
+            pause_root=tmp_path,
+            now=_clock(),
+        )
+    )
+
+    assert report.selected == 8
+    assert report.startup_bonus_selected == 5
+    assert len(report.selected_jobs) == 8
+    assert report.selected_jobs[0]["job_id"] == "job-1"
+    assert sum(job["is_startup"] for job in report.selected_jobs) == 5
+
+
+def test_exact_company_title_duplicates_use_one_selection_slot(tmp_path: Path):
+    async def search(**_kwargs):
+        return {"jobs": [{"id": f"job-{index}"} for index in range(1, 4)]}
+
+    def score(_jobs, _profile_id):
+        first = _Breakdown("job-1", 0.9)
+        second = _Breakdown("job-2", 0.8)
+        third = _Breakdown("job-3", 0.7)
+        first.company = second.company = "Same Company"
+        first.title = second.title = "Revenue Operations Analyst"
+        third.company = "Different Company"
+        third.title = "Business Analyst"
+        return [first, second, third]
+
+    report = _async(
+        run_plan(
+            tenant_id="default",
+            profile_id="default",
+            top_n=3,
+            dry_run=True,
+            search_fn=search,
+            score_fn=score,
+            pause_root=tmp_path,
+            now=_clock(),
+        )
+    )
+
+    assert report.selected == 2
+    assert report.exact_duplicates_removed == 1
+    assert [job["job_id"] for job in report.selected_jobs] == ["job-1", "job-3"]
+
+
+@pytest.mark.parametrize(
+    ("profile", "title", "expected"),
+    [
+        ("analyst", "Revenue Operations Analyst", True),
+        ("analyst", "Full Stack Engineer", False),
+        ("analyst", "Software Engineers, Data Engineers, Data Scientists", False),
+        ("ai-solutions", "Forward Deployed Engineer", True),
+        ("ai-solutions", "Backend Engineer (Rust, MySQL)", False),
+        ("implementation-consultant", "Clinical Deployment Specialist", True),
+        ("sales-engineer", "Associate Solutions Engineer", True),
+        ("sales-engineer", "Technical Sales Engineer - Custom HVAC Equipment", False),
+        ("sales-engineer", "Associate Territory Sales Engineer", False),
+        ("tam", "Technical Account Manager", True),
+        ("tam", "Customer Success Specialist", True),
+    ],
+)
+def test_role_family_compatibility(profile: str, title: str, expected: bool) -> None:
+    breakdown = _Breakdown("job", 0.8)
+    breakdown.title = title
+    assert _role_compatible(breakdown, profile) is expected
 
 
 def test_run_plan_enqueues_materials_and_prepare(tmp_path: Path):
@@ -207,11 +298,13 @@ def test_plan_run_task_wrapper_dispatches():
     assert mocked.call_args.kwargs["cover_letter_template_id"] == "cover-template"
 
 
-def test_plan_run_entry_registered():
+def test_plan_run_task_registered_but_not_statically_scheduled():
+    """2026-07-16: the static payload-less Beat entry was removed (it always
+    failed on the missing legacy `default` profile). The task itself stays
+    registered for automation plans and manual dispatch."""
     from src.tasks.beat import get_schedule
     from src.tasks.tasks import KNOWN_TASK_NAMES
 
     schedule = get_schedule()
-    assert "plan_run" in schedule
-    assert schedule["plan_run"]["task"] == "orchestration.plan_run"
+    assert "plan_run" not in schedule
     assert "orchestration.plan_run" in KNOWN_TASK_NAMES

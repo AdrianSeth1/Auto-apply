@@ -1,0 +1,23 @@
+schema_version: 1
+version: roles.v1
+families:
+  ai_implementation:
+    archetypes: [workflow_discovery, applied_ai_configuration, customer_deployment, proof_of_concept, enablement]
+    excludes: [ml_research, model_training, distributed_ml_infrastructure, generic_software_engineering]
+  saas_implementation:
+    archetypes: [requirements_gathering, configuration, onboarding, go_live, training, project_delivery]
+    excludes: [erp_specialist, clinical_licensure, enterprise_program_leadership]
+  revenue_operations:
+    archetypes: [funnel_analysis, dashboards, crm_operations, process_improvement, stakeholder_reporting]
+    excludes: [quant_finance, actuarial, cybersecurity, fraud, advanced_data_science]
+  solutions_engineering:
+    archetypes: [technical_discovery, demonstrations, proof_of_concept, solution_design, integrations]
+    excludes: [industrial_sales, hardware_territory, enterprise_security, channel_sales]
+  technical_customer_success:
+    archetypes: [onboarding, adoption, enablement, customer_health, technical_support]
+    excludes: [strategic_portfolio, renewal_quota, executive_escalations, on_call_leadership]
+seniority:
+  entry: [intern, new grad, junior, associate, entry]
+  early_mid: [specialist, consultant, analyst, engineer, manager]
+  senior: [senior, lead]
+  staff: [staff, principal, director, head, vice president]

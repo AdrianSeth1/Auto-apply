@@ -26,6 +26,9 @@ def create_application(
     match_score: float | None = None,
     resume_version: str | None = None,
     cover_letter_version: str | None = None,
+    profile_variant: str | None = None,
+    material_variant: str | None = None,
+    evaluation_id: uuid.UUID | None = None,
 ) -> Application:
     """Create a new application record in DISCOVERED state."""
     app = Application(
@@ -34,6 +37,9 @@ def create_application(
         match_score=match_score,
         resume_version=resume_version,
         cover_letter_version=cover_letter_version,
+        profile_variant=profile_variant,
+        material_variant=material_variant,
+        evaluation_id=evaluation_id,
     )
     session.add(app)
     session.flush()
@@ -74,6 +80,10 @@ def sync_state_to_db(
 
     if state.status == AppStatus.SUBMITTED and app.submitted_at is None:
         app.submitted_at = datetime.now(UTC)
+        if app.created_at:
+            app.time_spent_seconds = max(
+                0, int((app.submitted_at - app.created_at).total_seconds())
+            )
 
     session.flush()
     logger.info("Synced application %s -> %s", app_id, state.status)
