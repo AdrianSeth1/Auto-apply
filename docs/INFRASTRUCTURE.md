@@ -19,6 +19,14 @@ Five long-running processes on one Windows machine:
 Celery Beat (started by `autoapply start`) drives scheduled maintenance
 (cache eviction, artifact cleanup, JD health checks) and automation plans.
 
+Job Pool V2 currently runs as an additive shadow pipeline. One acquisition
+snapshot is evaluated against five target specs, then written to immutable
+evaluation and portfolio ledgers. In `v2_shadow` it creates no review entries,
+materials, applications, or submissions. `/jobs/quality` reads that ledger for
+operator audit. `matching.pipeline_version: v1` remains the production
+authority until the replay, seven-cycle shadow, blinded-review, canary, and
+two-week rollback gates pass.
+
 The SPA is **not** served by a dev server in normal use: `npx vite build`
 writes to `src/web/static/spa/` and FastAPI serves those files. No process
 hot-reloads — restart web/worker after code changes.

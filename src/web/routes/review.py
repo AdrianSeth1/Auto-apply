@@ -83,6 +83,11 @@ class ReviewActionPayload(BaseModel):
 
     reason: str | None = None
     reviewer: str | None = None
+    judgment: str | None = None
+    action: str | None = None
+    primary_reason: str | None = None
+    secondary_reasons: list[str] = Field(default_factory=list)
+    free_text: str | None = None
 
 
 class BulkActionPayload(BaseModel):
@@ -105,6 +110,61 @@ class BulkRejectByFilterPayload(BaseModel):
     keyword_in_title: str | None = None
     reason: str | None = None
     reviewer: str | None = None
+
+
+def _record_v2_feedback(
+    session,
+    entry,
+    payload: ReviewActionPayload,
+    *,
+    negative: bool,
+) -> None:
+    """Persist structured feedback only for V2-bound review entries.
+
+    Legacy cards keep accepting the historical free-form ``reason`` payload.
+    A V2 skip requires a structured primary reason; raising inside the route's
+    transaction rolls back the status transition as well.
+    """
+
+    if entry.evaluation_id is None:
+        return
+    if negative and not payload.primary_reason:
+        raise HTTPException(
+            422,
+            "V2 review rejections require primary_reason so fit, materials, and process failures stay separate",
+        )
+    from pydantic import ValidationError  # noqa: PLC0415
+
+    from src.application.feedback_v2 import (  # noqa: PLC0415
+        ReviewFeedbackInputV2,
+        persist_feedback,
+    )
+    from src.core.models import JobTargetEvaluation  # noqa: PLC0415
+
+    evaluation = session.get(JobTargetEvaluation, entry.evaluation_id)
+    if evaluation is None:
+        raise HTTPException(409, "review entry evaluation binding is missing")
+    try:
+        feedback = ReviewFeedbackInputV2(
+            evaluation_id=entry.evaluation_id,
+            target_id=evaluation.target_id,
+            judgment=(
+                payload.judgment
+                or ("not_worth_reviewing" if negative else "worth_reviewing")
+            ),
+            action=payload.action or ("skipped" if negative else "saved"),
+            primary_reason=payload.primary_reason,
+            secondary_reasons=payload.secondary_reasons,
+            free_text=payload.free_text or payload.reason,
+        )
+    except ValidationError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    persist_feedback(
+        session,
+        feedback,
+        review_id=entry.id,
+        tenant_id=entry.tenant_id,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -388,6 +448,11 @@ async def bulk_reject_route(payload: BulkActionPayload) -> dict[str, Any]:
         for eid in payload.entry_ids:
             entry = get_entry_db(session, eid)
             if entry is not None and entry.tenant_id == tenant:
+                if entry.evaluation_id is not None:
+                    raise HTTPException(
+                        422,
+                        "V2 jobs must be skipped individually with a structured reason",
+                    )
                 owned.append(eid)
         result = bulk_reject(
             session,
@@ -408,6 +473,24 @@ async def bulk_reject_by_filter_route(
         )
     factory = get_session_factory()
     with factory() as session, session.begin():
+        from src.core.models import ReviewQueueEntry  # noqa: PLC0415
+
+        v2_stmt = select(ReviewQueueEntry.id).where(
+            ReviewQueueEntry.tenant_id == _tenant(),
+            ReviewQueueEntry.status == "pending",
+            ReviewQueueEntry.evaluation_id.is_not(None),
+        )
+        if payload.company:
+            v2_stmt = v2_stmt.where(ReviewQueueEntry.company.ilike(f"%{payload.company}%"))
+        if payload.keyword_in_title:
+            v2_stmt = v2_stmt.where(
+                ReviewQueueEntry.title.ilike(f"%{payload.keyword_in_title}%")
+            )
+        if session.scalar(v2_stmt.limit(1)) is not None:
+            raise HTTPException(
+                422,
+                "The filter includes V2 jobs; skip those individually so each has a reason",
+            )
         result = bulk_reject_by_filter(
             session,
             tenant_id=_tenant(),
@@ -435,13 +518,15 @@ async def approve_route(
         entry = get_entry_db(session, entry_id)
         if entry is None or entry.tenant_id != _tenant():
             raise HTTPException(404, "review entry not found")
-        return _wrap_transition(
+        result = _wrap_transition(
             approve_entry,
             session,
             entry_id,
             reviewer=payload.reviewer,
             reason=payload.reason,
         )
+        _record_v2_feedback(session, entry, payload, negative=False)
+        return result
 
 
 @router.post("/{entry_id}/reject")
@@ -453,13 +538,15 @@ async def reject_route(
         entry = get_entry_db(session, entry_id)
         if entry is None or entry.tenant_id != _tenant():
             raise HTTPException(404, "review entry not found")
-        return _wrap_transition(
+        result = _wrap_transition(
             reject_entry,
             session,
             entry_id,
             reviewer=payload.reviewer,
             reason=payload.reason,
         )
+        _record_v2_feedback(session, entry, payload, negative=True)
+        return result
 
 
 @router.post("/{entry_id}/refresh")
@@ -714,6 +801,7 @@ async def mark_submitted_manually_route(
                     tenant_id=entry.tenant_id,
                     job_id=legacy_job.id,
                     job_snapshot_id=entry.job_snapshot_id,
+                    evaluation_id=entry.evaluation_id,
                     status=str(AppStatus.SUBMITTED),
                     match_score=score,
                     resume_version=entry.materials_path,

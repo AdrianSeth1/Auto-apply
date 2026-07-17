@@ -1,0 +1,24 @@
+schema_version: 2
+registry_enabled: false
+interactive_snapshot_max_age_hours: 6
+adapters:
+  greenhouse: {enabled: true, compliance: approved_public_api}
+  lever: {enabled: true, compliance: approved_public_api}
+  ashby: {enabled: true, compliance: approved_public_api}
+  workday: {enabled: true, compliance: approved_public_api}
+  adzuna: {enabled: true, compliance: configured_api}
+  hn: {enabled: true, compliance: approved_public_feed}
+  remotive: {enabled: true, compliance: approved_public_api}
+  smartrecruiters: {enabled: false, compliance: conformance_required}
+  workable: {enabled: false, compliance: conformance_required}
+  recruitee: {enabled: false, compliance: conformance_required}
+  linkedin: {enabled: false, compliance: account_safety_blocked}
+  wellfound: {enabled: false, compliance: automation_blocked}
+  yc_jobs: {enabled: false, compliance: terms_review_required}
+health:
+  quarantine_after_failures: 3
+  quarantine_min_span_hours: 24
+  quarantine_days: 7
+  dormant_after_empty_runs: 7
+  dormant_after_nonempty_days: 14
+  canary_interval_days: 7

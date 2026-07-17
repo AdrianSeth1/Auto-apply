@@ -1,0 +1,88 @@
+schema_version: 2
+id: revenue-operations-analyst
+aliases: [analyst]
+display_name: Revenue, Business & Product Operations Analyst
+enabled: true
+priority: 0.6
+positioning: Operations analyst who turns messy workflows into measurable processes using dashboards, research, SQL-adjacent analysis, and cross-functional execution.
+role:
+  core_titles:
+    - revenue operations analyst
+    - sales operations analyst
+    - operations analyst
+    - business operations analyst
+    - product operations analyst
+  adjacent_titles:
+    - business analyst
+    - growth operations analyst
+    - customer operations analyst
+    - go to market analyst
+  stretch_titles:
+    - product analyst
+    - strategy and operations analyst
+  description_only_titles:
+    - operations associate
+  excluded_title_terms:
+    - financial analyst
+    - quantitative analyst
+    - actuarial analyst
+    - cybersecurity analyst
+    - fraud analyst
+    - investment analyst
+    - supply chain
+    - procurement
+    - logistics
+    - legal operations
+    - billing operations
+    - IT operations
+  responsibility_signals:
+    - analyze business processes
+    - build dashboards
+    - sales funnel
+    - operational metrics
+    - process improvement
+    - stakeholder reporting
+    - CRM data
+  negative_responsibility_signals:
+    - financial modeling
+    - portfolio valuation
+    - threat detection
+    - advanced experimentation platform
+    - actuarial exams
+    - purchase order lifecycle
+    - supply chain management
+    - procurement workflows
+  domain_signals: [revenue operations, customer operations, product operations, B2B SaaS]
+candidacy:
+  core_max_required_years: 3
+  stretch_max_required_years: 4
+  allowed_seniority: [entry, associate, junior, unknown]
+  unsupported_specializations: [quant finance, actuarial, cybersecurity, fraud, advanced data science]
+  required_capability_groups:
+    - any_of: [cap_analytics, cap_analysis, cap_analytical]
+      weight: 3.0
+    - any_of: [cap_dashboards, cap_looker_studio, cap_data]
+      weight: 2.0
+    - any_of: [cap_process_improvement, cap_process_design, cap_operations]
+      weight: 2.0
+  preferred_capabilities:
+    - {id: cap_funnel, weight: 1.5}
+    - {id: cap_research, weight: 1.0}
+    - {id: cap_statistics, weight: 1.0}
+constraints:
+  employment_types: [fulltime, contract]
+  geography_policy: candidate_default
+  compensation_policy: candidate_default
+  active_clearance: reject
+  staffing_intermediary: reject_auto
+discovery:
+  query_terms: [revenue operations analyst, sales operations analyst, go to market operations analyst, commercial operations analyst, business operations analyst, product operations analyst, CRM analyst, business systems analyst, operations analyst]
+  description_only_lane: false
+  employer_cohorts: [b2b_saas, revops_software, healthtech_saas, customer_operations]
+selection:
+  minimum_core_tier: B
+  per_run_soft_cap: 5
+  allow_stretch_in_core: false
+materials:
+  preferred_evidence_refs: [exp_sds, exp_baylor_university, proj_autoapply]
+  section_priority: [experience, projects, skills, education]

@@ -496,6 +496,9 @@ export const api = {
   outcomeAnalytics() {
     return request("/api/analytics/outcomes")
   },
+  funnelAnalytics(weeks = 12) {
+    return request(`/api/analytics/funnel?weeks=${encodeURIComponent(weeks)}`)
+  },
   markApplicationSubmitted(applicationId) {
     return request(`/api/applications/${encodeURIComponent(applicationId)}/mark-submitted`, {
       method: "POST",
@@ -736,11 +739,11 @@ export const api = {
       method: "DELETE",
     })
   },
-  runAutomationPlan(planId) {
+  runAutomationPlan(planId, { dryRun = true } = {}) {
     return request(`/api/automation-plans/${encodeURIComponent(planId)}/run-now`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ dry_run: dryRun }),
     })
   },
   morningDigest(windowHours = 24) {

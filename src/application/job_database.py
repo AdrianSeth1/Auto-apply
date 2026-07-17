@@ -66,6 +66,7 @@ def _union_select():
         Job.seniority.label("seniority"),
         Job.ats_type.label("ats_type"),
         Job.application_url.label("application_url"),
+        Job.canonical_fingerprint.label("canonical_fingerprint"),
         Job.description.is_not(None).label("has_description"),
         Job.discovered_at.label("discovered_at"),
         exists(
@@ -97,6 +98,7 @@ def _union_select():
             func.coalesce(JobSnapshot.application_url, JobPosting.canonical_url).label(
                 "application_url"
             ),
+            JobPosting.canonical_fingerprint.label("canonical_fingerprint"),
             JobSnapshot.description.is_not(None).label("has_description"),
             JobPosting.first_seen_at.label("discovered_at"),
             # Index postings gain a legacy twin (and drop out of this arm)
@@ -173,9 +175,10 @@ def list_db_jobs(
             "companies": _company_facet(session, jobs_sq),
         }
 
+        duplicate_counts = _duplicate_counts(session, jobs_sq, page)
         return {
             "ok": True,
-            "jobs": [_serialize_row(row) for row in page],
+            "jobs": [_serialize_row(row, duplicate_counts) for row in page],
             "total": total,
             "limit": limit,
             "offset": offset,
@@ -271,6 +274,8 @@ def generate_materials_for_db_jobs(
                         job_id=job.id,
                         status="QUALIFIED",
                         match_score=(job.raw_data or {}).get("match_score"),
+                        profile_variant=(job.raw_data or {}).get("best_profile"),
+                        material_variant="+".join(document_types),
                     )
                     session.add(application)
                     session.flush()
@@ -388,8 +393,22 @@ def _company_facet(session, jobs_sq) -> list[str]:
     return [row[0] for row in rows if row[0]]
 
 
-def _serialize_row(row) -> dict[str, Any]:
+def _duplicate_counts(session, jobs_sq, rows) -> dict[str, int]:
+    fingerprints = {row["canonical_fingerprint"] for row in rows if row["canonical_fingerprint"]}
+    if not fingerprints:
+        return {}
+    counts = session.execute(
+        select(jobs_sq.c.canonical_fingerprint, func.count())
+        .where(jobs_sq.c.canonical_fingerprint.in_(fingerprints))
+        .group_by(jobs_sq.c.canonical_fingerprint)
+    ).all()
+    return {fingerprint: count for fingerprint, count in counts if count > 1}
+
+
+def _serialize_row(row, duplicate_counts: dict[str, int] | None = None) -> dict[str, Any]:
     discovered = row["discovered_at"]
+    fingerprint = row.get("canonical_fingerprint")
+    duplicate_count = (duplicate_counts or {}).get(fingerprint, 0)
     return {
         "id": str(row["id"]),
         "source": row["source"],
@@ -404,4 +423,7 @@ def _serialize_row(row) -> dict[str, Any]:
         "has_description": bool(row["has_description"]),
         "has_application": bool(row["has_application"]),
         "discovered_at": discovered.isoformat() if discovered else None,
+        "possible_duplicate": duplicate_count > 1,
+        "duplicate_cluster_id": fingerprint if duplicate_count > 1 else None,
+        "duplicate_cluster_size": duplicate_count,
     }

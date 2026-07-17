@@ -22,9 +22,13 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
 from pathlib import Path
 
 from src.intake.ashby import AshbyScraper
+from src.intake.smartrecruiters import SmartRecruitersScraper
+from src.intake.workable import WorkablePublicScraper
+from src.intake.recruitee import RecruiteeScraper
 from src.intake.base import ScraperError
 from src.intake.batch import enrich_requirements, load_company_list
 from src.intake.filters import load_filter_profiles
@@ -118,6 +122,16 @@ def _slug_label(slug: _BoardSlug) -> str:
     return slug[0] if isinstance(slug, tuple) else slug
 
 
+def _endpoint_identity(slug: _BoardSlug) -> str:
+    """Stable DB-safe identity string for one configured board.
+
+    Unlike ``_slug_label`` (log-friendly, lossy for Workday), this keeps
+    the full tenant/host/site triple so two different Workday sites for
+    the same tenant don't collide under one ``SourceEndpoint`` row.
+    """
+    return "/".join(slug) if isinstance(slug, tuple) else str(slug)
+
+
 def search_jobs(
     profile: str | None = "default",
     config_dir: Path = DEFAULT_CONFIG_DIR,
@@ -125,6 +139,7 @@ def search_jobs(
     parse_jds: bool = True,
     use_llm: bool = False,
     force_refresh: bool = False,
+    endpoint_metrics: list[dict] | None = None,
 ) -> list[RawJob]:
     """Search for jobs from ATS boards matching a filter profile.
 
@@ -135,6 +150,18 @@ def search_jobs(
         parse_jds: Whether to parse JDs for structured requirements.
         use_llm: Whether to use LLM for JD parsing.
         force_refresh: Bypass the board TTL cache and re-fetch every board.
+        endpoint_metrics: SUP-01B out-parameter. When a list is passed, one
+            dict is appended per attempted board -- success, empty, error, or
+            cache hit -- with real start/end timestamps, duration, provider/
+            normalized/malformed record counts (where the scraper reports
+            them), and error classification. This is the smallest interface
+            for carrying real per-endpoint telemetry out of this function
+            without duplicating the fetch pipeline: callers that don't pass
+            a list get none of this (unchanged behavior); callers that do
+            (``src.orchestration.portfolio_run``) get it appended in place,
+            since ``_fetch_board`` runs inside this function's own
+            ThreadPoolExecutor and a plain ``list.append`` from worker
+            threads is safe under the GIL.
 
     Returns:
         List of RawJob objects that passed the filter.
@@ -159,6 +186,9 @@ def search_jobs(
         "greenhouse": GreenhouseScraper,
         "lever": LeverScraper,
         "ashby": AshbyScraper,
+        "smartrecruiters": SmartRecruitersScraper,
+        "workable": WorkablePublicScraper,
+        "recruitee": RecruiteeScraper,
         "workday": WorkdayScraper,
     }
 
@@ -189,24 +219,104 @@ def search_jobs(
             continue
         board_tasks.extend((ats, slug) for slug in slugs)
 
+    def _tag_endpoint(jobs: list[RawJob], ats: str, endpoint_key: str) -> None:
+        """Exact, non-guessed endpoint attribution (SUP-01B req #5): every
+        job returned by one ``_fetch_board`` call is definitively from that
+        one endpoint, so tag it here rather than inferring it later from
+        company name. Persisted onto ``JobSnapshot.raw_data`` downstream."""
+        for job in jobs:
+            if job.raw_data is None:
+                job.raw_data = {}
+            job.raw_data["source_endpoint_adapter"] = ats
+            job.raw_data["source_endpoint_key"] = endpoint_key
+
+    def _record_metric(**fields) -> None:
+        if endpoint_metrics is not None:
+            endpoint_metrics.append(fields)
+
     def _fetch_board(ats: str, slug: str | tuple[str, str, str]) -> list[RawJob]:
         cache_key = (ats, slug, parse_jds)
+        endpoint_key = _endpoint_identity(slug)
+        started_at = datetime.now(UTC)
+        started_monotonic = time.monotonic()
         if not force_refresh:
             cached = _board_cache_get(cache_key)
             if cached is not None:
                 logger.info(
                     "[%s/%s] board cache hit (%d jobs)", ats, _slug_label(slug), len(cached)
                 )
+                # Cache hits don't tag jobs again -- the copies returned by
+                # _board_cache_get were tagged the run they were first
+                # fetched, and RawJob.model_copy(deep=True) preserves
+                # raw_data, so the tag already traveled with them.
+                _record_metric(
+                    adapter=ats,
+                    endpoint_key=endpoint_key,
+                    started_at=started_at,
+                    finished_at=datetime.now(UTC),
+                    duration_ms=0,
+                    status="cache_hit",
+                    http_status=None,
+                    error_code=None,
+                    error_detail=None,
+                    provider_records=len(cached),
+                    normalized_records=len(cached),
+                    malformed_records=None,
+                    from_cache=True,
+                )
                 return cached
-        with scraper_map[ats]() as scraper:
-            if ats == "workday":
-                tenant, host, site = slug
-                jobs = scraper.fetch_jobs({"tenant": tenant, "host": host, "site": site})
-            else:
-                jobs = scraper.fetch_jobs(slug)
+        try:
+            with scraper_map[ats]() as scraper:
+                if ats == "workday":
+                    tenant, host, site = slug
+                    jobs = scraper.fetch_jobs({"tenant": tenant, "host": host, "site": site})
+                else:
+                    jobs = scraper.fetch_jobs(slug)
+                stats = getattr(scraper, "last_fetch_stats", None)
+        except Exception as exc:
+            # One broken employer board must not fail the whole discovery
+            # run (SUP-01B req #3) -- record the attempt as a failure and
+            # re-raise so the existing per-future try/except below still
+            # does its normal skip-and-continue + error-count bookkeeping.
+            # Nothing about that isolation behavior changes here.
+            _record_metric(
+                adapter=ats,
+                endpoint_key=endpoint_key,
+                started_at=started_at,
+                finished_at=datetime.now(UTC),
+                duration_ms=int((time.monotonic() - started_monotonic) * 1000),
+                status="error",
+                http_status=None,
+                error_code=type(exc).__name__,
+                error_detail=str(exc)[:500],
+                provider_records=0,
+                normalized_records=0,
+                malformed_records=0,
+                from_cache=False,
+            )
+            raise
+        _tag_endpoint(jobs, ats, endpoint_key)
         if parse_jds:
             jobs = enrich_requirements(jobs, use_llm=use_llm)
         _board_cache_put(cache_key, jobs)
+        provider_records = stats.get("provider_records") if stats else None
+        normalized_records = stats.get("normalized_records") if stats else len(jobs)
+        malformed_records = stats.get("malformed_records") if stats else None
+        _record_metric(
+            adapter=ats,
+            endpoint_key=endpoint_key,
+            started_at=started_at,
+            finished_at=datetime.now(UTC),
+            duration_ms=int((time.monotonic() - started_monotonic) * 1000),
+            status="empty" if not jobs else "success",
+            http_status=None,
+            error_code=None,
+            error_detail=None,
+            provider_records=provider_records if provider_records is not None else len(jobs),
+            normalized_records=normalized_records,
+            malformed_records=malformed_records,
+            from_cache=False,
+        )
         return jobs
 
     board_results: dict[tuple[str, str | tuple[str, str, str]], list[RawJob]] = {}

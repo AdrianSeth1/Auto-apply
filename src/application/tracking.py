@@ -108,6 +108,26 @@ def update_application_outcome(*, application_id: UUID, outcome: str) -> dict:
         session_factory = get_session_factory(load_config())
         with session_factory() as session:
             app = update_outcome(session, application_id, outcome)
+            if outcome in {"oa", "interview", "offer"}:
+                from src.application.funnel import record_event
+
+                stage = "screen" if outcome == "oa" else outcome
+                record_event(
+                    session,
+                    entity_type="application",
+                    entity_id=app.id,
+                    stage=stage,
+                    job_id=app.job_id,
+                    application_id=app.id,
+                    evaluation_id=app.evaluation_id,
+                    journey_key=str(app.evaluation_id) if app.evaluation_id else None,
+                    profile_variant=app.profile_variant,
+                    material_variant=app.material_variant,
+                    time_spent_seconds=app.time_spent_seconds,
+                    metadata={"outcome": outcome},
+                    occurred_at=app.outcome_updated_at,
+                    tenant_id=app.tenant_id,
+                )
             session.commit()
     except ValueError as exc:
         return {
@@ -277,6 +297,8 @@ def mark_application_submitted_manually(*, application_id: UUID) -> dict:
             app.state_history = history
             app.status = str(AppStatus.SUBMITTED)
             app.submitted_at = now
+            if app.created_at:
+                app.time_spent_seconds = max(0, int((now - app.created_at).total_seconds()))
 
             # Clear matching review entries so the pile empties too.
             entries = (
@@ -301,6 +323,25 @@ def mark_application_submitted_manually(*, application_id: UUID) -> dict:
                     )
                 except Exception:  # noqa: BLE001 -- entry cleanup is best-effort
                     logger.debug("review entry cleanup skipped", exc_info=True)
+
+            from src.application.funnel import record_event
+
+            record_event(
+                session,
+                entity_type="application",
+                entity_id=app.id,
+                stage="applied",
+                job_id=app.job_id,
+                application_id=app.id,
+                evaluation_id=app.evaluation_id,
+                journey_key=str(app.evaluation_id) if app.evaluation_id else None,
+                profile_variant=app.profile_variant,
+                material_variant=app.material_variant,
+                time_spent_seconds=app.time_spent_seconds,
+                metadata={"submission_method": "manual"},
+                occurred_at=now,
+                tenant_id=app.tenant_id,
+            )
 
             session.commit()
             return {

@@ -284,6 +284,11 @@ onMounted(() => {
                   class="chip subtle"
                   title="Materials already generated — regenerate from its card under Awaiting Review"
                 >Prepared</span>
+                <span
+                  v-if="job.possible_duplicate"
+                  class="chip warning"
+                  :title="`${job.duplicate_cluster_size} records may represent this same role; records are not merged automatically.`"
+                >Possible duplicate ×{{ job.duplicate_cluster_size }}</span>
               </td>
               <td class="p-3 text-muted-foreground">{{ job.location || "—" }}</td>
               <td class="p-3"><span v-if="job.employment_type" class="chip subtle">{{ prettyLabel(job.employment_type) }}</span></td>

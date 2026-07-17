@@ -131,17 +131,37 @@ def _fit_skills(
 def _fit_total_bullets(document: ResumeDocument, max_total: int | None) -> None:
     if not max_total:
         return
+    protected_experience = _protected_experience_ids(document)
     while _bullet_count(document) > max_total:
         weakest = None
         for item in [*document.projects, *document.experiences]:
-            if not item.bullets:
+            minimum = (
+                2
+                if item.source_id in protected_experience
+                else 1
+            )
+            if len(item.bullets) <= minimum:
                 continue
             candidate = min(item.bullets, key=lambda bullet: bullet.score)
-            if weakest is None or candidate.score < weakest[1].score:
-                weakest = (item, candidate)
+            # Prefer removing surplus project bullets before professional
+            # evidence. Relevance still decides within each section.
+            section_priority = 0 if item.source_type == "project" else 1
+            key = (section_priority, candidate.score)
+            if weakest is None or key < weakest[2]:
+                weakest = (item, candidate, key)
         if weakest is None:
             return
         weakest[0].bullets.remove(weakest[1])
+
+
+def _protected_experience_ids(document: ResumeDocument) -> set[str]:
+    """Protect two bullets on the two most relevant work experiences."""
+    ranked = sorted(
+        document.experiences,
+        key=lambda item: max((bullet.score for bullet in item.bullets), default=0.0),
+        reverse=True,
+    )
+    return {item.source_id for item in ranked[:2]}
 
 
 def _bullet_count(document: ResumeDocument) -> int:

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from src.core.models import Job
 from src.intake.schema import RawJob
+from src.jobs.identity import canonical_fingerprint
 
 logger = logging.getLogger("autoapply.intake.storage")
 
@@ -18,7 +19,7 @@ logger = logging.getLogger("autoapply.intake.storage")
 def upsert_jobs(session: Session, jobs: list[RawJob]) -> tuple[int, int]:
     """Persist jobs to the database, skipping duplicates.
 
-    Deduplication key: source + company (normalized) + source_id.
+    Deduplication key: normalized source + source_id.
     If a job already exists (same key), it is skipped.
 
     Returns:
@@ -53,6 +54,12 @@ def upsert_jobs(session: Session, jobs: list[RawJob]) -> tuple[int, int]:
             visa_sponsorship=raw.requirements.visa_sponsorship,
             ats_type=raw.ats_type,
             application_url=raw.application_url,
+            canonical_fingerprint=canonical_fingerprint(
+                company=raw.company,
+                title=raw.title,
+                location=raw.location,
+                application_url=raw.application_url,
+            ),
             raw_data=raw.raw_data,
             discovered_at=raw.discovered_at,
             expires_at=raw.expires_at,
@@ -74,23 +81,17 @@ def upsert_jobs(session: Session, jobs: list[RawJob]) -> tuple[int, int]:
 
 def _load_existing_keys(session: Session, jobs: list[RawJob]) -> set[str]:
     """Load dedup keys for jobs that might already be in the DB."""
-    companies = {j.company.lower() for j in jobs}
-    sources = {j.source for j in jobs}
+    sources = {j.source.strip().lower() for j in jobs}
 
-    # NOTE: ``companies`` is lowercased but the DB stores the original
-    # casing ("Stripe"), so the comparison must be case-insensitive.
-    # A case-sensitive ``Job.company.in_(...)`` here matched nothing,
-    # which made every search re-insert the entire board (found as
-    # ~21k duplicate rows on 2026-07-01).
     existing = (
-        session.query(Job.source, Job.company, Job.source_id)
-        .filter(Job.source.in_(sources), func.lower(Job.company).in_(companies))
+        session.query(Job.source, Job.source_id)
+        .filter(func.lower(func.trim(Job.source)).in_(sources))
         .all()
     )
 
     keys = set()
     for row in existing:
-        keys.add(f"{row.source}::{row.company.lower()}::{row.source_id or ''}")
+        keys.add(f"{(row.source or '').strip().lower()}::{(row.source_id or '').strip()}")
 
     return keys
 
@@ -108,18 +109,15 @@ def persist_and_sync_ids(session: Session, jobs: list[RawJob]) -> None:
     if not jobs:
         return
 
-    companies = {j.company.lower() for j in jobs}
-    sources = {j.source for j in jobs}
+    sources = {j.source.strip().lower() for j in jobs}
 
-    # Case-insensitive company match — see the comment in
-    # ``_load_existing_keys`` for the duplicate-explosion bug this fixes.
     existing_rows = (
-        session.query(Job.id, Job.source, Job.company, Job.source_id)
-        .filter(Job.source.in_(sources), func.lower(Job.company).in_(companies))
+        session.query(Job.id, Job.source, Job.source_id)
+        .filter(func.lower(func.trim(Job.source)).in_(sources))
         .all()
     )
     key_to_id: dict[str, object] = {
-        f"{row.source}::{row.company.lower()}::{row.source_id}": row.id
+        f"{(row.source or '').strip().lower()}::{(row.source_id or '').strip()}": row.id
         for row in existing_rows
     }
 
@@ -144,6 +142,12 @@ def persist_and_sync_ids(session: Session, jobs: list[RawJob]) -> None:
                 visa_sponsorship=raw.requirements.visa_sponsorship,
                 ats_type=raw.ats_type,
                 application_url=raw.application_url,
+                canonical_fingerprint=canonical_fingerprint(
+                    company=raw.company,
+                    title=raw.title,
+                    location=raw.location,
+                    application_url=raw.application_url,
+                ),
                 raw_data=raw.raw_data,
                 discovered_at=raw.discovered_at,
                 expires_at=raw.expires_at,
@@ -156,7 +160,10 @@ def persist_and_sync_ids(session: Session, jobs: list[RawJob]) -> None:
                 session.rollback()
                 row = (
                     session.query(Job.id)
-                    .filter(Job.source == raw.source, Job.source_id == raw.source_id)
+                    .filter(
+                        func.lower(func.trim(Job.source)) == raw.source.strip().lower(),
+                        func.trim(Job.source_id) == raw.source_id.strip(),
+                    )
                     .first()
                 )
                 if row:

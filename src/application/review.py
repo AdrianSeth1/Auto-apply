@@ -63,6 +63,8 @@ class CreateEntryArgs:
     company: str | None
     title: str | None
     run_id: str | None = None
+    evaluation_id: uuid.UUID | str | None = None
+    portfolio_decision_id: uuid.UUID | str | None = None
 
 
 def serialize_entry(entry: ReviewQueueEntry) -> dict[str, Any]:
@@ -86,6 +88,10 @@ def serialize_entry(entry: ReviewQueueEntry) -> dict[str, Any]:
         "status": entry.status,
         "decision": entry.decision,
         "reason": entry.reason,
+        "evaluation_id": str(entry.evaluation_id) if entry.evaluation_id else None,
+        "portfolio_decision_id": (
+            str(entry.portfolio_decision_id) if entry.portfolio_decision_id else None
+        ),
         "reviewer": entry.reviewer,
         "created_at": entry.created_at.isoformat() if entry.created_at else None,
         "reviewed_at": (
@@ -134,6 +140,11 @@ def create_entry(session: Session, args: CreateEntryArgs) -> ReviewQueueEntry:
         .first()
     )
     if existing is not None:
+        if existing.evaluation_id is None:
+            existing.evaluation_id = _coerce_uuid(args.evaluation_id)
+        if existing.portfolio_decision_id is None:
+            existing.portfolio_decision_id = _coerce_uuid(args.portfolio_decision_id)
+        session.flush()
         logger.info(
             "review_queue: reusing existing pending entry id=%s for job_id=%s",
             existing.id,
@@ -150,10 +161,30 @@ def create_entry(session: Session, args: CreateEntryArgs) -> ReviewQueueEntry:
         score_breakdown=args.score_breakdown,
         company=args.company,
         title=args.title,
+        evaluation_id=_coerce_uuid(args.evaluation_id),
+        portfolio_decision_id=_coerce_uuid(args.portfolio_decision_id),
         status="pending",
     )
     session.add(entry)
     session.flush()
+    if entry.evaluation_id is not None:
+        try:
+            from src.application.funnel import record_event
+
+            record_event(
+                session,
+                entity_type="review",
+                entity_id=entry.id,
+                stage="surfaced",
+                job_id=entry.job_id,
+                evaluation_id=entry.evaluation_id,
+                journey_key=str(entry.evaluation_id),
+                profile_variant=(entry.score_breakdown or {}).get("target_id"),
+                metadata={"portfolio_decision_id": str(entry.portfolio_decision_id or "")},
+                tenant_id=entry.tenant_id,
+            )
+        except Exception:  # analytics never blocks card creation
+            logger.warning("Failed to record V2 surfaced event", exc_info=True)
     return entry
 
 
@@ -209,6 +240,27 @@ def _transition(
         entry.reviewed_at = now
     if set_submitted:
         entry.submitted_at = now
+    try:
+        from src.application.funnel import record_event
+
+        stage = "applied" if set_submitted else "reviewed"
+        record_event(
+            session,
+            entity_type="review",
+            entity_id=entry.id,
+            stage=stage,
+            job_id=entry.job_id,
+            posting_id=entry.job_id if entry.job_snapshot_id else None,
+            evaluation_id=entry.evaluation_id,
+            journey_key=str(entry.evaluation_id) if entry.evaluation_id else None,
+            profile_variant=(entry.score_breakdown or {}).get("best_profile"),
+            material_variant=entry.materials_path,
+            metadata={"decision": decision, "review_status": new_status},
+            occurred_at=now,
+            tenant_id=entry.tenant_id,
+        )
+    except Exception:  # noqa: BLE001 -- analytics cannot block review decisions
+        logger.warning("Failed to record review funnel event", exc_info=True)
     session.flush()
     return entry
 

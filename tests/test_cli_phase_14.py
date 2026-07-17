@@ -86,11 +86,13 @@ def test_schedule_list_renders_all_six_entries() -> None:
     for name in (
         "daily_search",
         "jd_health_check",
-        "linkedin_cookie_refresh",
         "cache_eviction",
         "gate_expire_sweep",
     ):
         assert name in result.output
+    # Account-safety policy: LinkedIn refresh remains manually callable but
+    # must not be scheduled after the rehab restriction warning.
+    assert "linkedin_cookie_refresh" not in result.output
 
 
 def test_schedule_list_json_outputs_structured_payload() -> None:

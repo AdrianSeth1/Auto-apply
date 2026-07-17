@@ -118,6 +118,37 @@ def _coerce_result_for_storage(retval: Any) -> dict[str, Any] | None:
             return {"value": repr(retval)[:4000]}
 
 
+def _orchestration_failure_summary(
+    kind: str, result: dict[str, Any] | None
+) -> str | None:
+    """Recognise orchestration reports that completed with a failed body.
+
+    Both orchestration runners intentionally return structured diagnostics
+    for some terminal failures.  Celery calls that a SUCCESS unless the task
+    raises, but the durable AutoApply ledger must describe the run outcome,
+    not merely Python control flow.
+    """
+    if kind not in {"orchestration.plan_run", "orchestration.portfolio_run"}:
+        return None
+    if not isinstance(result, dict):
+        return None
+    status = str(result.get("status") or "").strip().lower()
+    failed = result.get("ok") is False or status in {
+        "error",
+        "failed",
+        "disabled",
+        "lock_busy",
+    }
+    if not failed:
+        return None
+    detail = result.get("error") or result.get("detail")
+    if not detail:
+        errors = result.get("errors")
+        if isinstance(errors, list) and errors:
+            detail = "; ".join(str(item) for item in errors)
+    return str(detail or f"orchestration returned status={status or 'failed'}")[:1000]
+
+
 def find_succeeded_for_idempotency(
     session: Session, tenant_id: str, idempotency_key: str
 ) -> TaskRecord | None:
@@ -341,6 +372,13 @@ def task_postrun_handler(
             # unavoidable race with Celery's at-least-once delivery;
             # the audit row tells the truth about what was *asked*.
             if row.status == "cancelled":
+                return
+            failure_summary = _orchestration_failure_summary(row.kind, coerced_result)
+            if failure_summary:
+                row.status = "failed"
+                row.finished_at = _utcnow()
+                row.last_error = failure_summary
+                row.result = coerced_result
                 return
             row.status = "succeeded"
             row.finished_at = _utcnow()

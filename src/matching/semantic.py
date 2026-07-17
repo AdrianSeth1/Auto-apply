@@ -56,12 +56,12 @@ _MAX_EMBED_INPUT_CHARS = 32_000
 # Separate, tighter cap for the LOCAL (Ollama nomic-embed-text) path.
 # 2026-07-11 (user report): a 32k-char job description still triggered
 # Ollama's "input length exceeds the context length" 500 -- nomic's
-# tokenizer runs denser than the ~4 chars/token OpenAI assumption above
-# for bullet-heavy, punctuation-heavy JD/resume text, so 32k chars can
-# exceed its 8192-token window even after truncation. This cap is a
-# conservative ~3.5 chars/token estimate; it's still just a backstop --
-# see the context-length-specific handling below for the real fix.
-_MAX_LOCAL_EMBED_INPUT_CHARS = 20_000
+# tokenizer runs much denser than the ~4 chars/token OpenAI assumption above
+# for bullet-heavy, punctuation-heavy JD/resume text. Live plan rehearsals
+# showed that even 20k characters repeatedly exceeded its context window.
+# 4k keeps enough of a JD for ranking while avoiding failed requests that add
+# latency and needless Ollama model pressure on repeated plan runs.
+_MAX_LOCAL_EMBED_INPUT_CHARS = 4_000
 
 
 def _resolve_openai_provider() -> tuple[str, str] | None:

@@ -22,6 +22,8 @@ from src.application.documents import (
 from src.application.jobs import (
     apply_to_url,
 )
+from src.application.job_pool_reports import latest_job_pool_report
+from src.application.source_funnel import source_funnel_report
 from src.application.jobs import (
     clear_linkedin_session as clear_linkedin_session_usecase,
 )
@@ -114,6 +116,28 @@ from src.core.config import PROJECT_ROOT
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["api"])
 MAX_TEMPLATE_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+@router.get("/job-pool-v2/report")
+def job_pool_v2_report() -> dict[str, Any]:
+    """Latest V2 shadow/run audit; this endpoint has no operational writes."""
+    from src.core.database import get_session_factory
+
+    with get_session_factory()() as session:
+        return latest_job_pool_report(session)
+
+
+@router.get("/job-pool-v2/source-funnel")
+def job_pool_v2_source_funnel(run_id: str | None = None) -> dict[str, Any]:
+    """SUP-01: per-source/endpoint supply funnel; read-only, no writes.
+
+    Defaults to the latest discovery run. Pass ``run_id`` to reconcile a
+    specific historical run against its snapshot ids.
+    """
+    from src.core.database import get_session_factory
+
+    with get_session_factory()() as session:
+        return source_funnel_report(session, run_id=run_id)
 
 
 _SYNC_DEPRECATION_LOGGED: set[str] = set()
@@ -499,6 +523,14 @@ async def outcome_analytics() -> dict:
     from src.application.analytics import load_outcome_analytics
 
     return load_outcome_analytics()
+
+
+@router.get("/analytics/funnel")
+async def funnel_analytics(weeks: int = 12) -> dict:
+    """Weekly source-to-offer milestones with conversion rates and variants."""
+    from src.application.funnel import weekly_funnel
+
+    return weekly_funnel(weeks=weeks)
 
 
 @router.post("/jobs/search")

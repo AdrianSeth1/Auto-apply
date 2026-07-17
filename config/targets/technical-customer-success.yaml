@@ -1,0 +1,77 @@
+schema_version: 2
+id: technical-customer-success
+aliases: [tam]
+display_name: Technical Customer Success & Enablement
+enabled: true
+priority: 0.85
+positioning: Early-career technical customer-success generalist focused on onboarding, adoption, enablement, customer health, and clear technical communication.
+role:
+  core_titles:
+    - technical customer success specialist
+    - customer success engineer
+    - technical account coordinator
+    - customer enablement specialist
+    - technical onboarding specialist
+  adjacent_titles:
+    - technical customer success manager
+    - customer success specialist
+    - implementation success manager
+    - customer solutions specialist
+  stretch_titles:
+    - technical account manager
+    - customer success manager
+  description_only_titles:
+    - customer experience specialist
+  excluded_title_terms:
+    - strategic accounts
+    - enterprise technical account manager
+    - director
+    - senior
+    - renewal quota
+  responsibility_signals:
+    - customer onboarding
+    - product adoption
+    - customer health
+    - technical enablement
+    - training
+    - resolve technical issues
+    - stakeholder relationships
+  negative_responsibility_signals:
+    - own large enterprise portfolio
+    - renewal and expansion quota
+    - executive escalation ownership
+    - 24/7 on call
+  domain_signals: [B2B SaaS, customer enablement, workflow software]
+candidacy:
+  core_max_required_years: 3
+  stretch_max_required_years: 4
+  allowed_seniority: [entry, associate, junior, unknown]
+  unsupported_specializations: [strategic enterprise TAM, renewal quota ownership, 24/7 escalation leadership]
+  required_capability_groups:
+    - any_of: [cap_customer_success, cap_onboarding, cap_adoption]
+      weight: 3.0
+    - any_of: [cap_client_facing, cap_relationship_management, cap_stakeholder_management]
+      weight: 2.0
+    - any_of: [cap_communication, cap_documentation, cap_stakeholder_translation]
+      weight: 2.0
+  preferred_capabilities:
+    - {id: cap_dashboards, weight: 1.0}
+    - {id: cap_problem_solving, weight: 1.0}
+    - {id: cap_implementation, weight: 1.0}
+constraints:
+  employment_types: [fulltime, contract]
+  geography_policy: candidate_default
+  compensation_policy: candidate_default
+  active_clearance: reject
+  staffing_intermediary: reject_auto
+discovery:
+  query_terms: [technical customer success, customer success engineer, technical account coordinator, customer enablement specialist, technical onboarding specialist, customer onboarding specialist, implementation success manager, customer success specialist]
+  description_only_lane: false
+  employer_cohorts: [b2b_saas, customer_operations, healthtech_saas, edtech]
+selection:
+  minimum_core_tier: B
+  per_run_soft_cap: 5
+  allow_stretch_in_core: false
+materials:
+  preferred_evidence_refs: [exp_sds, exp_encompass_health, proj_prof_ai]
+  section_priority: [experience, projects, skills, education]

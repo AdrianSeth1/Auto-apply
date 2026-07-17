@@ -337,10 +337,10 @@ async function setStatusFilter(value) {
 }
 
 async function runScheduleNow(name) {
-  state.busy[name] = "run-now"
+  state.busy[name] = "practice-run"
   try {
     const entry = state.schedule.find((item) => item.name === name)
-    await api.runAutomationPlan(entry.plan_id)
+    await api.runAutomationPlan(entry.plan_id, { dryRun: true })
     await refreshAll()
   } catch (err) {
     state.error = err?.message || "Couldn't start that plan right now."
@@ -878,9 +878,9 @@ onMounted(refreshAll)
                 :disabled="!!state.busy[entry.name]"
                 @click="runScheduleNow(entry.name)"
               >
-                <Loader2 v-if="state.busy[entry.name] === 'run-now'" class="size-4 animate-spin" />
+                <Loader2 v-if="state.busy[entry.name] === 'practice-run'" class="size-4 animate-spin" />
                 <Play v-else class="size-4" />
-                {{ state.busy[entry.name] === 'run-now' ? 'Starting…' : 'Run now' }}
+                {{ state.busy[entry.name] === 'practice-run' ? 'Starting…' : 'Practice run' }}
               </Button>
               <Button
                 v-if="!entry.read_only"

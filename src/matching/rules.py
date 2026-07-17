@@ -172,6 +172,7 @@ def check_rules(job: RawJob, ctx: ApplicantContext) -> RuleVerdict:
     """
     results = [
         _check_work_authorization(job, ctx),
+        _check_security_clearance(job),
         _check_experience(job, ctx),
         _check_education(job, ctx),
         _check_employment_type(job, ctx),
@@ -299,6 +300,37 @@ _EXPERIENCE_EXCERPT_PATTERNS = [
     re.compile(r"(?i)(minimum\s+of\s+\d+\s*\+?\s*years?)"),
     re.compile(r"(?i)(\d+\s*\+\s*years?)"),
 ]
+
+_CLEARANCE_PATTERNS = [
+    re.compile(r"(?i)active\s+(?:secret|top\s+secret|ts/?sci|dod)\s+clearance"),
+    re.compile(r"(?i)(?:security|government)\s+clearance\s+(?:is\s+)?required"),
+    re.compile(r"(?i)must\s+(?:hold|possess|maintain)\s+(?:an?\s+)?(?:active\s+)?clearance"),
+    # A clearance named directly in the title is a gating credential even
+    # when the aggregator truncates the description before "required".
+    re.compile(r"(?i)security\s+clearance"),
+]
+
+
+def _check_security_clearance(job: RawJob) -> RuleResult:
+    """Reject roles requiring an existing clearance; citizenship alone is insufficient."""
+    text = f"{job.title} {job.description or ''}"
+    match = _first_match(text, _CLEARANCE_PATTERNS)
+    if match:
+        return RuleResult(
+            rule_id="security_clearance",
+            rule_name="security_clearance",
+            passed=False,
+            verdict="fail",
+            reason="Role requires an active security clearance",
+            evidence_excerpt=_excerpt_around_match(text, match),
+        )
+    return RuleResult(
+        rule_id="security_clearance",
+        rule_name="security_clearance",
+        passed=True,
+        verdict="pass",
+        reason="No active-clearance requirement detected",
+    )
 
 
 def _check_experience(job: RawJob, ctx: ApplicantContext) -> RuleResult:
@@ -442,10 +474,37 @@ _SPAM_PATTERNS = [
     re.compile(r"(?i)commission[\s-]only|unpaid\s+intern"),
 ]
 
+_STAFFING_COMPANY_PATTERNS = [
+    re.compile(pattern, re.I)
+    for pattern in (
+        r"\bstaffing\b",
+        r"\brecruit(?:ing|ment)\b",
+        r"\brandstad\b",
+        r"\byochana\b",
+        r"\binfo\s*way\b",
+        r"\bfuturemindz\b",
+        r"\bzachary\s+piper\b",
+        r"\bdminds\b",
+        r"\bsavvyan\b",
+    )
+]
+
 
 def _check_spam_signals(job: RawJob) -> RuleResult:
     """Detect likely spam, ghost jobs, or staffing agency postings."""
     text = f"{job.title} {job.description or ''}"
+
+    for pattern in _STAFFING_COMPANY_PATTERNS:
+        match = pattern.search(job.company or "")
+        if match:
+            return RuleResult(
+                rule_id="staffing_employer",
+                rule_name="staffing_employer",
+                passed=False,
+                verdict="fail",
+                reason=f"Staffing/recruiting intermediary: {job.company}",
+                evidence_excerpt=job.company,
+            )
 
     for pattern in _SPAM_PATTERNS:
         match = pattern.search(text)

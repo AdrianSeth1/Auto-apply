@@ -176,18 +176,22 @@ class TestJobsApi:
             )
         ]
 
-        response = client.post(
-            "/api/jobs/search",
-            json={
-                "source": "ats",
-                "keyword": "",
-                "location": "",
-                "profile": "default",
-                "time_filter": "week",
-                "ats": "",
-                "company": "",
-            },
-        )
+        # This is a route/serialization test, not a fit-quality test. Keep the
+        # synthetic SWE Intern from being correctly removed by the user's
+        # current non-SWE score floor.
+        with patch("src.application.jobs._score_jobs", return_value=(False, [])):
+            response = client.post(
+                "/api/jobs/search",
+                json={
+                    "source": "ats",
+                    "keyword": "",
+                    "location": "",
+                    "profile": "default",
+                    "time_filter": "week",
+                    "ats": "",
+                    "company": "",
+                },
+            )
 
         assert response.status_code == 200
         payload = response.json()
@@ -195,6 +199,7 @@ class TestJobsApi:
         assert payload["jobs"][0]["company"] == "TestCo"
         assert payload["jobs"][0]["title"] == "SWE Intern"
 
+    @patch("src.intake.hn_jobstories.fetch_hn_jobstories", return_value=[])
     @patch("src.intake.hn_hiring.fetch_latest_hn_hiring_jobs")
     @patch("src.application.jobs._search_adzuna", return_value=[])
     @patch("src.intake.search.search_jobs")
@@ -205,6 +210,7 @@ class TestJobsApi:
         mock_search,
         mock_adzuna,
         mock_hn,
+        mock_jobstories,
         client,
     ):
         """"all" fans out to ATS + Adzuna + HN (never LinkedIn -- see
@@ -223,18 +229,19 @@ class TestJobsApi:
             )
         ]
 
-        response = client.post(
-            "/api/jobs/search",
-            json={
-                "source": "all",
-                "keyword": "backend",
-                "location": "",
-                "profile": "default",
-                "time_filter": "week",
-                "ats": "",
-                "company": "",
-            },
-        )
+        with patch("src.application.jobs._score_jobs", return_value=(False, [])):
+            response = client.post(
+                "/api/jobs/search",
+                json={
+                    "source": "all",
+                    "keyword": "backend",
+                    "location": "",
+                    "profile": "default",
+                    "time_filter": "week",
+                    "ats": "",
+                    "company": "",
+                },
+            )
 
         assert response.status_code == 200
         payload = response.json()

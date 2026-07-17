@@ -1,0 +1,79 @@
+schema_version: 2
+id: saas-implementation
+aliases: [solutions-consultant, implementation-consultant]
+display_name: SaaS Implementation & Solutions Consulting
+enabled: true
+priority: 1.0
+positioning: Early-career SaaS implementer who maps workflows, configures solutions, improves onboarding, and translates between customers and technical teams.
+role:
+  core_titles:
+    - implementation specialist
+    - implementation analyst
+    - implementation consultant
+    - onboarding specialist
+    - deployment specialist
+    - professional services consultant
+  adjacent_titles:
+    - solutions consultant
+    - customer onboarding manager
+    - implementation engineer
+    - technical consultant
+  stretch_titles:
+    - solutions architect
+    - implementation project manager
+  description_only_titles:
+    - customer solutions specialist
+  excluded_title_terms:
+    - senior
+    - principal
+    - director
+    - SAP
+    - Oracle
+    - Workday HCM
+  responsibility_signals:
+    - requirements gathering
+    - configure
+    - onboarding
+    - implementation
+    - training
+    - go-live
+    - project delivery
+  negative_responsibility_signals:
+    - SAP implementation
+    - Oracle implementation
+    - active clinical license
+    - enterprise program ownership
+  domain_signals: [B2B SaaS, workflow software, customer onboarding]
+candidacy:
+  core_max_required_years: 3
+  stretch_max_required_years: 4
+  allowed_seniority: [entry, associate, junior, unknown]
+  unsupported_specializations: [SAP, Oracle, Workday HCM, clinical implementation, privileged access management, identity management]
+  required_capability_groups:
+    - any_of: [cap_implementation, cap_onboarding, cap_project_delivery]
+      weight: 3.0
+    - any_of: [cap_discovery, cap_requirements, cap_scoping]
+      weight: 2.0
+    - any_of: [cap_client_facing, cap_stakeholder_translation, cap_documentation]
+      weight: 2.0
+  preferred_capabilities:
+    - {id: cap_process_design, weight: 1.5}
+    - {id: cap_problem_solving, weight: 1.0}
+    - {id: cap_saas, weight: 1.0}
+constraints:
+  employment_types: [fulltime, contract]
+  geography_policy: candidate_default
+  compensation_policy: candidate_default
+  active_clearance: reject
+  staffing_intermediary: reject_auto
+discovery:
+  query_terms: [implementation specialist, implementation analyst, implementation consultant, onboarding specialist, deployment specialist, professional services consultant]
+  description_only_lane: false
+  employer_cohorts: [b2b_saas, healthtech_saas, edtech, workflow_automation]
+selection:
+  minimum_core_tier: B
+  per_run_soft_cap: 5
+  allow_stretch_in_core: false
+materials:
+  preferred_evidence_refs: [exp_sds, proj_prof_ai]
+  section_priority: [experience, projects, skills, education]

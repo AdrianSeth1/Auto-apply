@@ -36,6 +36,12 @@ class BaseScraper(ABC):
             headers=DEFAULT_HEADERS,
             follow_redirects=True,
         )
+        # SUP-01B: set by fetch_jobs() before returning, so the caller
+        # (src.intake.search._fetch_board) can report real provider-vs-
+        # normalized counts instead of assuming every provider record
+        # parsed cleanly. None until a scraper subclass has run a fetch;
+        # callers must treat that as "unknown", never as zero.
+        self.last_fetch_stats: dict[str, int] | None = None
 
     def close(self) -> None:
         self._client.close()

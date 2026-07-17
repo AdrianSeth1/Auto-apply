@@ -295,15 +295,7 @@ class LinkedInSession:
 
     def has_saved_session_data(self) -> bool:
         """Return True when the persistent profile already contains browser state."""
-        if not self.session_dir.exists():
-            return False
-        ignored = {
-            "SingletonCookie",
-            "SingletonLock",
-            "SingletonSocket",
-            _PROBE_CACHE_FILENAME,
-        }
-        return any(entry.name not in ignored for entry in self.session_dir.iterdir())
+        return _has_saved_session_data(self.session_dir)
 
     async def is_authenticated(self) -> bool:
         """Check whether the saved browser profile still has a valid LinkedIn session."""
@@ -1677,6 +1669,19 @@ def _parse_html_job_card(attrs: str, body: str, *, search_mode: str) -> RawJob |
     )
 
 
+def _has_saved_session_data(session_dir: Path) -> bool:
+    """Disk-only check for saved browser state — never touches LinkedIn."""
+    if not session_dir.exists():
+        return False
+    ignored = {
+        "SingletonCookie",
+        "SingletonLock",
+        "SingletonSocket",
+        _PROBE_CACHE_FILENAME,
+    }
+    return any(entry.name not in ignored for entry in session_dir.iterdir())
+
+
 async def get_linkedin_session_status(
     session_dir: Path = DEFAULT_SESSION_DIR,
     headless: bool = True,
@@ -1684,10 +1689,20 @@ async def get_linkedin_session_status(
 ) -> dict:
     """Return the current LinkedIn session status for the saved browser profile.
 
-    By default this returns a cached probe result if one was taken within the
-    last ``_PROBE_TTL`` window — we don't want to spin up a headless Chromium
-    on every web-UI mount. Pass ``force_refresh=True`` to bypass the cache and
-    run a real probe (e.g. before kicking off an authenticated search).
+    By default this NEVER launches a browser. It returns the cached probe
+    result if fresh, otherwise a passive disk-only status (does saved
+    session data exist?) with ``authenticated=None``. Pass
+    ``force_refresh=True`` (the UI's explicit "check connection" action)
+    to run a real headless probe.
+
+    2026-07-16: the old behaviour ran a headless Chromium against
+    linkedin.com on every web-UI mount older than the 5-minute cache.
+    That is automated LinkedIn access on an account that has already
+    received a rehabRestrictionChallenge (see docs/CHANGELOG.md
+    "safety: stop all automated LinkedIn access") — the log showed real
+    browser sessions starting several times a day with LinkedIn
+    automation supposedly disabled. Passive-by-default keeps the status
+    widget honest without touching LinkedIn until the user asks.
     """
     if not force_refresh:
         cached = _read_probe_cache(session_dir)
@@ -1708,6 +1723,24 @@ async def get_linkedin_session_status(
                 "cached": True,
                 "checked_at": cached["checked_at"],
             }
+        # No fresh cache: report from disk without touching LinkedIn.
+        has_session_data = _has_saved_session_data(session_dir)
+        return {
+            "ok": True,
+            "authenticated": None,
+            "has_session_data": has_session_data,
+            "message": (
+                "Saved LinkedIn session data exists; authentication not "
+                "verified (passive check). Use refresh to run a live probe."
+                if has_session_data
+                else "No saved LinkedIn session. Connect LinkedIn to sign in."
+            ),
+            "error": None,
+            "error_code": None,
+            "cached": False,
+            "passive": True,
+            "checked_at": datetime.now(UTC).isoformat(),
+        }
 
     try:
         async with LinkedInSession(session_dir=session_dir, headless=headless) as session:

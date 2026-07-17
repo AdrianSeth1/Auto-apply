@@ -175,7 +175,9 @@ def resolve_material_choice(
     if override_patch_aggressiveness is not None:
         aggressiveness = str(override_patch_aggressiveness).strip()
     else:
-        aggressiveness = str(saved.get("patch_aggressiveness") or DEFAULT_PATCH_AGGRESSIVENESS).strip()
+        aggressiveness = str(
+            saved.get("patch_aggressiveness") or DEFAULT_PATCH_AGGRESSIVENESS
+        ).strip()
     if aggressiveness not in SUPPORTED_PATCH_AGGRESSIVENESS:
         aggressiveness = DEFAULT_PATCH_AGGRESSIVENESS
 

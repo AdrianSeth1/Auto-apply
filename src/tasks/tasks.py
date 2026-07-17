@@ -43,9 +43,9 @@ Phase 18.1 replaced the fake-success ``status="scheduled"`` /
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.tasks.app import celery_app
 from src.tasks.base import AutoApplyTask
@@ -115,6 +115,11 @@ class ApplicationSubmitPayload(BaseModel):
 class OrchestrationPlanRunPayload(BaseModel):
     """Phase 17.1 plan_run task payload."""
 
+    # Do not silently discard V2-only keys.  If a stale publisher ever sends
+    # a portfolio payload under the legacy task name, fail at the boundary
+    # instead of defaulting to profile="default" and scanning the whole DB.
+    model_config = ConfigDict(extra="forbid")
+
     automation_plan_id: str | None = None
     automation_plan_name: str | None = None
     profile_id: str = "default"
@@ -136,6 +141,20 @@ class OrchestrationPlanRunPayload(BaseModel):
     cover_letter_patch_aggressiveness: str | None = None
     cover_letter_patch_allow_reorder_sections: bool | None = None
     cover_letter_patch_allow_add_remove_bullets: bool | None = None
+
+
+class OrchestrationPortfolioRunPayload(BaseModel):
+    """Job Pool V2 single-acquisition/global-portfolio payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    automation_plan_id: str | None = None
+    automation_plan_name: str | None = None
+    target_ids: list[str] = Field(default_factory=list)
+    pipeline_version: Literal["v2_shadow", "v2"] = "v2_shadow"
+    force_refresh: bool = False
+    dry_run: bool = False
+    canary_capacity: int | None = Field(default=None, ge=0, le=20)
 
 
 class StatusSyncPayload(BaseModel):
@@ -293,6 +312,38 @@ def orchestration_plan_run(
     return report.to_dict()
 
 
+@celery_app.task(name="orchestration.portfolio_run", base=AutoApplyTask, bind=True)
+def orchestration_portfolio_run(
+    self: AutoApplyTask, **payload: Any
+) -> dict[str, Any]:
+    """One deterministic acquisition/evaluation/global portfolio run."""
+
+    args = _coerce(OrchestrationPortfolioRunPayload, payload)
+    import asyncio  # noqa: PLC0415
+
+    from src.orchestration.portfolio_run import run_portfolio_v2  # noqa: PLC0415
+    from src.tasks.context import current_tenant_id  # noqa: PLC0415
+
+    tenant_id = current_tenant_id() or "default"
+    logger.info(
+        "orchestration.portfolio_run tenant=%s mode=%s targets=%d dry_run=%s",
+        tenant_id,
+        args.pipeline_version,
+        len(args.target_ids),
+        args.dry_run,
+    )
+    return asyncio.run(
+        run_portfolio_v2(
+            tenant_id=tenant_id,
+            target_ids=args.target_ids or None,
+            mode=args.pipeline_version,
+            force_refresh=args.force_refresh,
+            dry_run=args.dry_run,
+            canary_capacity=args.canary_capacity,
+        )
+    )
+
+
 # ---- Tasks: jobs -----------------------------------------------------
 
 
@@ -386,6 +437,44 @@ def jobs_enrich(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
 
 
 # ---- Tasks: materials ------------------------------------------------
+
+
+def _material_quality_summary(result: dict[str, Any]) -> dict[str, Any]:
+    """Compact, review-card-friendly quality digest for one artifact.
+
+    Pulls the letter origin (llm vs deterministic_baseline) and the
+    validation issue types out of the full generation result so the
+    review queue can badge weak drafts without storing whole documents.
+    Best-effort: an unexpected shape returns a minimal dict rather than
+    failing the generation.
+    """
+    summary: dict[str, Any] = {}
+    try:
+        document = result.get("document") or {}
+        metadata = document.get("metadata") or {}
+        origin = metadata.get("letter_origin")
+        if origin:
+            summary["letter_origin"] = origin
+        origin_issues = metadata.get("origin_issues") or []
+        if origin_issues:
+            summary["origin_issues"] = [str(item)[:160] for item in origin_issues[:6]]
+        validation = result.get("validation") or {}
+        issues = validation.get("issues") or []
+        issue_types = []
+        for issue in issues:
+            issue_type = (issue or {}).get("type")
+            severity = (issue or {}).get("severity", "warning")
+            if issue_type:
+                issue_types.append({"type": issue_type, "severity": severity})
+        if issue_types:
+            summary["validation_issues"] = issue_types[:10]
+        metrics = validation.get("metrics") or {}
+        word_count = metrics.get("cover_letter_word_count")
+        if word_count is not None:
+            summary["word_count"] = word_count
+    except Exception:  # noqa: BLE001 -- digest must never break generation
+        logger.debug("material quality summary extraction failed", exc_info=True)
+    return summary
 
 
 @celery_app.task(name="materials.generate", base=AutoApplyTask, bind=True)
@@ -661,6 +750,7 @@ def materials_generate(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
                 "artifacts": result.get("artifacts"),
                 "strategy": result.get("strategy"),
                 "strategy_notes": result.get("strategy_notes"),
+                "quality": _material_quality_summary(result),
             },
             None,
         )
@@ -684,11 +774,12 @@ def materials_generate(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
 
     asyncio.run(_generate_all())
 
-    # Link the produced files onto any pending review-queue entry for
-    # this posting so the kanban can preview them without re-running
-    # the generator. We pick the most recent pending entry by
-    # created_at; there should normally be only one because of the
-    # partial-unique-pending index.
+    # Link the produced files onto the review-queue entry for this
+    # posting so the kanban can preview them without re-running the
+    # generator. Overnight portfolio runs intentionally generate while
+    # cards are still pending. Include ``approved`` as well so a quick
+    # operator decision made while the worker is finishing cannot race
+    # the write-back and permanently hide otherwise valid artifacts.
     resume_path = (
         artifacts.get("resume", {}).get("path")
         or artifacts.get("resume_docx", {}).get("path")
@@ -706,13 +797,31 @@ def materials_generate(self: AutoApplyTask, **payload: Any) -> dict[str, Any]:
                     select(ReviewQueueEntry)
                     .where(ReviewQueueEntry.tenant_id == tenant_id)
                     .where(ReviewQueueEntry.job_id == job_uuid)
-                    .where(ReviewQueueEntry.status == "pending")
+                    .where(ReviewQueueEntry.status.in_(("pending", "approved")))
                     .order_by(ReviewQueueEntry.created_at.desc())
                     .limit(1)
                 )
                 row = session.execute(stmt).scalar_one_or_none()
-                if row is not None and resume_path:
-                    row.materials_path = resume_path
+                if row is not None and (resume_path or cover_letter_path):
+                    row.materials_path = resume_path or cover_letter_path
+                if row is not None:
+                    # Surface the material quality digest on the review
+                    # card. Two deterministic-baseline letters shipped
+                    # unlabeled on 2026-07-15; the reviewer must be able
+                    # to see "this letter is a template draft" without
+                    # opening the DOCX. score_breakdown is a JSONB
+                    # snapshot column — reassign, don't mutate, so
+                    # SQLAlchemy detects the change.
+                    quality_by_doc = {
+                        doc_type: payload_dict["quality"]
+                        for doc_type, payload_dict in artifacts.items()
+                        if payload_dict.get("quality")
+                    }
+                    if quality_by_doc:
+                        row.score_breakdown = {
+                            **(row.score_breakdown or {}),
+                            "materials_quality": quality_by_doc,
+                        }
         except Exception as exc:  # noqa: BLE001 -- never bounce a successful generation
             logger.warning(
                 "materials.generate: linking artifacts to review entry failed: %s", exc
@@ -1164,6 +1273,93 @@ def cache_eviction(self: AutoApplyTask) -> dict[str, Any]:
     }
 
 
+@celery_app.task(name="maintenance.ledger_retention", base=AutoApplyTask, bind=True)
+def ledger_retention(self: AutoApplyTask) -> dict[str, Any]:
+    """2026-07-16: bounded retention for the V2 decision/link ledgers.
+
+    Six-hour dry-run refills persist a PortfolioDecision for every
+    evaluated candidate and a DiscoveryRunEvaluation link for every
+    evaluation — roughly 25 MB/day at the observed volume, growing
+    forever (P1 in the 2026-07-15 handoff). The aggregate story of every
+    run is already preserved in ``portfolio_runs.counts`` /
+    ``discovery_runs.counts``, so detailed per-candidate rows from OLD
+    DRY RUNS are the only thing pruned here.
+
+    Hard safety rules (do not weaken):
+      * only rows whose parent run has ``mode == "dry_run"``;
+      * never a selected decision, never a row with a ``review_id``;
+      * never review/application evidence, snapshots, or evaluations;
+      * live-run (``mode == "v2"``) rows are kept forever.
+    """
+    from datetime import timedelta  # noqa: PLC0415
+
+    from sqlalchemy import delete as sa_delete  # noqa: PLC0415
+
+    from src.core.config import load_config  # noqa: PLC0415
+    from src.core.models import (  # noqa: PLC0415
+        DiscoveryRun,
+        DiscoveryRunEvaluation,
+        PortfolioDecision,
+        PortfolioRun,
+    )
+
+    retention_cfg = (load_config().get("retention") or {})
+    days = int(retention_cfg.get("dry_run_ledger_days", 14) or 14)
+    cutoff = datetime.now(UTC) - timedelta(days=max(1, days))
+
+    deleted_decisions = 0
+    deleted_links = 0
+    try:
+        factory = get_session_factory()
+        with factory() as session, session.begin():
+            old_dry_portfolio_runs = (
+                select(PortfolioRun.id)
+                .where(PortfolioRun.mode == "dry_run")
+                .where(PortfolioRun.started_at < cutoff)
+            )
+            result = session.execute(
+                sa_delete(PortfolioDecision)
+                .where(PortfolioDecision.portfolio_run_id.in_(old_dry_portfolio_runs))
+                .where(PortfolioDecision.selected.is_(False))
+                .where(PortfolioDecision.review_id.is_(None))
+            )
+            deleted_decisions = int(result.rowcount or 0)
+
+            old_dry_discovery_runs = (
+                select(DiscoveryRun.id)
+                .where(DiscoveryRun.mode == "dry_run")
+                .where(DiscoveryRun.started_at < cutoff)
+            )
+            result = session.execute(
+                sa_delete(DiscoveryRunEvaluation).where(
+                    DiscoveryRunEvaluation.discovery_run_id.in_(old_dry_discovery_runs)
+                )
+            )
+            deleted_links = int(result.rowcount or 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("ledger_retention failed")
+        return {
+            "task": "maintenance.ledger_retention",
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    logger.info(
+        "ledger_retention: removed %d dry-run decisions and %d dry-run links "
+        "older than %d days",
+        deleted_decisions,
+        deleted_links,
+        days,
+    )
+    return {
+        "task": "maintenance.ledger_retention",
+        "status": "ok",
+        "retention_days": days,
+        "deleted_portfolio_decisions": deleted_decisions,
+        "deleted_discovery_links": deleted_links,
+    }
+
+
 @celery_app.task(name="maintenance.gate_expire_sweep", base=AutoApplyTask, bind=True)
 def gate_expire_sweep(self: AutoApplyTask) -> dict[str, Any]:
     """Phase 18.1: flip ``gate_queue`` rows past their TTL to
@@ -1221,6 +1417,7 @@ KNOWN_TASK_NAMES: tuple[str, ...] = (
     "application.fill",
     "application.submit",
     "orchestration.plan_run",
+    "orchestration.portfolio_run",
     "notifications.morning_digest",
     "maintenance.status_sync",
     "maintenance.jd_health_check",
@@ -1238,6 +1435,7 @@ __all__ = [
     "KNOWN_TASK_NAMES",
     "MaterialsGeneratePayload",
     "OrchestrationPlanRunPayload",
+    "OrchestrationPortfolioRunPayload",
     "SearchRefreshPayload",
     "StatusSyncPayload",
     "application_fill",
@@ -1250,6 +1448,7 @@ __all__ = [
     "linkedin_cookie_refresh",
     "materials_generate",
     "orchestration_plan_run",
+    "orchestration_portfolio_run",
     "search_daily_fanout",
     "search_refresh",
     "status_sync",

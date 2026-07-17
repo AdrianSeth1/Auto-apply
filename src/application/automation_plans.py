@@ -81,13 +81,18 @@ def automation_plan_schedule_entries() -> dict[str, dict[str, Any]]:
     return entries
 
 
-def schedule_entry_for_plan(plan: dict[str, Any]) -> dict[str, Any]:
+def schedule_entry_for_plan(
+    plan: dict[str, Any], *, dry_run_override: bool | None = None
+) -> dict[str, Any]:
     normalized = _normalize_plan(plan)
+    kwargs = _task_kwargs(normalized)
+    if dry_run_override is not None:
+        kwargs["dry_run"] = dry_run_override
     return {
-        "task": "orchestration.plan_run",
+        "task": normalized["task"],
         "schedule": _crontab_for_plan(normalized),
         "options": {"queue": "search"},
-        "kwargs": _task_kwargs(normalized),
+        "kwargs": kwargs,
     }
 
 
@@ -123,10 +128,28 @@ def _normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
     plan_id = sanitize_plan_id(str(plan.get("id") or plan.get("name") or "automation-task"))
     name = str(plan.get("name") or plan_id.replace("-", " ")).strip()
     search_profile_id = str(plan.get("search_profile_id") or "").strip()
+    requested_task = str(plan.get("task") or "orchestration.plan_run").strip()
+    if requested_task not in {"orchestration.plan_run", "orchestration.portfolio_run"}:
+        requested_task = "orchestration.plan_run"
+    pipeline_version = str(plan.get("pipeline_version") or "v1").strip().lower()
+    if pipeline_version not in {"v1", "v2_shadow", "v2"}:
+        pipeline_version = "v1"
+    # The task name and payload shape are one contract.  Canonicalise them
+    # together so a V2 plan can never be emitted under the legacy runner.
+    # An explicitly selected portfolio task without a pipeline version is
+    # treated as shadow mode, which is the safest useful V2 default.
+    if requested_task == "orchestration.portfolio_run" and pipeline_version == "v1":
+        pipeline_version = "v2_shadow"
+    task = (
+        "orchestration.portfolio_run"
+        if pipeline_version in {"v2_shadow", "v2"}
+        else "orchestration.plan_run"
+    )
 
     return {
         "id": plan_id,
         "name": name or plan_id,
+        "task": task,
         "enabled": bool(plan.get("enabled", True)),
         "search_profile_id": search_profile_id,
         "profile_id": str(plan.get("profile_id") or "default").strip() or "default",
@@ -142,6 +165,19 @@ def _normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
         "skip_previously_applied": bool(plan.get("skip_previously_applied", True)),
         "top_n": _bounded_int(plan.get("top_n"), 1, 100, 10),
         "dry_run": bool(plan.get("dry_run", False)),
+        "pipeline_version": pipeline_version,
+        "target_ids": [
+            str(value).strip()
+            for value in (plan.get("target_ids") or [])
+            if str(value).strip()
+        ],
+        "portfolio_id": str(plan.get("portfolio_id") or "default").strip() or "default",
+        "force_refresh": bool(plan.get("force_refresh", False)),
+        "canary_capacity": (
+            _bounded_int(plan.get("canary_capacity"), 0, 20, 20)
+            if plan.get("canary_capacity") is not None
+            else None
+        ),
         # Phase 17.8 / 18.x: per-plan material strategy overrides. Both
         # documents share the same shape; empty values mean "inherit
         # from Settings → Default material strategy".
@@ -246,6 +282,20 @@ def _crontab_for_plan(plan: dict[str, Any]) -> crontab:
 
 
 def _task_kwargs(plan: dict[str, Any]) -> dict[str, Any]:
+    if plan["task"] == "orchestration.portfolio_run":
+        return {
+            "automation_plan_id": plan["id"],
+            "automation_plan_name": plan["name"],
+            "target_ids": plan["target_ids"],
+            "pipeline_version": (
+                plan["pipeline_version"]
+                if plan["pipeline_version"] in {"v2_shadow", "v2"}
+                else "v2_shadow"
+            ),
+            "force_refresh": plan["force_refresh"],
+            "dry_run": plan["dry_run"],
+            "canary_capacity": plan["canary_capacity"],
+        }
     return {
         "automation_plan_id": plan["id"],
         "automation_plan_name": plan["name"],

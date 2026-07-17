@@ -1,0 +1,25 @@
+schema_version: 1
+version: capabilities.v1
+aliases:
+  cap_implementation: [implementation, deploy, configure, go live, rollout]
+  cap_discovery: [discovery, requirements gathering, workflow mapping, needs analysis]
+  cap_stakeholder_translation: [stakeholder translation, technical translation, plain language]
+  cap_onboarding: [onboarding, activation, time to value, customer launch]
+  cap_analytics: [analytics, analysis, reporting, metrics]
+  cap_dashboards: [dashboards, business intelligence, looker studio]
+  cap_demos: [demo, demonstration, presentation, proof of concept]
+  cap_customer_success: [customer success, adoption, enablement, customer health]
+  cap_ai: [artificial intelligence, generative AI, applied AI]
+  cap_llm: [large language model, LLM, language model]
+  cap_rag: [retrieval augmented generation, RAG]
+transfer:
+  exact: 1.0
+  close: 0.85
+  adjacent: 0.55
+  unrelated: 0.0
+adjacency:
+  cap_technical_translation: [cap_stakeholder_translation, cap_communication]
+  cap_presentations: [cap_demos, cap_public_speaking]
+  cap_process_design: [cap_process_improvement, cap_operations]
+  cap_project_delivery: [cap_delivery, cap_implementation]
+  cap_relationship_management: [cap_client_facing, cap_stakeholder_management]

@@ -456,3 +456,87 @@ This log captures key decisions, their rationale, and alternatives considered. E
 - Tests cover blocked localhost/private/metadata URLs, redirect revalidation, response-size/timeout failures, and Playwright domain lock violations.
 - Connector fixtures cover ATS detection, `fetch_jobs`, RawJob normalization, dedupe key, source health, and partial failure without live websites.
 - Template tests assert LLM output validates against the DSL, preview is required before activation, and dangerous steps are rejected.
+
+---
+
+## D031 — Job Pool V2 uses one evidence bank, staged candidacy, and one global portfolio (2026-07-12)
+
+**Decision**: Replace the five copied applicant profiles and five independent
+Top-N plan runs with one canonical candidate evidence bank, five versioned target
+specifications, one acquisition refresh, explicit job-target evaluation stages,
+and one quality-limited global portfolio. Ranking exposes separate Story Fit,
+Candidacy, Review Index, and confidence values; it never presents an interview
+probability or fills a quota below Tier B. Five startup cards are additive bonus
+slots and must pass the same Tier A/B candidacy floors as core cards.
+
+The complete normative contract, schemas, formulas, migrations, rollback plan,
+tests, and bounded implementation tickets are in
+`docs/JOB_POOL_V2_ARCHITECTURE.md`. That document controls V2 behavior when it
+conflicts with current provisional gates.
+
+**Rationale**:
+
+1. Current target profiles are materially identical to matching, so the system
+   cannot express distinct role intent even though it runs five plans.
+2. Historical score bands are non-predictive of apply/skip judgment; textual
+   similarity does not model role family, level, actual evidence, or
+   attainability.
+3. Raw discovery volume is high but target-affine direct supply and endpoint
+   health are uneven. Discovery, filtering, ranking, and selection therefore
+   need separate ledgers rather than one success count.
+4. A global selector is the only reliable place to enforce cross-target
+   ownership, company caps, non-destructive duplicate suppression, startup bonus
+   semantics, and transactional reservation.
+5. The 106 historical labels are too sparse and noisy for an unconstrained
+   learned ranker. Structured reasons and bounded, smoothed priors are
+   inspectable and reversible.
+
+**Policy commitments**:
+
+- `data/profile/candidate.yaml` owns candidate evidence; `config/targets/*.yaml`
+  owns role intent, exclusions, preferences, evidence priorities, and discovery
+  hints. Legacy profile/search/filter files remain V1 inputs only during the
+  migration window.
+- Every job-target pair receives tri-state gate results and persisted stage
+  reasons. Unknown facts never become positive evidence and only fail when an
+  explicit mandatory policy says they must.
+- Broad-funnel evaluation is deterministic. Local LLM enrichment is serialized,
+  cached, schema constrained, evidence constrained, and limited to the small
+  ambiguous shortlist.
+- Source transport, employer class, posting trust, startup status, and
+  selectivity are separate facts. There is no global direct-ATS or startup fit
+  bonus.
+- Canonical identity suppresses duplicate cards but never destructively merges
+  fuzzy matches. Actual applications remain explicitly human-gated.
+- V2 ships additively behind `v1 | v2_shadow | v2`, passes replay and a blinded
+  prospective review, canaries at no more than five cards, and retains a
+  one-setting V1 rollback for two stable weeks.
+
+**Enforcement**:
+
+- Schema/compiler tests prove five materially different target feature sets
+  share one candidate hash.
+- Funnel tests reconcile every retrieved job-target pair to terminal stages and
+  reasons; scorer tests recompute every component and enforce tier floors.
+- Portfolio tests enforce one primary card per canonical job, one company per
+  run by default, 20 maximum core cards, and five additional Tier A/B startup
+  slots without quota filling.
+- Cutover requires the release gates in Section 14 of the architecture document,
+  including at least 60% worth-review precision on a blinded sample of 50 and
+  score/tier monotonicity once samples are adequate.
+
+**Implementation status (2026-07-12)**:
+
+- V2-00 through the core V2-12 path are implemented additively, including the
+  ledger, deterministic evaluator, global portfolio, structured feedback,
+  replay/blind tooling, shadow report, and query-arm scheduler.
+- V2-13 adapters exist but remain policy-disabled pending live conformance and
+  target-affine yield evidence. V2-14 has a quota-valid research cohort, but all
+  entries remain inactive pending endpoint/evidence verification and Arya's
+  approval of any exceptions.
+- D031 does not authorize premature cutover. V1 remains live until seven shadow
+  cycles, the prospective 50-item quality gate, canary, and soak requirements
+  in Sections 11 and 14 pass.
+- Arya subsequently authorized a bounded live trial. The active configuration
+  is therefore a five-card global V2 canary, not full cutover or V1 retirement;
+  the acceptance and rollback-soak gates still control broader activation.

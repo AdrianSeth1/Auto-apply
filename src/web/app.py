@@ -252,6 +252,20 @@ def create_app() -> FastAPI:
     app.include_router(tasks_router)
     app.include_router(review_router)
 
+    @app.get("/api/instance", include_in_schema=False)
+    async def instance_identity():
+        """Identify this server as an AutoApply instance.
+
+        2026-07-16: used by ``autoapply start``'s single-instance guard —
+        when the web port is occupied, the CLI probes this endpoint to
+        distinguish "another AutoApply stack is already running" (reuse
+        it, don't spawn a duplicate worker/Beat/web on a random port)
+        from "some other program holds the port" (error out).
+        """
+        import os as _os  # noqa: PLC0415
+
+        return {"app": "autoapply", "pid": _os.getpid()}
+
     @app.get("/", include_in_schema=False)
     async def spa_root():
         return _frontend_html()

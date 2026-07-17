@@ -126,6 +126,7 @@ def test_list_automation_plan_runs_hides_internal_tasks(
         ("orchestration.plan_run", {}),
         ("orchestration.plan_run", {"automation_plan_id": "deleted-plan"}),
         ("orchestration.plan_run", {"automation_plan_id": "daily-apply"}),
+        ("orchestration.portfolio_run", {"automation_plan_id": "daily-apply"}),
     ]:
         db_session.add(
             TaskRecord(
@@ -144,9 +145,12 @@ def test_list_automation_plan_runs_hides_internal_tasks(
     )
     assert r.status_code == 200
     items = r.json()["items"]
-    assert len(items) == 1
-    assert items[0]["kind"] == "orchestration.plan_run"
-    assert items[0]["payload"]["automation_plan_id"] == "daily-apply"
+    assert len(items) == 2
+    assert {item["kind"] for item in items} == {
+        "orchestration.plan_run",
+        "orchestration.portfolio_run",
+    }
+    assert all(item["payload"]["automation_plan_id"] == "daily-apply" for item in items)
 
 
 def test_regenerate_enqueue_includes_legacy_job_payload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -321,10 +325,13 @@ def test_retry_only_works_on_failed_or_cancelled(
 
 
 def test_list_schedule_returns_only_user_facing_entries(client: TestClient) -> None:
+    # 2026-07-16: static "plan_run" removed from Beat (always failed on the
+    # missing legacy default profile); the live delivery is the
+    # automation-plan entry, which is not part of the static contract here.
     r = client.get("/api/schedule")
     assert r.status_code == 200
     names = {entry["name"] for entry in r.json()}
-    assert names == {"daily_search", "plan_run", "morning_digest"}
+    assert names == {"daily_search", "morning_digest"}
 
 
 def test_schedule_run_now_dispatches(
@@ -338,9 +345,61 @@ def test_schedule_run_now_dispatches(
         "send_task",
         lambda name, **kw: captured.append({"name": name, **kw}),
     )
-    r = client.post("/api/schedule/plan_run/run-now")
+    r = client.post("/api/schedule/daily_search/run-now")
     assert r.status_code == 200
-    assert captured[0]["name"] == "orchestration.plan_run"
+    assert captured[0]["name"] == "search.daily_fanout"
+
+
+def test_schedule_run_now_rejects_removed_plan_run(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retired static plan_run entry must not be dispatchable."""
+    from src.tasks import celery_app
+
+    monkeypatch.setattr(
+        celery_app,
+        "send_task",
+        lambda name, **kw: pytest.fail("nothing should be dispatched"),
+    )
+    r = client.post("/api/schedule/plan_run/run-now")
+    assert r.status_code == 404
+
+
+def test_automation_plan_practice_run_forces_v2_task_and_dry_run(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[dict[str, Any]] = []
+    from src.tasks import celery_app
+
+    monkeypatch.setattr(
+        "src.web.routes.tasks.get_automation_plan",
+        lambda _plan_id: {
+            "id": "nightly-portfolio-v2",
+            "name": "Job Pool V2 Canary",
+            # Deliberately inconsistent input: normalisation must make the
+            # V2 pipeline authoritative and publish the portfolio task.
+            "task": "orchestration.plan_run",
+            "pipeline_version": "v2",
+            "target_ids": ["ai-implementation"],
+            "dry_run": False,
+        },
+    )
+    monkeypatch.setattr(
+        celery_app,
+        "send_task",
+        lambda name, **kw: captured.append({"name": name, **kw}),
+    )
+
+    response = client.post(
+        "/api/automation-plans/nightly-portfolio-v2/run-now",
+        json={"dry_run": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["enqueued"] == "orchestration.portfolio_run"
+    assert captured[0]["name"] == "orchestration.portfolio_run"
+    assert captured[0]["kwargs"]["pipeline_version"] == "v2"
+    assert captured[0]["kwargs"]["dry_run"] is True
 
 
 def test_schedule_run_now_hides_system_entries(client: TestClient) -> None:

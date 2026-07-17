@@ -3,6 +3,12 @@
 Read this before touching anything. It exists so an agent with zero context
 doesn't re-derive (or re-break) the things below.
 
+> **Current state:** read `docs/HANDOFF.md` immediately after this file — it
+> is the single master handoff (live state, schedules, material policy, open
+> risks) and supersedes all older status/handoff documents. The directory map
+> below includes legacy V1 paths and is not sufficient to identify the current
+> live matching/search authority.
+
 ## What this is
 
 Local-first job-application automation for a single user (Arya). Vue 3 SPA +
@@ -30,12 +36,23 @@ review-queue transition.**
 ## Commands
 
 ```powershell
-uv run pytest -q                      # full suite — needs Postgres+Redis UP
+uv run pytest -q                      # full suite — see DANGER below first
 uv run pytest tests/test_web.py -q    # route tests — no live services needed
 cd frontend; npx vite build           # rebuild SPA (npm install --include=dev first time)
 uv run autoapply start --check        # print startup plan without starting
 uv run alembic upgrade head           # migrations (alembic.ini at repo root)
 ```
+
+> **DANGER — the full suite mutates the LIVE database.** DB-backed suites
+> connect to the same Postgres the app uses (`get_db_url(load_config())`),
+> and on 2026-07-16 a full-suite run **deleted every default-tenant
+> `review_queue` row**, including that day's 32 delivered cards and 8
+> approvals (recovered from `portfolio_decisions` + the version ledger via
+> `tmp/rebuild_review_20260716.py`). Most fixtures clean up only prefixed
+> test tenants, but at least one path touches default-tenant rows. Until the
+> suite is pointed at a disposable database (e.g. `AUTOAPPLY_DB_NAME`
+> override + migrations) do NOT run `uv run pytest -q` against the live DB —
+> run focused suites instead, or back up `review_queue` first.
 
 Known pre-existing failure: `test_filters.py::test_loads_real_config`
 expects a `default` profile in `config/filters.yaml`; the user's config has
@@ -114,6 +131,41 @@ Job data lives in TWO tables: legacy `jobs` (ATS batch persists here via
 9. **Use `127.0.0.1`, never `localhost`, for DB/Redis hosts** on this
    machine — IPv6-first resolution + Docker Desktop port proxying makes
    `localhost` connections hang forever instead of failing fast.
+10. **Cover letters never ship template text silently.** (Amended 2026-07-16
+    by user decision; the old rule was "fail closed".) The deterministic
+    evidence-baseline letter MAY ship when all LLM drafts fail quality
+    scoring, but only labeled `deterministic_baseline` end-to-end: document
+    metadata → version ledger → review-card "Template letter" badge
+    (`score_breakdown.materials_quality`). Removing the label, or restoring
+    an unlabeled fallback, is a regression. A missing artifact with a visible
+    retryable error is still acceptable; a generic fabricated letter is not.
+11. **Match score is not candidacy probability.** Preserve shared clearance,
+    staffing, minimum-display-score, HN unknown-pay, startup, entry-signal, and
+    high-selectivity adjustments documented in
+    `docs/FUNNEL_IDENTITY_HANDOFF.md` until outcome data justifies replacing
+    them.
+12. **One portfolio slot per (company, title-variant).** Workplace/region
+    qualifiers ("- Remote", "US", "AMER") are stripped only from the END of
+    the normalized title when grouping; comma-suffixed specializations are
+    real roles and must not merge. Suppressions persist as
+    `title_variant_duplicate`. This is a selection policy, not an identity
+    merge — nothing is deleted.
+13. **Artifact paths must exist on disk when recorded.** PDF conversion is
+    verified (`_verify_pdf_written` in `src/documents/pdf_converter.py`);
+    do not re-trust converter return values.
+14. **Cover-letter word thresholds move together** in
+    `src/generation/cover_letter.py::_length_window_for` and
+    `src/generation/validator.py::validate_cover_letter_document`
+    (currently min 180 / target 240 / max 340 per page). A quality warning
+    that fires on 100% of output is a bug, not a standard.
+15. **No automated LinkedIn access.** The account was flagged once. The web
+    UI session status is passive (disk-only) by default; a real browser probe
+    requires an explicit user refresh. No scheduled task may touch LinkedIn.
+16. **Company display names come from the ATS payload**, sanitized of
+    zero-width characters (Greenhouse: flat `company_name`), with the board
+    slug only as last resort. Slug-cased names in letters ("Documocareers")
+    shipped in real drafts once; `scripts/fix_company_display_names.py`
+    repairs stored rows.
 
 ## Conventions
 
@@ -128,6 +180,12 @@ Job data lives in TWO tables: legacy `jobs` (ATS batch persists here via
   `docs/DECISIONS.md`, infra topology in `docs/INFRASTRUCTURE.md`.
 
 ## History / context
+
+2026-07-11 funnel/identity work: before changing outcome analytics, canonical
+job matching, or legacy source uniqueness, read
+`docs/FUNNEL_IDENTITY_HANDOFF.md`. Duplicate clusters are suggestions only and
+must never destructively merge fuzzy matches. Funnel events are append-only and
+idempotent; prepared/queued work is not an applied event.
 
 Phases 1–18 complete (see `docs/PHASE_HISTORY.md`). 2026-07-01 session:
 fixed region-leak + substring location bugs, unsorted results, added board

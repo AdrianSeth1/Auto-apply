@@ -20,6 +20,7 @@ Where:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,6 +42,19 @@ DEFAULT_WEIGHTS = {
     "keyword_similarity": 0.35,
     "rule_bonus": 0.20,
 }
+
+_STARTUP_COMPANIES = {
+    "alloy", "anthropic", "attio", "baseten", "clerk", "cohere", "commure",
+    "cursor", "descope", "doppel", "elevenlabs", "fireworks ai", "harvey",
+    "hex", "highnote", "hightouch", "instabase", "langchain", "llamaindex",
+    "merge", "modal", "neon", "perplexity", "pinecone", "planetscale", "render",
+    "sierra", "supabase", "together ai", "vanta", "weaviate",
+}
+
+_HIGH_SELECTIVITY_COMPANIES = {"anthropic", "openai", "palantir"}
+_ENTRY_TITLE_SIGNALS = re.compile(
+    r"(?i)\b(entry|junior|jr\.?|associate|new\s+grad|early\s+career|university)\b"
+)
 
 
 @dataclass
@@ -194,7 +208,7 @@ def score_job(
         + w.get("keyword_similarity", 0.35) * breakdown.keyword_similarity
         + w.get("rule_bonus", 0.20) * breakdown.rule_bonus
     )
-    breakdown.final_score = round(raw_score * breakdown.quality_multiplier, 4)
+    breakdown.final_score = round(min(raw_score * breakdown.quality_multiplier, 1.0), 4)
 
     return breakdown
 
@@ -269,6 +283,29 @@ def _compute_quality_multiplier(job: RawJob) -> float:
         ``first_published``/``updated_at``, or Lever's ``createdAt``.
     """
     multiplier = 1.0
+
+    company_key = re.sub(r"[^a-z0-9]+", " ", (job.company or "").lower()).strip()
+    if job.source == "hn" or company_key in _STARTUP_COMPANIES:
+        job.raw_data["employer_type"] = "startup"
+        multiplier *= 1.08
+    else:
+        job.raw_data["employer_type"] = "established_or_unknown"
+
+    # Brand-name roles often look perfect lexically while requiring a much
+    # stronger experience signal than the title exposes. Keep explicit
+    # new-grad/associate roles competitive; down-rank unmarked roles at the
+    # most selective employers instead of pretending keyword fit equals
+    # interview likelihood.
+    if company_key in _HIGH_SELECTIVITY_COMPANIES and not _ENTRY_TITLE_SIGNALS.search(
+        job.title or ""
+    ):
+        job.raw_data["candidacy_signal"] = "high_selectivity_no_entry_signal"
+        multiplier *= 0.72
+    elif _ENTRY_TITLE_SIGNALS.search(job.title or ""):
+        job.raw_data["candidacy_signal"] = "explicit_entry_signal"
+        multiplier *= 1.08
+    else:
+        job.raw_data["candidacy_signal"] = "neutral"
 
     desc_len = len(job.description or "")
     if desc_len < 100:

@@ -12,8 +12,6 @@ process) and verify:
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 from pydantic import ValidationError
 
@@ -46,6 +44,7 @@ def test_task_registered_in_celery_app(name: str) -> None:
         ("application.fill", "application"),
         ("application.submit", "application"),
         ("orchestration.plan_run", "search"),
+        ("orchestration.portfolio_run", "search"),
         ("notifications.morning_digest", "maintenance"),
         ("maintenance.status_sync", "maintenance"),
         ("maintenance.cache_eviction", "maintenance"),
@@ -74,6 +73,17 @@ def test_search_refresh_accepts_valid_payload() -> None:
     assert out["task"] == "search.refresh"
     assert out["query_id"] == "q1"
     assert out["source"] == "greenhouse"
+
+
+def test_legacy_plan_runner_rejects_v2_payload_before_execution() -> None:
+    with pytest.raises((TypeError, ValidationError)):
+        task_kinds.orchestration_plan_run.apply(
+            kwargs={
+                "target_ids": ["ai-implementation"],
+                "pipeline_version": "v2",
+                "dry_run": True,
+            }
+        ).get()
 
 
 def test_materials_generate_defaults_to_resume_and_cover_letter() -> None:

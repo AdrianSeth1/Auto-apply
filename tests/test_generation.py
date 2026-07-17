@@ -5,6 +5,7 @@ from pathlib import Path
 from src.documents.templates import default_manifest
 from src.generation.cover_letter import (
     _clean_llm_cover_letter_output,
+    _cover_letter_job_focus,
     _cover_letter_quality_issues,
     _format_education_brief,
     _generate_template,
@@ -1119,6 +1120,38 @@ class TestGenerateTemplate:
         text = _generate_template(job, _PROFILE["identity"], [])
         assert "TestCo" in text
 
+    def test_template_strips_html_and_skips_marketing_heading_as_focus(self):
+        job = _make_job(
+            title="Professional Services Consultant",
+            description="<p>You're a builder, not a maintainer.</p>",
+        )
+        job.requirements = JobRequirements(
+            responsibilities=[
+                "<p>You're a builder, not a maintainer.</p>",
+                "<p>Implement and configure customer workflows across teams.</p>",
+            ]
+        )
+
+        focus = _cover_letter_job_focus(
+            job, {"role_type": "customer_implementation"}
+        )
+        text = _generate_template(
+            job,
+            _PROFILE["identity"],
+            ["At Acme Corp, built workflow automation for a customer-facing tool."],
+            _PROFILE,
+        )
+
+        assert focus == "implement and configure customer workflows across teams"
+        assert "<p>" not in text
+        assert "You're a builder" not in text
+        assert "customer discovery" in _generate_template(
+            _make_job(title="Professional Services Consultant"),
+            _PROFILE["identity"],
+            ["At Acme Corp, built workflow automation for a customer-facing tool."],
+            _PROFILE,
+        )
+
     def test_infers_capability_buckets_for_software_development_test(self):
         job = _make_job(
             company="General Dynamics Mission Systems-Canada",
@@ -1212,7 +1245,7 @@ class TestGenerateTemplate:
 
         assert "repeated_raw_job_title:2" in issues
 
-    def test_invalid_llm_cover_letter_response_falls_back_to_template(self, tmp_path):
+    def test_invalid_llm_cover_letter_response_uses_grounded_baseline(self, tmp_path):
         from unittest.mock import patch
 
         bad_response = (
@@ -1229,11 +1262,10 @@ class TestGenerateTemplate:
                 _PROFILE,
                 output_dir=tmp_path,
                 use_llm=True,
-        )
+            )
 
-        assert "Please paste the system instructions" not in result["text"]
-        assert "backend engineering internship" in result["text"]
-        assert result["docx"].exists()
+        assert "I am applying" in result["text"]
+        assert "Please paste" not in result["text"]
 
     def test_rejects_codex_transcript_as_cover_letter(self):
         transcript = "OpenAI Codex v0.118.0\nuser\nSystem instructions...\ntokens used\n123"
@@ -1245,8 +1277,8 @@ class TestGenerateTemplate:
         else:
             raise AssertionError("Expected invalid Codex transcript to be rejected")
 
-    def test_cover_letter_asks_llm_to_shorten_when_pdf_overflows(self, tmp_path):
-        """页数过多时应该把 length feedback 传给 LLM 让它重写更短，而不是砍段落。"""
+    def test_cover_letter_fits_without_extra_llm_retry(self, tmp_path):
+        """Page fitting must not add a third LLM attempt after best-of-two generation."""
         from unittest.mock import patch
 
         from src.documents.templates import default_manifest
@@ -1326,9 +1358,8 @@ class TestGenerateTemplate:
                 use_llm=True,
             )
 
-        assert llm_feedback, "expected LLM to be asked for a shorter draft"
-        assert "SHORTER" in llm_feedback[0]
-        assert len(final_doc.paragraphs) == 3
+        assert llm_feedback == []
+        assert len(final_doc.paragraphs) < 5
 
 
 class TestGenerationVersions:

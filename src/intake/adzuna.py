@@ -36,6 +36,34 @@ logger = logging.getLogger("autoapply.intake.adzuna")
 
 BASE_URL = "https://api.adzuna.com/v1/api/jobs"
 
+# 2026-07-11: Adzuna's free-text `what` search surfaces a lot of staffing-
+# agency / body-shop spam that doesn't represent a real single employer
+# ("Info Way Solutions", "Accentuate Staffing", "Futuremindz llc", "Digital
+# Minds Global Technologies") -- those postings are the agency re-listing
+# someone else's req, not a job you can apply to directly. This is a
+# case-insensitive SUBSTRING match against the company display name, so it
+# also catches variants ("XYZ Staffing Solutions", "ABC Consultancy Inc").
+# Callers can extend this via ``adzuna.company_blocklist`` in
+# config/settings.yaml; that list is unioned with these defaults, never
+# replaces them.
+DEFAULT_COMPANY_BLOCKLIST = frozenset(
+    {
+        "staffing",
+        "recruiting",
+        "consultanc",  # consultancy / consultancies
+        "solutions llc",
+        "global services",
+        "technologies inc",
+        "talent",
+        "next step systems",
+    }
+)
+
+
+def _company_is_blocklisted(company: str, blocklist: frozenset[str] | set[str]) -> bool:
+    lowered = company.lower()
+    return any(term in lowered for term in blocklist)
+
 
 class AdzunaScraper:
     """Scraper for the Adzuna job search API."""
@@ -73,6 +101,7 @@ class AdzunaScraper:
         location: str = "",
         page: int = 1,
         results_per_page: int = 50,
+        company_blocklist: frozenset[str] | set[str] | None = None,
     ) -> list[RawJob]:
         """Fetch one page of Adzuna search results for a keyword.
 
@@ -81,9 +110,12 @@ class AdzunaScraper:
             location: Free-text location filter (maps to ``where``).
             page: 1-indexed result page.
             results_per_page: Page size (Adzuna caps this per-plan).
+            company_blocklist: Extra case-insensitive substrings to drop on
+                top of :data:`DEFAULT_COMPANY_BLOCKLIST` (staffing-agency
+                spam). Pass an empty set/``None`` to use just the defaults.
 
         Returns:
-            List of normalized RawJob objects.
+            List of normalized RawJob objects, staffing-agency spam removed.
         """
         url = f"{BASE_URL}/{self.country}/search/{page}"
         params: dict[str, str | int] = {
@@ -123,14 +155,27 @@ class AdzunaScraper:
         if not isinstance(results, list):
             raise ScraperError("Unexpected Adzuna response shape")
 
+        blocklist = DEFAULT_COMPANY_BLOCKLIST | set(company_blocklist or ())
+
         jobs = []
+        dropped = 0
         for item in results:
             try:
-                jobs.append(self._parse_job(item))
+                job = self._parse_job(item)
             except Exception as e:
                 logger.warning("Skipping malformed Adzuna job %s: %s", item.get("id"), e)
+                continue
+            if _company_is_blocklisted(job.company, blocklist):
+                dropped += 1
+                continue
+            jobs.append(job)
 
-        logger.info("Fetched %d jobs from Adzuna (keyword=%r)", len(jobs), keyword)
+        logger.info(
+            "Fetched %d jobs from Adzuna (keyword=%r); dropped %d as staffing-agency spam",
+            len(jobs),
+            keyword,
+            dropped,
+        )
         return jobs
 
     def _parse_job(self, item: dict) -> RawJob:
@@ -169,5 +214,5 @@ class AdzunaScraper:
             description=description,
             application_url=application_url,
             ats_type="unknown",
-            raw_data=item,
+            raw_data={**item, "description_completeness": "snippet"},
         )

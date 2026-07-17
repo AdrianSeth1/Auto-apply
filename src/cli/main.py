@@ -12,17 +12,49 @@ Usage:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import click
 
 
 def _setup_logging(verbose: bool) -> None:
-    """Configure logging for CLI usage."""
+    """Configure logging for CLI usage.
+
+    This is what `autoapply start` (web + worker + beat) runs under, so
+    it's also what's responsible for `config/settings.yaml`'s
+    ``logging.file``. Until 2026-07-11 that key was pure dead config --
+    nothing anywhere in the codebase ever built a ``FileHandler`` from it,
+    so overnight-run failures went nowhere (found while debugging an
+    orphaned-review-queue bug where the only evidence was a missing
+    ``logs/`` directory). Console output must keep working even if file
+    logging setup fails for any reason (permissions, disk full, etc.).
+    """
     level = logging.DEBUG if verbose else logging.INFO
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+
+    try:
+        from src.core.config import load_config
+
+        log_cfg = load_config().get("logging", {}) or {}
+        log_file = log_cfg.get("file")
+        if log_file:
+            log_path = Path(log_file)
+            # FileHandler does NOT create missing parent directories --
+            # it just raises FileNotFoundError, which prior code paths
+            # were swallowing. Create it up front.
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+    except Exception:  # noqa: BLE001 -- file logging is best-effort
+        logging.getLogger(__name__).warning(
+            "File logging setup failed; continuing with console-only logging",
+            exc_info=True,
+        )
+
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
+        handlers=handlers,
     )
 
 

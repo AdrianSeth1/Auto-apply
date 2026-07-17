@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src.core.models import (
@@ -128,9 +128,10 @@ class JobIndexStore:
         company: str,
         canonical_url: str | None = None,
     ) -> JobPosting:
+        normalized_source = source.strip().lower()
         stmt = select(JobPosting).where(
             JobPosting.tenant_id == self.tenant_id,
-            JobPosting.source == source,
+            func.lower(func.trim(JobPosting.source)) == normalized_source,
             JobPosting.source_id == source_id,
         )
         existing = self.session.execute(stmt).scalar_one_or_none()
@@ -143,7 +144,7 @@ class JobIndexStore:
 
         posting = JobPosting(
             tenant_id=self.tenant_id,
-            source=source,
+            source=normalized_source,
             source_id=source_id,
             company=company,
             canonical_url=canonical_url,
@@ -248,6 +249,8 @@ class JobIndexStore:
         application_url: str | None,
         raw_data: dict | None,
     ) -> JobSnapshot:
+        from src.jobs.identity import canonical_fingerprint
+
         snapshot = JobSnapshot(
             tenant_id=self.tenant_id,
             posting_id=posting.id,
@@ -266,6 +269,12 @@ class JobIndexStore:
         self.session.flush()
         posting.latest_snapshot_id = snapshot.id
         posting.last_checked_at = snapshot.scraped_at
+        posting.canonical_fingerprint = canonical_fingerprint(
+            company=posting.company,
+            title=title,
+            location=location,
+            application_url=application_url or posting.canonical_url,
+        )
         return snapshot
 
     # -- Refresh task queue --------------------------------------------

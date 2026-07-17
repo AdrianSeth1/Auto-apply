@@ -100,9 +100,10 @@ def test_search_maps_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     assert job.location == "Savage, Anne Arundel County"
     assert job.employment_type == "fulltime"
     assert job.application_url == LOCKHEED_JOB["redirect_url"]
-    assert job.raw_data == LOCKHEED_JOB
+    assert job.raw_data == {**LOCKHEED_JOB, "description_completeness": "snippet"}
     # "created" preserved for the scorer's ghost-age check.
     assert job.raw_data["created"] == "2026-06-22T22:29:57Z"
+    assert job.raw_data["description_completeness"] == "snippet"
 
     call = client.calls[0]
     assert call["url"] == "https://api.adzuna.com/v1/api/jobs/us/search/1"
@@ -257,9 +258,21 @@ class _StubAdzunaScraper:
     def __exit__(self, *_exc: Any) -> None:
         pass
 
-    def search(self, *, keyword: str, location: str, results_per_page: int) -> list[Any]:
+    def search(
+        self,
+        *,
+        keyword: str,
+        location: str,
+        results_per_page: int,
+        company_blocklist: Any = None,
+    ) -> list[Any]:
         self.search_calls.append(
-            {"keyword": keyword, "location": location, "results_per_page": results_per_page}
+            {
+                "keyword": keyword,
+                "location": location,
+                "results_per_page": results_per_page,
+                "company_blocklist": company_blocklist,
+            }
         )
         from src.intake.schema import RawJob
 
@@ -324,17 +337,17 @@ def test_search_adzuna_queries_once_per_keyword(monkeypatch: pytest.MonkeyPatch)
     assert len(result) == 2
 
 
-def test_search_adzuna_caps_calls_at_ten(monkeypatch: pytest.MonkeyPatch):
+def test_search_adzuna_caps_calls_at_fifteen(monkeypatch: pytest.MonkeyPatch):
     from src.application import jobs as jobs_module
 
     monkeypatch.setenv("AUTOAPPLY_ADZUNA_KEY", "secret")
     monkeypatch.setattr("src.intake.adzuna.AdzunaScraper", _StubAdzunaScraper)
-    many_keywords = [f"kw{i}" for i in range(15)]
+    many_keywords = [f"kw{i}" for i in range(20)]
     with patch("src.application.jobs.load_config", return_value=_adzuna_config()):
         result = jobs_module._search_adzuna(many_keywords, "Remote")
 
-    assert len(_StubAdzunaScraper.instances[0].search_calls) == 10
-    assert len(result) == 10
+    assert len(_StubAdzunaScraper.instances[0].search_calls) == 15
+    assert len(result) == 15
 
 
 def test_search_adzuna_no_keywords_makes_one_broad_call(monkeypatch: pytest.MonkeyPatch):
